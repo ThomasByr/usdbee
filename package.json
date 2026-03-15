@@ -25,6 +25,7 @@
     "three": "^0.183.2"
   },
   "devDependencies": {
+    "@release-it/bumper": "^7.0.5",
     "@sveltejs/adapter-static": "^3.0.6",
     "@sveltejs/kit": "^2.9.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
