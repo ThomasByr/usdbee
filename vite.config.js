@@ -44,5 +44,8 @@ export default defineConfig(async () => ({
         }
       }
     }
+  },
+  optimizeDeps: {
+    exclude: ["@ffmpeg/ffmpeg", "@ffmpeg/util"]
   }
 }));

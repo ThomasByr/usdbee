@@ -4,6 +4,7 @@ mod models;
 mod omniverse;
 mod parser;
 
+use tauri::Emitter;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     Manager,
@@ -15,8 +16,14 @@ fn build_system_menu(app: &tauri::AppHandle) -> tauri::menu::Menu<tauri::Wry> {
         .build(app)
         .unwrap();
 
+    let export_item = MenuItemBuilder::with_id("file_export", "Export...")
+        .accelerator("CmdOrCtrl+E")
+        .build(app)
+        .unwrap();
+
     let file_submenu = SubmenuBuilder::new(app, "File")
         .item(&open_item)
+        .item(&export_item)
         .build()
         .unwrap();
 
@@ -40,11 +47,17 @@ pub fn run() {
             app.set_menu(menu)?;
 
             app.on_menu_event(move |app_handle, event| {
+                println!("Menu event: {:?}", event.id());
                 if event.id() == "file_open" {
                     let app_clone = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
                         let _ = commands::trigger_open_usd_dialog(app_clone).await;
                     });
+                } else if event.id() == "file_export" {
+                    println!("Emitting open-export-modal to frontend...");
+                    if let Err(e) = app_handle.emit("open-export-modal", "show") {
+                        println!("Failed to emit open-export-modal: {}", e);
+                    }
                 }
             });
 
@@ -54,6 +67,7 @@ pub fn run() {
             commands::trigger_open_usd_dialog,
             commands::set_fallback_color,
             commands::read_file_bytes,
+            commands::save_file_bytes,
             omniverse::set_omniverse_url,
             omniverse::get_omniverse_url
         ])
