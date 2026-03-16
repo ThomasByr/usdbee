@@ -1,9 +1,8 @@
 # <img src="app-icon.png" alt="USDBEE Logo" width="32" height="32" /> USDBEE
 
-<video controls autoplay loop muted playsinline poster="static/demo.png" width="720">
-  <source src="static/demo.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
+<p align="center">
+  <img src="static/demo.webp" alt="USDBEE Demo" width="480" />
+</p>
 
 > Lightweight (<10 MB) USD viewer built with Rust, Tauri, Svelte, and Three.js.
 
