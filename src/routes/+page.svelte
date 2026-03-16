@@ -1,6 +1,7 @@
 <script lang="ts">
   import "./page.css";
   import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+  import { save } from "@tauri-apps/plugin-dialog";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
@@ -11,6 +12,9 @@
   import SceneTab from "$lib/components/SceneTab.svelte";
   import RenderingTab from "$lib/components/RenderingTab.svelte";
   import SettingsTab from "$lib/components/SettingsTab.svelte";
+  import ExportModal from "$lib/components/ExportModal.svelte";
+  import { FFmpeg } from "@ffmpeg/ffmpeg";
+  import { toBlobURL } from "@ffmpeg/util";
   import * as THREE from "three";
   import { USDLoader } from "three/addons/loaders/USDLoader.js";
   import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -33,13 +37,13 @@
   > | null>(null);
 
   let canvas: HTMLCanvasElement;
-  let renderer: THREE.WebGLRenderer;
+  let renderer = $state.raw<THREE.WebGLRenderer>() as THREE.WebGLRenderer;
   let scene = $state.raw<THREE.Scene | null>(null);
-  let camera: THREE.PerspectiveCamera;
-  let controls: OrbitControls;
+  let camera = $state.raw<THREE.PerspectiveCamera>() as THREE.PerspectiveCamera;
+  let controls = $state.raw<OrbitControls>() as OrbitControls;
   let loadedGroup = $state.raw<THREE.Group | null>(null);
   let animationFrameId: number;
-  let mixer: THREE.AnimationMixer | null = null;
+  let mixer: THREE.AnimationMixer | null = $state.raw(null);
   let clock: THREE.Clock;
 
   // Animation Control State
@@ -105,6 +109,10 @@
   let isResizing = $state<boolean>(false);
   let filterText = $state<string>("");
   let modalError = $state<string | null>(null);
+  let showExportModal = $state<boolean>(false);
+  let isExporting = $state<boolean>(false);
+  let exportProgress = $state<number>(0);
+  let exportStage = $state<string>("Exporting...");
 
   // Keybindings State
   let keybindings = $state({
@@ -115,7 +123,7 @@
     turnLeft: "a",
     turnRight: "e",
     up: " ",
-    down: "control",
+    down: "shift",
   });
   let keysPressed = new Set<string>();
 
@@ -174,6 +182,209 @@
 
   function closeErrorModal() {
     modalError = null;
+  }
+
+  async function handleExport(detail: any) {
+    if (detail instanceof CustomEvent) detail = detail.detail;
+    console.log("handleExport called with", detail);
+    const { format, quality, resolution, bgTransparent, loop } = detail;
+    isExporting = true;
+    exportProgress = 0;
+    exportStage = "Exporting...";
+
+    // Save current state
+    const oldWidth = renderer.domElement.width;
+    const oldHeight = renderer.domElement.height;
+    const oldAspect = camera.aspect;
+    const oldClearAlpha = renderer.getClearAlpha();
+    const oldClearColor = renderer.getClearColor(new THREE.Color());
+    const oldStyleWidth = renderer.domElement.style.width;
+    const oldStyleHeight = renderer.domElement.style.height;
+    const oldDisplay = renderer.domElement.style.display;
+
+    // Apply export settings
+    renderer.domElement.style.display = "none";
+    renderer.setSize(resolution.width, resolution.height, false);
+    camera.aspect = resolution.width / resolution.height;
+    camera.updateProjectionMatrix();
+
+    if (format === "png" && bgTransparent) {
+      renderer.setClearAlpha(0);
+    } else {
+      renderer.setClearAlpha(1);
+    }
+
+    try {
+      if (format === "jpg" || format === "png") {
+        if (detail.timestamp !== undefined && mixer) {
+          mixer.setTime(detail.timestamp);
+        }
+        renderer.render(scene!, camera);
+
+        const mimeType = format === "jpg" ? "image/jpeg" : "image/png";
+        const dataUrl = renderer.domElement.toDataURL(mimeType, format === "jpg" ? quality : undefined);
+        const base64Data = dataUrl.split(",")[1];
+
+        const raw = window.atob(base64Data);
+        const rawLength = raw.length;
+        const array = new Uint8Array(new ArrayBuffer(rawLength));
+        for (let i = 0; i < rawLength; i++) {
+          array[i] = raw.charCodeAt(i);
+        }
+
+        const path = await save({
+          filters: [
+            {
+              name: "Image",
+              extensions: [format],
+            },
+          ],
+        });
+
+        if (path) {
+          await invoke("save_file_bytes", {
+            path,
+            bytes: Array.from(array),
+          });
+        }
+        showExportModal = false;
+        isExporting = false;
+      } else if (format === "mp4") {
+        const path = await save({
+          filters: [
+            {
+              name: "Video",
+              extensions: ["mp4"],
+            },
+          ],
+        });
+
+        if (path) {
+          exportStage = "Preparing Video Engine...";
+          loadingProgress = { stage: exportStage, percent: 0 };
+          const startTime = detail.mp4Crop ? detail.mp4Crop.start : 0;
+          const endTime = detail.mp4Crop ? detail.mp4Crop.end : animationDuration || 2;
+          const fps = 30;
+          const totalFrames = Math.ceil((endTime - startTime) * fps);
+
+          const ffmpeg = new FFmpeg();
+          ffmpeg.on("progress", ({ progress }) => {
+            const pct = 50 + Math.floor(progress * 50);
+            exportProgress = pct;
+            if (loadingProgress) loadingProgress.percent = pct;
+          });
+
+          const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm";
+          await ffmpeg.load({
+            coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
+            wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
+          });
+
+          exportStage = "Rendering Frames...";
+          loadingProgress = { stage: exportStage, percent: 0 };
+
+          for (let i = 0; i < totalFrames; i++) {
+            const t = startTime + i / fps;
+            if (mixer) mixer.setTime(t);
+            renderer.render(scene!, camera);
+
+            const dataUrl = renderer.domElement.toDataURL("image/jpeg", 0.95);
+            const base64Data = dataUrl.split(",")[1];
+            const raw = window.atob(base64Data);
+            const array = new Uint8Array(new ArrayBuffer(raw.length));
+            for (let j = 0; j < raw.length; j++) array[j] = raw.charCodeAt(j);
+
+            const frameName = `frame_${i.toString().padStart(5, "0")}.jpg`;
+            await ffmpeg.writeFile(frameName, array);
+
+            const pct = Math.floor((i / totalFrames) * 50);
+            exportProgress = pct;
+            if (loadingProgress) loadingProgress.percent = pct;
+
+            // Yield cleanly to Svelte UI
+            await new Promise((r) => setTimeout(r, 0));
+          }
+
+          exportStage = "Encoding MP4...";
+          if (loadingProgress) {
+            loadingProgress.stage = exportStage;
+            loadingProgress.percent = 50;
+          }
+
+          const ffmpegArgs = [
+            "-framerate",
+            `${fps}`,
+            "-i",
+            "frame_%05d.jpg",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+          ];
+
+          if (loop) {
+            // Adds moov atom flag to hint at endless repetition for compatible players
+            ffmpegArgs.push("-movflags", "faststart+frag_keyframe+empty_moov");
+            ffmpegArgs.push("-f", "mp4");
+            // Standard metadata loop instruction for Quicktime/Web players
+            ffmpegArgs.push("-metadata", "loop=1");
+          }
+
+          ffmpegArgs.push("output.mp4");
+
+          await ffmpeg.exec(ffmpegArgs);
+
+          const mp4Data = await ffmpeg.readFile("output.mp4");
+          const array = new Uint8Array(mp4Data as Uint8Array);
+
+          exportStage = "Saving File...";
+          if (loadingProgress) {
+            loadingProgress.stage = exportStage;
+            loadingProgress.percent = 100;
+          }
+
+          await invoke("save_file_bytes", {
+            path,
+            bytes: Array.from(array),
+          });
+
+          try {
+            for (let i = 0; i < totalFrames; i++)
+              await ffmpeg.deleteFile(`frame_${i.toString().padStart(5, "0")}.jpg`);
+            await ffmpeg.deleteFile("output.mp4");
+          } catch (e) {}
+
+          loadingProgress = null;
+          showExportModal = false;
+          isExporting = false;
+        } else {
+          isExporting = false;
+        }
+      }
+    } catch (e: any) {
+      openErrorModal(e.toString());
+      isExporting = false;
+    } finally {
+      // Restore
+      const canvasParent = renderer.domElement.parentElement;
+      if (canvasParent) {
+        renderer.setSize(canvasParent.clientWidth, canvasParent.clientHeight, false);
+        camera.aspect = canvasParent.clientWidth / canvasParent.clientHeight;
+      } else {
+        renderer.setSize(oldWidth, oldHeight, false);
+        camera.aspect = oldAspect;
+      }
+      camera.updateProjectionMatrix();
+      renderer.setClearAlpha(oldClearAlpha);
+      renderer.setClearColor(oldClearColor, oldClearAlpha);
+      renderer.domElement.style.width = oldStyleWidth;
+      renderer.domElement.style.height = oldStyleHeight;
+      renderer.domElement.style.display = oldDisplay;
+
+      if (mixer) {
+        mixer.setTime(animationProgress);
+      }
+    }
   }
 
   let filteredDependencies = $derived(
@@ -372,6 +583,10 @@
         e.preventDefault();
         openUsdFile();
       }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "e") {
+        e.preventDefault();
+        showExportModal = true;
+      }
     };
     const handleGlobalKeyup = (e: KeyboardEvent) => {
       keysPressed.delete(e.key.toLowerCase());
@@ -434,6 +649,10 @@
 
     // Listeners for Rust events
     const unlisteners = [
+      listen("open-export-modal", () => {
+        console.log("RECEIVED open-export-modal from Rust!");
+        showExportModal = true;
+      }),
       listen<string>("usd-load-start", (event) => {
         rootFile = event.payload;
         loadingProgress = { stage: "Starting...", percent: 0 };
@@ -851,6 +1070,12 @@
 
     function animate(time: DOMHighResTimeStamp = 0) {
       animationFrameId = requestAnimationFrame(animate);
+
+      if (showExportModal) {
+        lastFrameTime = time;
+        lastNavTime = performance.now();
+        return;
+      }
 
       if (maxFps > 0 && time > 0) {
         const interval = 1000 / maxFps;
@@ -1578,4 +1803,20 @@
 
 {#if modalError}
   <ErrorModal error={modalError} onClose={closeErrorModal} />
+{/if}
+
+{#if showExportModal}
+  <ExportModal
+    on:close={() => !isExporting && (showExportModal = false)}
+    {renderer}
+    {scene}
+    {camera}
+    {hasAnimation}
+    {animationDuration}
+    {mixer}
+    {isExporting}
+    {exportProgress}
+    {exportStage}
+    on:export={handleExport}
+  />
 {/if}
