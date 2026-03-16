@@ -1548,7 +1548,45 @@
   <aside class="sidebar" style="width: {sidebarWidth}px;">
     <div class="sidebar-header">
       <h2>USDA / Asset Graph</h2>
-      <button class="primary-btn" onclick={openUsdFile}>Open USD...</button>
+      <div class="header-actions">
+        <button class="primary-btn" onclick={openUsdFile} title="Open USD File">
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          </svg>
+          Open
+        </button>
+        <button
+          class="primary-btn"
+          onclick={() => (showExportModal = true)}
+          disabled={loadingProgress !== null || rootFile === null}
+          title="Export Scene"
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+          Export
+        </button>
+      </div>
     </div>
 
     <div class="tab-bar">

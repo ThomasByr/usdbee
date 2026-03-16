@@ -90,10 +90,24 @@ body,
   border-radius: 4px;
   cursor: pointer;
   font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
-.primary-btn:hover {
+.primary-btn:hover:not(:disabled) {
   background: #1177bb;
+}
+
+.primary-btn:disabled {
+  background: #333333;
+  color: #666666;
+  cursor: not-allowed;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .reset-btn {
