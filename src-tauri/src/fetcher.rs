@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 pub fn get_usdbee_cache_dir() -> PathBuf {
-    let mut dir = dirs::data_local_dir().unwrap_or_else(|| std::env::temp_dir());
+    let mut dir = std::env::temp_dir();
     dir.push("usdbee");
     dir.push("cache");
     dir
