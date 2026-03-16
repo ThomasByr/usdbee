@@ -225,3 +225,8 @@ pub async fn set_fallback_color(path: String, color: String) -> Result<String, S
 pub async fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
     std::fs::read(&path).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub async fn save_file_bytes(path: String, bytes: Vec<u8>) -> Result<(), String> {
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())
+}
