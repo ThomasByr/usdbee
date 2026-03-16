@@ -1,6 +1,6 @@
 # <img src="app-icon.png" alt="USDBEE Logo" width="32" height="32" /> USDBEE
 
-<static/demo.mp4>
+<https://github.com/ThomasByr/usdbee/raw/refs/heads/main/static/demo.mp4>
 
 > Lightweight (<10 MB) USD viewer built with Rust, Tauri, Svelte, and Three.js.
 
