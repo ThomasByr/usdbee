@@ -53,6 +53,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::trigger_open_usd_dialog,
             commands::set_fallback_color,
+            commands::read_file_bytes,
             omniverse::set_omniverse_url,
             omniverse::get_omniverse_url
         ])
