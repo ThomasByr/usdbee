@@ -1,6 +1,8 @@
 # <img src="app-icon.png" alt="USDBEE Logo" width="32" height="32" /> USDBEE
 
-> Lightweight (5.9 MB) USD viewer built with Rust, Tauri, Svelte, and Three.js.
+<video src="static/demo.mp4" autoplay loop muted playsinline style="max-width: 50%; border-radius: 8px;"></video>
+
+> Lightweight (<10 MB) USD viewer built with Rust, Tauri, Svelte, and Three.js.
 
 [![Rust](https://img.shields.io/badge/Rust-1.85+-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Tauri](https://img.shields.io/badge/Tauri-2.10+-blue?logo=tauri&logoColor=white)](https://tauri.app/)
@@ -11,6 +13,7 @@
 
 1. [Installation](#installation)
 2. [Usage](#usage)
+3. [Limitations](#limitations)
 
 ## Installation
 
@@ -82,7 +85,13 @@ This will create the application binaries in the `src-tauri/target/release` dire
 Run the application with:
 
 ```bash
-& ./src-tauri/target/release/usdbee  # .exe on Windows
+./src-tauri/target/release/usdbee
+```
+
+or
+
+```ps1
+& ./src-tauri/target/release/usdbee.exe
 ```
 
 You can also run the application in development mode with:
@@ -94,3 +103,22 @@ npm run tauri dev
 ## Usage
 
 Run the application and use <kbd><kbd>Ctrl</kbd>+<kbd>O</kbd></kbd> to load a USD file.
+
+Navigate the 3D view with your keyboard and mouse. Check the "SETTINGS" tab to customize the controls.
+
+## Limitations
+
+[Three.js USD Composer](https://threejs.org/docs/index.html?q=USD#USDComposer) is used as the primary USD parser and renderer. It supports a subset of USD features, and some complex USD files may not render correctly, throw errors, or fail to load. The application is primarily intended for simple USD files (.usdz, .usd, .usda) containing basic geometry and materials.
+
+Patches are implemented on a best-effort basis in [usdUtils.ts](src/lib/three/usdUtils.ts).
+
+### Note on Tauri Asset Sandboxing
+
+USDZ files are unpacked at runtime into the operating system's native temporary directories. To allow the Three.js `fetch` / `USDLoader` to physically read these extracted geometries, the Tauri `asset://` protocol requires explicit permission scopes.
+
+If you are modifying where files are cached (e.g., in `src-tauri/src/fetcher.rs`), ensure the target directory is whitelisted via `$TEMP/**` or `$LOCAL_DATA/**` in the `assetProtocol.scope` inside `tauri.conf.json` to prevent silent `403 Forbidden` fetches and empty 3D scenes.
+
+Read more:
+[Tauri Asset Protocol Scopes](https://v2.tauri.app/security/scope/),
+[Tauri Asset Protocol Configuration](https://v2.tauri.app/reference/config/#assetprotocol),
+[Tauri Path Variables](https://v2.tauri.app/plugin/file-system/#security)
