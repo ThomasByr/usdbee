@@ -1,7 +1,7 @@
 # <img src="app-icon.png" alt="USDBEE Logo" width="32" height="32" /> USDBEE
 
 <p align="center">
-  <img src="static/demo.webp" alt="USDBEE Demo" width="480" />
+  <img src="assets/images/demo.webp" alt="USDBEE Demo" width="480" />
 </p>
 
 > Lightweight (<10 MB) USD viewer built with Rust, Tauri, Svelte, and Three.js.
@@ -104,9 +104,17 @@ npm run tauri dev
 
 ## Usage
 
-Run the application and use <kbd><kbd>Ctrl</kbd>+<kbd>O</kbd></kbd> to load a USD file.
+Run the application and use <kbd><kbd>Ctrl</kbd>+<kbd>O</kbd></kbd> to load a USD file. Press <kbd><kbd>Ctrl</kbd>+<kbd>E</kbd></kbd> to export a render view of the current scene.
 
 Navigate the 3D view with your keyboard and mouse. Check the "SETTINGS" tab to customize the controls.
+
+You can try to load your own USD files. To get the file used in the demo, you can use the [Carbon Frame Bike](https://github.com/usd-wg/assets/tree/main/full_assets/CarbonFrameBike).
+
+```bash
+curl -L -o assets/CarbonFrameBike.usdz https://github.com/usd-wg/assets/raw/refs/heads/main/full_assets/CarbonFrameBike/CarbonFrameBike.usdz
+```
+
+Then open the `assets/CarbonFrameBike.usdz` file in USDBEE.
 
 ## Limitations
 
