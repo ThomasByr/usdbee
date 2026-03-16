@@ -26,7 +26,10 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "**"
+          "**",
+          "/*/**",
+          "$TEMP/**",
+          "$LOCAL_DATA/**"
         ]
       }
     }

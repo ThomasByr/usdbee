@@ -115,7 +115,7 @@ pub fn extract_dependencies(
                     }
                 } else {
                     if let Ok(re_fallback) = BytesRegex::new(
-                        r#"([a-zA-Z0-9_/\.\-\ ]+\.(?:png|jpg|jpeg|exr|tif|tiff|usd|usda|usdc|usdz))"#,
+                        r#"([a-zA-Z0-9_/\\\.\-\ ]+\.(?:png|jpg|jpeg|exr|tif|tiff|usd|usda|usdc|usdz))"#,
                     ) {
                         for caps in re_fallback.captures_iter(&content) {
                             if let Ok(p) = std::str::from_utf8(&caps[1]) {

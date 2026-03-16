@@ -14,5 +14,5 @@ export function formatBytes(bytes: number) {
 }
 
 export function isTexture(path: string) {
-  return /\\.(png|jpe?g|exr|tiff?)$/i.test(path);
+  return /\.(png|jpe?g|exr|tiff?)$/i.test(path);
 }
