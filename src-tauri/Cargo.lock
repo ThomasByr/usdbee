@@ -4703,7 +4703,7 @@ dependencies = [
 
 [[package]]
 name = "usdbee"
-version = "0.2.1-2"
+version = "0.2.1-3"
 dependencies = [
  "dirs 5.0.1",
  "openusd",
