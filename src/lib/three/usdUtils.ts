@@ -99,7 +99,7 @@ export const patchUsdLayerForThree = (layerPath: string, bytes: Uint8Array) => {
 
       let expanded = `def Xform "${instancerName}" {\n`;
       positions.forEach((pos: number[], idx: number) => {
-         expanded += `    def Xform "${protoName}_inst_${idx}" (\n${protoArgs}\n    )\n    {\n        double3 xformOp:translate = (${pos[0]}, ${pos[1]}, ${pos[2]})\n        uniform token[] xformOpOrder = ["xformOp:translate"]\n    }\n`;
+        expanded += `    def Xform "${protoName}_inst_${idx}" (\n${protoArgs}\n    )\n    {\n        double3 xformOp:translate = (${pos[2]}, ${pos[1]}, ${pos[0]})\n        uniform token[] xformOpOrder = ["xformOp:translate"]\n    }\n`;
       });
       expanded += "}\n";
       return expanded;
@@ -131,7 +131,7 @@ export const patchUsdLayerForThree = (layerPath: string, bytes: Uint8Array) => {
   );
 
   // BUGFIX: Allow spinning pyramids by removing custom xform suffixes which Three.js USDLoader ignores for animations
-  patched = patched.replace(/xformOp:transform:[a-zA-Z0-9_]+/g, "xformOp:transform");
+  // patched = patched.replace(/xformOp:transform:[a-zA-Z0-9_]+/g, "xformOp:transform");
 
   return patched !== asText ? textEncoder.encode(patched) : bytes;
 };
