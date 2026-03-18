@@ -745,6 +745,7 @@
                     safePath.replace(/\\/g, "/"),
                     safePath.replace(/\\/g, "/").replace(/^\.\//, ""),
                     safePath.replace(/\\/g, "/").replace(/^\/+/, ""),
+                    safePath.split("/").pop()!?.split("\\").pop()! || "",
                   ]);
 
                   for (const candidatePath of candidatePaths) {
