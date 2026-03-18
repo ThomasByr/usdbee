@@ -82,12 +82,28 @@ export const patchUsdLayerForThree = (layerPath: string, bytes: Uint8Array) => {
   patched = patched.replace(
     /^[ \t]*"([A-Za-z0-9_]+)"[ \t]*(?=[({])/gm,
     (match: string, variantName: string) => {
-      // Keep if explicitly marked as default, or if we have no defaults at all (fallback to show something)
       if (defaultVariants.size === 0 || defaultVariants.has(variantName)) {
         return match.replace(`"${variantName}"`, `def Xform "usdbee_v_${variantName}"`);
       }
-      return match.replace(`"${variantName}"`, `over "usdbee_v_${variantName}"`);
+      return match.replace(`"${variantName}"`, `def Xform "usdbee_v_${variantName}"`);
     },
+  );
+
+  // BUGFIX: Three.js ignores PointInstancer. Expand simple PointInstancers.
+  patched = patched.replace(
+    /def\s+PointInstancer\s+"([^"]+)"\s*\{[\s\S]*?point3f\[\]\s*positions\s*=\s*\[([\s\S]*?)\][\s\S]*?def\s+Xform\s+"([^"]+)"\s*\(([\s\S]*?)\)\s*\{\s*\}\s*\}/g,
+    (match, instancerName, positionsStr, protoName, protoArgs) => {
+      // Create valid def Xforms for each point
+      const positions = Array.from(positionsStr.matchAll(/\(([^)]+)\)/g))
+        .map((m: any) => m[1].split(',').map((n: string) => parseFloat(n.trim())));
+
+      let expanded = `def Xform "${instancerName}" {\n`;
+      positions.forEach((pos: number[], idx: number) => {
+         expanded += `    def Xform "${protoName}_inst_${idx}" (\n${protoArgs}\n    )\n    {\n        double3 xformOp:translate = (${pos[0]}, ${pos[1]}, ${pos[2]})\n        uniform token[] xformOpOrder = ["xformOp:translate"]\n    }\n`;
+      });
+      expanded += "}\n";
+      return expanded;
+    }
   );
 
   // BUGFIX: Three.js ignores subLayers. Append them as dummy references at the end of the file.
@@ -107,6 +123,15 @@ export const patchUsdLayerForThree = (layerPath: string, bytes: Uint8Array) => {
       patched += injections;
     }
   }
+
+  // BUGFIX: Three.js USDLoader incorrectly parses 4x4 matrix nested tuples as 4-element arrays, failing its length === 16 check. Flatten nested tuples into a 16-element array tuple.
+  patched = patched.replace(
+    /matrix4d\s+(xformOp:transform(?:[\w:]*))\s*=\s*\(\s*\(([^)]+)\)\s*,\s*\(([^)]+)\)\s*,\s*\(([^)]+)\)\s*,\s*\(([^)]+)\)\s*\)/g,
+    "matrix4d $1 = ( $2, $3, $4, $5 )"
+  );
+
+  // BUGFIX: Allow spinning pyramids by removing custom xform suffixes which Three.js USDLoader ignores for animations
+  patched = patched.replace(/xformOp:transform:[a-zA-Z0-9_]+/g, "xformOp:transform");
 
   return patched !== asText ? textEncoder.encode(patched) : bytes;
 };
