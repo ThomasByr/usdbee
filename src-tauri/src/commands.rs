@@ -47,7 +47,10 @@ async fn unpack_usdz(path: &str) -> Result<(String, std::path::PathBuf), String>
             out_dir.push("extracted");
             out_dir.push(format!("{:016x}", hash));
 
-            if !out_dir.exists() {
+            if out_dir.exists() {
+                let _ = fs::remove_dir_all(&out_dir);
+            }
+            if true {
                 fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
                 for i in 0..archive.len() {
                     let mut file = match archive.by_index(i) {

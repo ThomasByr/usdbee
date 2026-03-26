@@ -433,6 +433,7 @@
 
             // Fetch the root file
             const rootRes = await fetch(rootUrl);
+            if (!rootRes.ok) throw new Error(`Root fetch failed: HTTP ${rootRes.status} on ${rootUrl}`);
             const rawRootBytes = new Uint8Array(await rootRes.arrayBuffer());
             const rootBytes = patchUsdLayerForThree(rootFile, rawRootBytes);
 
@@ -454,6 +455,7 @@
 
                   const depUrl = convertFileSrc(depInfo.path);
                   const res = await fetch(depUrl);
+                  if (!res.ok) throw new Error(`Dep fetch failed: HTTP ${res.status} on ${depUrl}`);
                   const rawBytes = new Uint8Array(await res.arrayBuffer());
                   const bytes = patchUsdLayerForThree(relPath, rawBytes);
 
@@ -655,6 +657,7 @@
             loadingProgress = null;
           } catch (err: any) {
             console.error("ThreeJS USD Load Error:", err);
+            openErrorModal("Error Rendering USD:\n\n" + err.message);
             loadingProgress = null;
 
             let errMsg = err.message || String(err);
