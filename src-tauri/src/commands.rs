@@ -30,6 +30,46 @@ pub async fn trigger_open_usd_dialog(app: tauri::AppHandle) -> Result<(), String
     Ok(())
 }
 
+async fn unpack_usdz(path: &str) -> Result<(String, std::path::PathBuf), String> {
+    let p_str = path.to_string();
+    let res = tauri::async_runtime::spawn_blocking(
+        move || -> Result<(String, std::path::PathBuf), String> {
+            let p = Path::new(&p_str);
+            let file = fs::File::open(p).map_err(|e| e.to_string())?;
+            let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+            let mut hasher = DefaultHasher::new();
+            p_str.hash(&mut hasher);
+            let hash = hasher.finish();
+
+            let mut out_dir = get_usdbee_cache_dir();
+            out_dir.push("extracted");
+            out_dir.push(format!("{:016x}", hash));
+
+            if !out_dir.exists() {
+                fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+                archive.extract(&out_dir).map_err(|e| e.to_string())?;
+            }
+
+            if archive.len() > 0 {
+                if let Ok(first_file) = archive.by_index(0) {
+                    let f_name = first_file.name().to_string();
+                    let root_file = out_dir.join(f_name);
+                    return Ok((root_file.to_string_lossy().to_string(), out_dir));
+                }
+            }
+            Err("Empty USDZ archive".into())
+        },
+    )
+    .await;
+
+    match res {
+        Ok(Ok(res)) => Ok(res),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(), String> {
     app.emit(
         "usd-load-progress",
@@ -65,42 +105,7 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
         )
         .unwrap();
 
-        let (new_path, out_d) = match tauri::async_runtime::spawn_blocking({
-            let p_str = path.clone();
-            move || -> Result<(String, std::path::PathBuf), String> {
-                let p = Path::new(&p_str);
-                let file = fs::File::open(p).map_err(|e| e.to_string())?;
-                let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-
-                let mut hasher = DefaultHasher::new();
-                p_str.hash(&mut hasher);
-                let hash = hasher.finish();
-
-                let mut out_dir = get_usdbee_cache_dir();
-                out_dir.push("extracted");
-                out_dir.push(format!("{:016x}", hash));
-
-                if !out_dir.exists() {
-                    fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
-                    archive.extract(&out_dir).map_err(|e| e.to_string())?;
-                }
-
-                if archive.len() > 0 {
-                    if let Ok(first_file) = archive.by_index(0) {
-                        let f_name = first_file.name().to_string();
-                        let root_file = out_dir.join(f_name);
-                        return Ok((root_file.to_string_lossy().to_string(), out_dir));
-                    }
-                }
-                Err("Empty USDZ archive".into())
-            }
-        })
-        .await
-        {
-            Ok(Ok(res)) => res,
-            Ok(Err(e)) => return Err(e),
-            Err(e) => return Err(e.to_string()),
-        };
+        let (new_path, out_d) = unpack_usdz(&path).await?;
         path = new_path;
         extracted_dir = Some(out_d);
     }

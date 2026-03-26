@@ -13,14 +13,20 @@
   import RenderingTab from "$lib/components/RenderingTab.svelte";
   import SettingsTab from "$lib/components/SettingsTab.svelte";
   import ExportModal from "$lib/components/ExportModal.svelte";
-  import { FFmpeg } from "@ffmpeg/ffmpeg";
-  import { toBlobURL } from "@ffmpeg/util";
+  import { runExport } from "$lib/three/VideoExporter";
+  import {
+    viewerSettings,
+    loadGraphicsPreferences,
+    saveGraphicsPreferences,
+  } from "$lib/state/viewerSettings.svelte";
+  import {
+    controlsState,
+    loadControlPreferences,
+    saveControlPreferences,
+  } from "$lib/state/controlsState.svelte";
   import * as THREE from "three";
+  import { RendererKit } from "$lib/three/RendererKit.svelte";
   import { USDLoader } from "three/addons/loaders/USDLoader.js";
-  import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-  import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
-  // @ts-ignore
-  import Stats from "three/addons/libs/stats.module.js";
 
   // State
   let rootFile = $state<string | null>(null);
@@ -37,66 +43,18 @@
   > | null>(null);
 
   let canvas: HTMLCanvasElement;
-  let renderer = $state.raw<THREE.WebGLRenderer>() as THREE.WebGLRenderer;
-  let scene = $state.raw<THREE.Scene | null>(null);
-  let camera = $state.raw<THREE.PerspectiveCamera>() as THREE.PerspectiveCamera;
-  let controls = $state.raw<OrbitControls>() as OrbitControls;
-  let loadedGroup = $state.raw<THREE.Group | null>(null);
-  let animationFrameId: number;
-  let mixer: THREE.AnimationMixer | null = $state.raw(null);
-  let clock: THREE.Clock;
 
-  // Animation Control State
-  let hasAnimation = $state<boolean>(false);
-  let isPlayingAnim = $state<boolean>(true);
-  let animationDuration = $state<number>(0);
-  let animationProgress = $state<number>(0);
-  let isDraggingAnim = false;
-
-  // Viewer Settings State
-  let showWireframe = $state(false);
-  let showGrid = $state(true);
-  let showBoundingBox = $state(false);
-  let backgroundColor = $state("#1e1e1e");
+  let viewer = new RendererKit();
   let activeTab = $state<"files" | "scene" | "rendering" | "settings">("files");
 
-  // Scene Stats & Objects State
-  let triangleCount = $state<number>(0);
-  let usdCameras = $state<THREE.Camera[]>([]);
-  let activeCameraIndex = $state<number>(-1);
-
-  // Helpers & Threejs refs
-  let gridHelper = $state.raw<THREE.GridHelper | null>(null);
-  let sceneBox = $state.raw<THREE.Box3>(new THREE.Box3());
-  let boxHelper = $state.raw<THREE.Box3Helper | null>(null);
-  let selectionHelper = $state.raw<THREE.Box3Helper | null>(null);
-  let selectedNode = $state.raw<any | null>(null);
-  let dirLight = $state.raw<THREE.DirectionalLight | null>(null);
-  let ambientLight = $state.raw<THREE.AmbientLight | null>(null);
-  let stats: any = null;
-
   // Rendering Controls
-  let maxFps = $state<number>(60); // 0 = Uncapped
-  let toneExposure = $state<number>(0.4);
-  let ambientIntensity = $state<number>(0.4);
-  let dirIntensity = $state<number>(2.0);
-  let shadowsEnabled = $state<boolean>(true);
-  let renderScale = $state<number>(1.0);
-  let shadowMapSize = $state<number>(2048);
-  let shadowMapType = $state<string>("PCFSoft");
-  let anisotropy = $state<number>(8);
-  let envMapIntensity = $state<number>(1.0);
-  let toneMapping = $state<string>("ACESFilmic");
   let hasShownWindow = false;
 
   // Light Positioning State
   let lightAzimuth = $state<number>(45); // Degrees (-180 to 180)
   let lightElevation = $state<number>(45); // Degrees (0 to 90)
-  let sceneCenter = $state.raw<THREE.Vector3>(new THREE.Vector3(0, 0, 0));
-  let sceneSize = $state<number>(10);
-  let fov = $state<number>(75);
+
   let showFovSlider = $state<boolean>(false);
-  let enableDamping = $state<boolean>(true);
 
   // Hierarchy Tree State
   let expandedNodes = $state<Record<string, boolean>>({});
@@ -115,26 +73,6 @@
   let exportStage = $state<string>("Exporting...");
 
   // Keybindings State
-  let keybindings = $state({
-    forward: "z",
-    backward: "s",
-    left: "q",
-    right: "d",
-    turnLeft: "a",
-    turnRight: "e",
-    up: " ",
-    down: "shift",
-  });
-  let keysPressed = new Set<string>();
-
-  // Control Preferences State
-  let moveSpeedFactor = $state<number>(1.0);
-  let rotSpeedFactor = $state<number>(1.0);
-  let invertMouseX = $state<boolean>(false);
-  let invertMouseY = $state<boolean>(false);
-  let mouseButtonLeft = $state<string>("rotate");
-  let mouseButtonMiddle = $state<string>("zoom");
-  let mouseButtonRight = $state<string>("pan");
 
   let omniverseUrl = $state<string>("http://localhost:34080");
 
@@ -144,36 +82,6 @@
     } catch (e) {
       console.error("Failed to save Omniverse URL:", e);
     }
-  }
-
-  function saveControlPreferences() {
-    localStorage.setItem(
-      "usdbee_controls",
-      JSON.stringify({
-        moveSpeedFactor,
-        rotSpeedFactor,
-        invertMouseX,
-        invertMouseY,
-        mouseButtonLeft,
-        mouseButtonMiddle,
-        mouseButtonRight,
-      }),
-    );
-  }
-
-  function saveGraphicsPreferences() {
-    localStorage.setItem(
-      "usdbee_graphics",
-      JSON.stringify({
-        shadowsEnabled,
-        renderScale,
-        shadowMapSize,
-        shadowMapType,
-        anisotropy,
-        envMapIntensity,
-        toneMapping,
-      }),
-    );
   }
 
   function openErrorModal(msg: string) {
@@ -187,204 +95,46 @@
   async function handleExport(detail: any) {
     if (detail instanceof CustomEvent) detail = detail.detail;
     console.log("handleExport called with", detail);
-    const { format, quality, resolution, bgTransparent, loop } = detail;
+
     isExporting = true;
     exportProgress = 0;
     exportStage = "Exporting...";
 
-    // Save current state
-    const oldWidth = renderer.domElement.width;
-    const oldHeight = renderer.domElement.height;
-    const oldAspect = camera.aspect;
-    const oldClearAlpha = renderer.getClearAlpha();
-    const oldClearColor = renderer.getClearColor(new THREE.Color());
-    const oldStyleWidth = renderer.domElement.style.width;
-    const oldStyleHeight = renderer.domElement.style.height;
-    const oldDisplay = renderer.domElement.style.display;
-
-    // Apply export settings
-    renderer.domElement.style.display = "none";
-    renderer.setSize(resolution.width, resolution.height, false);
-    camera.aspect = resolution.width / resolution.height;
-    camera.updateProjectionMatrix();
-
-    if (format === "png" && bgTransparent) {
-      renderer.setClearAlpha(0);
-    } else {
-      renderer.setClearAlpha(1);
-    }
-
-    try {
-      if (format === "jpg" || format === "png") {
-        if (detail.timestamp !== undefined && mixer) {
-          mixer.setTime(detail.timestamp);
-        }
-        renderer.render(scene!, camera);
-
-        const mimeType = format === "jpg" ? "image/jpeg" : "image/png";
-        const dataUrl = renderer.domElement.toDataURL(mimeType, format === "jpg" ? quality : undefined);
-        const base64Data = dataUrl.split(",")[1];
-
-        const raw = window.atob(base64Data);
-        const rawLength = raw.length;
-        const array = new Uint8Array(new ArrayBuffer(rawLength));
-        for (let i = 0; i < rawLength; i++) {
-          array[i] = raw.charCodeAt(i);
-        }
-
-        const path = await save({
-          filters: [
-            {
-              name: "Image",
-              extensions: [format],
-            },
-          ],
-        });
-
-        if (path) {
-          await invoke("save_file_bytes", {
-            path,
-            bytes: Array.from(array),
-          });
-        }
-        showExportModal = false;
-        isExporting = false;
-      } else if (format === "mp4") {
-        const path = await save({
-          filters: [
-            {
-              name: "Video",
-              extensions: ["mp4"],
-            },
-          ],
-        });
-
-        if (path) {
-          exportStage = "Preparing Video Engine...";
-          loadingProgress = { stage: exportStage, percent: 0 };
-          const startTime = detail.mp4Crop ? detail.mp4Crop.start : 0;
-          const endTime = detail.mp4Crop ? detail.mp4Crop.end : animationDuration || 2;
-          const fps = 30;
-          const totalFrames = Math.ceil((endTime - startTime) * fps);
-
-          const ffmpeg = new FFmpeg();
-          ffmpeg.on("progress", ({ progress }) => {
-            const pct = 50 + Math.floor(progress * 50);
-            exportProgress = pct;
-            if (loadingProgress) loadingProgress.percent = pct;
-          });
-
-          const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm";
-          await ffmpeg.load({
-            coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
-            wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
-          });
-
-          exportStage = "Rendering Frames...";
-          loadingProgress = { stage: exportStage, percent: 0 };
-
-          for (let i = 0; i < totalFrames; i++) {
-            const t = startTime + i / fps;
-            if (mixer) mixer.setTime(t);
-            renderer.render(scene!, camera);
-
-            const dataUrl = renderer.domElement.toDataURL("image/jpeg", 0.95);
-            const base64Data = dataUrl.split(",")[1];
-            const raw = window.atob(base64Data);
-            const array = new Uint8Array(new ArrayBuffer(raw.length));
-            for (let j = 0; j < raw.length; j++) array[j] = raw.charCodeAt(j);
-
-            const frameName = `frame_${i.toString().padStart(5, "0")}.jpg`;
-            await ffmpeg.writeFile(frameName, array);
-
-            const pct = Math.floor((i / totalFrames) * 50);
-            exportProgress = pct;
-            if (loadingProgress) loadingProgress.percent = pct;
-
-            // Yield cleanly to Svelte UI
-            await new Promise((r) => setTimeout(r, 0));
+    await runExport(
+      {
+        renderer: viewer.renderer,
+        scene: viewer.scene!,
+        camera: viewer.camera,
+        mixer: viewer.mixer,
+        animationDuration: viewer.animationDuration,
+        animationProgress: viewer.animationProgress,
+      },
+      detail,
+      {
+        onProgress: (stage, percent) => {
+          exportStage = stage;
+          exportProgress = percent;
+          if (
+            stage.includes("Video") ||
+            stage.includes("Frames") ||
+            stage.includes("Encoding") ||
+            stage.includes("Saving")
+          ) {
+            loadingProgress = { stage, percent };
           }
-
-          exportStage = "Encoding MP4...";
-          if (loadingProgress) {
-            loadingProgress.stage = exportStage;
-            loadingProgress.percent = 50;
-          }
-
-          const ffmpegArgs = [
-            "-framerate",
-            `${fps}`,
-            "-i",
-            "frame_%05d.jpg",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-          ];
-
-          if (loop) {
-            // Adds moov atom flag to hint at endless repetition for compatible players
-            ffmpegArgs.push("-movflags", "faststart+frag_keyframe+empty_moov");
-            ffmpegArgs.push("-f", "mp4");
-            // Standard metadata loop instruction for Quicktime/Web players
-            ffmpegArgs.push("-metadata", "loop=1");
-          }
-
-          ffmpegArgs.push("output.mp4");
-
-          await ffmpeg.exec(ffmpegArgs);
-
-          const mp4Data = await ffmpeg.readFile("output.mp4");
-          const array = new Uint8Array(mp4Data as Uint8Array);
-
-          exportStage = "Saving File...";
-          if (loadingProgress) {
-            loadingProgress.stage = exportStage;
-            loadingProgress.percent = 100;
-          }
-
-          await invoke("save_file_bytes", {
-            path,
-            bytes: Array.from(array),
-          });
-
-          try {
-            for (let i = 0; i < totalFrames; i++)
-              await ffmpeg.deleteFile(`frame_${i.toString().padStart(5, "0")}.jpg`);
-            await ffmpeg.deleteFile("output.mp4");
-          } catch (e) {}
-
-          loadingProgress = null;
+        },
+        onComplete: () => {
           showExportModal = false;
           isExporting = false;
-        } else {
+          loadingProgress = null;
+        },
+        onError: (msg) => {
+          openErrorModal(msg);
           isExporting = false;
-        }
-      }
-    } catch (e: any) {
-      openErrorModal(e.toString());
-      isExporting = false;
-    } finally {
-      // Restore
-      const canvasParent = renderer.domElement.parentElement;
-      if (canvasParent) {
-        renderer.setSize(canvasParent.clientWidth, canvasParent.clientHeight, false);
-        camera.aspect = canvasParent.clientWidth / canvasParent.clientHeight;
-      } else {
-        renderer.setSize(oldWidth, oldHeight, false);
-        camera.aspect = oldAspect;
-      }
-      camera.updateProjectionMatrix();
-      renderer.setClearAlpha(oldClearAlpha);
-      renderer.setClearColor(oldClearColor, oldClearAlpha);
-      renderer.domElement.style.width = oldStyleWidth;
-      renderer.domElement.style.height = oldStyleHeight;
-      renderer.domElement.style.display = oldDisplay;
-
-      if (mixer) {
-        mixer.setTime(animationProgress);
-      }
-    }
+          loadingProgress = null;
+        },
+      },
+    );
   }
 
   let filteredDependencies = $derived(
@@ -396,28 +146,28 @@
   );
 
   $effect(() => {
-    if (scene) scene.background = new THREE.Color(backgroundColor);
+    if (viewer.scene) viewer.scene.background = new THREE.Color(viewer.backgroundColor);
   });
 
   $effect(() => {
-    if (gridHelper) gridHelper.visible = showGrid;
+    if (viewer.gridHelper) viewer.gridHelper.visible = viewer.showGrid;
   });
 
   $effect(() => {
-    if (boxHelper) boxHelper.visible = showBoundingBox;
+    if (viewer.boxHelper) viewer.boxHelper.visible = viewer.showBoundingBox;
   });
 
   $effect(() => {
-    const scale = renderScale;
-    const sMapSize = shadowMapSize;
-    const sMapType = shadowMapType;
-    const tMapping = toneMapping;
-    const aniso = anisotropy;
-    const eIntensity = envMapIntensity;
-    const _groupTrigger = loadedGroup;
+    const scale = viewerSettings.renderScale;
+    const sMapSize = viewerSettings.shadowMapSize;
+    const sMapType = viewerSettings.shadowMapType;
+    const tMapping = viewerSettings.toneMapping;
+    const aniso = viewerSettings.anisotropy;
+    const eIntensity = viewerSettings.envMapIntensity;
+    const _groupTrigger = viewer.loadedGroup;
 
-    if (renderer) {
-      renderer.setPixelRatio(window.devicePixelRatio * scale);
+    if (viewer.renderer) {
+      viewer.renderer.setPixelRatio(window.devicePixelRatio * scale);
 
       let needsMaterialUpdate = false;
 
@@ -429,8 +179,8 @@
             : tMapping === "Reinhard"
               ? THREE.ReinhardToneMapping
               : THREE.LinearToneMapping;
-      if (renderer.toneMapping !== newToneMapping && newToneMapping !== undefined) {
-        renderer.toneMapping = newToneMapping;
+      if (viewer.renderer.toneMapping !== newToneMapping && newToneMapping !== undefined) {
+        viewer.renderer.toneMapping = newToneMapping;
         needsMaterialUpdate = true;
       }
 
@@ -442,13 +192,13 @@
             : sMapType === "VSM"
               ? THREE.VSMShadowMap
               : THREE.PCFSoftShadowMap;
-      if (renderer.shadowMap.type !== newShadowType) {
-        renderer.shadowMap.type = newShadowType;
+      if (viewer.renderer.shadowMap.type !== newShadowType) {
+        viewer.renderer.shadowMap.type = newShadowType;
         needsMaterialUpdate = true;
       }
 
-      if (scene) {
-        scene.traverse((obj: any) => {
+      if (viewer.scene) {
+        viewer.scene.traverse((obj: any) => {
           if (obj.isMesh && obj.material) {
             const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
             mats.forEach((m: any) => {
@@ -470,7 +220,7 @@
               ];
               for (const key of textureKeys) {
                 if (m[key] && m[key].isTexture && m[key].anisotropy !== aniso) {
-                  m[key].anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), aniso);
+                  m[key].anisotropy = Math.min(viewer.renderer.capabilities.getMaxAnisotropy(), aniso);
 
                   if (aniso > 1 && m[key].minFilter !== THREE.LinearMipmapLinearFilter) {
                     m[key].minFilter = THREE.LinearMipmapLinearFilter;
@@ -491,62 +241,62 @@
       }
     }
 
-    if (dirLight && dirLight.shadow.mapSize.width !== sMapSize) {
-      dirLight.shadow.mapSize.width = sMapSize;
-      dirLight.shadow.mapSize.height = sMapSize;
-      if (dirLight.shadow.map) {
-        dirLight.shadow.map.dispose();
-        dirLight.shadow.map = null as any;
+    if (viewer.dirLight && viewer.dirLight.shadow.mapSize.width !== sMapSize) {
+      viewer.dirLight.shadow.mapSize.width = sMapSize;
+      viewer.dirLight.shadow.mapSize.height = sMapSize;
+      if (viewer.dirLight.shadow.map) {
+        viewer.dirLight.shadow.map.dispose();
+        viewer.dirLight.shadow.map = null as any;
       }
     }
   });
 
   $effect(() => {
-    if (renderer) renderer.toneMappingExposure = toneExposure;
-    if (ambientLight) ambientLight.intensity = ambientIntensity;
-    if (dirLight) {
-      dirLight.intensity = dirIntensity;
-      dirLight.castShadow = shadowsEnabled;
+    if (viewer.renderer) viewer.renderer.toneMappingExposure = viewerSettings.toneExposure;
+    if (viewer.ambientLight) viewer.ambientLight.intensity = viewerSettings.ambientIntensity;
+    if (viewer.dirLight) {
+      viewer.dirLight.intensity = viewerSettings.dirIntensity;
+      viewer.dirLight.castShadow = viewerSettings.shadowsEnabled;
 
       const phi = THREE.MathUtils.degToRad(lightAzimuth);
       const theta = THREE.MathUtils.degToRad(90 - lightElevation);
 
-      const radius = sceneSize * 2.0; // Distance based on scene scale
+      const radius = viewer.sceneSize * 2.0; // Distance based on viewer.scene scale
       const x = radius * Math.sin(theta) * Math.sin(phi);
       const y = radius * Math.cos(theta);
       const z = radius * Math.sin(theta) * Math.cos(phi);
 
-      dirLight.position.copy(sceneCenter).add(new THREE.Vector3(x, y, z));
-      dirLight.target.position.copy(sceneCenter);
-      dirLight.target.updateMatrixWorld();
+      viewer.dirLight.position.copy(viewer.sceneCenter).add(new THREE.Vector3(x, y, z));
+      viewer.dirLight.target.position.copy(viewer.sceneCenter);
+      viewer.dirLight.target.updateMatrixWorld();
     }
   });
 
   $effect(() => {
-    if (loadedGroup) {
-      loadedGroup.traverse((obj: any) => {
+    if (viewer.loadedGroup) {
+      viewer.loadedGroup.traverse((obj: any) => {
         if (obj.isMesh && obj.material) {
           const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-          mats.forEach((m: any) => (m.wireframe = showWireframe));
+          mats.forEach((m: any) => (m.wireframe = viewer.showWireframe));
         }
       });
     }
   });
 
   $effect(() => {
-    const mLeft = mouseButtonLeft;
-    const mMiddle = mouseButtonMiddle;
-    const mRight = mouseButtonRight;
-    const speed = rotSpeedFactor;
+    const mLeft = controlsState.mouseButtonLeft;
+    const mMiddle = controlsState.mouseButtonMiddle;
+    const mRight = controlsState.mouseButtonRight;
+    const speed = controlsState.rotSpeedFactor;
 
-    if (controls) {
+    if (viewer.controls) {
       const MOUSE_MAPPING: Record<string, number> = {
         rotate: THREE.MOUSE.ROTATE,
         pan: THREE.MOUSE.PAN,
         zoom: THREE.MOUSE.DOLLY,
       };
-      controls.rotateSpeed = speed;
-      controls.mouseButtons = {
+      viewer.controls.rotateSpeed = speed;
+      viewer.controls.mouseButtons = {
         LEFT: MOUSE_MAPPING[mLeft] || THREE.MOUSE.ROTATE,
         MIDDLE: MOUSE_MAPPING[mMiddle] || THREE.MOUSE.DOLLY,
         RIGHT: MOUSE_MAPPING[mRight] || THREE.MOUSE.PAN,
@@ -555,10 +305,10 @@
   });
 
   $effect(() => {
-    if (camera && fov) {
-      if (camera.fov !== fov) {
-        camera.fov = fov;
-        camera.updateProjectionMatrix();
+    if (viewer.camera && viewer.fov) {
+      if (viewer.camera.fov !== viewer.fov) {
+        viewer.camera.fov = viewer.fov;
+        viewer.camera.updateProjectionMatrix();
       }
     }
   });
@@ -566,19 +316,19 @@
   onMount(() => {
     const savedFov = localStorage.getItem("cameraFov");
     if (savedFov) {
-      fov = parseFloat(savedFov);
+      viewer.fov = parseFloat(savedFov);
     }
 
     const savedDamping = localStorage.getItem("cameraDamping");
     if (savedDamping !== null) {
-      enableDamping = savedDamping === "true";
+      viewer.enableDamping = savedDamping === "true";
     }
 
     // Global keyboard shortcuts
     const handleGlobalKeydown = (e: KeyboardEvent) => {
       if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA")
         return;
-      keysPressed.add(e.key.toLowerCase());
+      viewer.keysPressed.add(e.key.toLowerCase());
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
         e.preventDefault();
         openUsdFile();
@@ -589,7 +339,7 @@
       }
     };
     const handleGlobalKeyup = (e: KeyboardEvent) => {
-      keysPressed.delete(e.key.toLowerCase());
+      viewer.keysPressed.delete(e.key.toLowerCase());
     };
     window.addEventListener("keydown", handleGlobalKeydown);
     window.addEventListener("keyup", handleGlobalKeyup);
@@ -601,44 +351,8 @@
       })
       .catch(console.warn);
 
-    // Restore Keybindings
-    const savedKeys = localStorage.getItem("usdbee_keybindings");
-    if (savedKeys) {
-      try {
-        keybindings = { ...keybindings, ...JSON.parse(savedKeys) };
-      } catch (e) {}
-    }
-
-    // Restore Control Preferences
-    const savedControls = localStorage.getItem("usdbee_controls");
-    if (savedControls) {
-      try {
-        const parsed = JSON.parse(savedControls);
-        if (parsed.moveSpeedFactor !== undefined) moveSpeedFactor = parsed.moveSpeedFactor;
-        if (parsed.rotSpeedFactor !== undefined) rotSpeedFactor = parsed.rotSpeedFactor;
-        if (parsed.invertMouseX !== undefined) invertMouseX = parsed.invertMouseX;
-        if (parsed.invertMouseY !== undefined) invertMouseY = parsed.invertMouseY;
-        if (parsed.mouseButtonLeft !== undefined) mouseButtonLeft = parsed.mouseButtonLeft;
-        if (parsed.mouseButtonMiddle !== undefined) mouseButtonMiddle = parsed.mouseButtonMiddle;
-        if (parsed.mouseButtonRight !== undefined) mouseButtonRight = parsed.mouseButtonRight;
-      } catch (e) {}
-    }
-
-    // Restore Graphics Preferences
-    const savedGraphics = localStorage.getItem("usdbee_graphics");
-    if (savedGraphics) {
-      try {
-        const parsed = JSON.parse(savedGraphics);
-        if (parsed.shadowsEnabled !== undefined) shadowsEnabled = parsed.shadowsEnabled;
-        if (parsed.renderScale !== undefined) renderScale = parsed.renderScale;
-        if (parsed.shadowMapSize !== undefined) shadowMapSize = parsed.shadowMapSize;
-        if (parsed.shadowMapType !== undefined) shadowMapType = parsed.shadowMapType;
-        if (parsed.anisotropy !== undefined) anisotropy = parsed.anisotropy;
-        if (parsed.envMapIntensity !== undefined) envMapIntensity = parsed.envMapIntensity;
-        if (parsed.toneMapping !== undefined) toneMapping = parsed.toneMapping;
-      } catch (e) {}
-    }
-
+    loadControlPreferences();
+    loadGraphicsPreferences();
     const savedWidth = localStorage.getItem("sidebarWidth");
     if (savedWidth) {
       let parsed = parseInt(savedWidth);
@@ -659,9 +373,9 @@
         dependencies = null;
 
         // Remove previous model if exists
-        if (loadedGroup && scene) {
-          scene.remove(loadedGroup);
-          loadedGroup = null;
+        if (viewer.loadedGroup && viewer.scene) {
+          viewer.scene.remove(viewer.loadedGroup);
+          viewer.loadedGroup = null;
         }
       }),
       listen<{ stage: string; percent: number }>("usd-load-progress", (event) => {
@@ -675,7 +389,7 @@
 
         if (rootFile && canvas) {
           try {
-            if (!scene) return;
+            if (!viewer.scene) return;
             const ext = rootFile.split(".").pop()?.toLowerCase() || "usd";
 
             const manager = new THREE.LoadingManager();
@@ -781,7 +495,7 @@
             loadingProgress = { stage: "Parsing USDZ...", percent: 85 };
             group = loader.parse(zippedBuffer.buffer as ArrayBuffer);
 
-            loadedGroup = group;
+            viewer.loadedGroup = group;
 
             // Extract Triangles and Cameras
             let tris = 0;
@@ -833,85 +547,87 @@
                 }
               }
             });
-            triangleCount = Math.floor(tris);
-            usdCameras = cams;
-            activeCameraIndex = -1;
-            if (boxHelper) {
-              scene.remove(boxHelper);
-              boxHelper.dispose();
+            viewer.triangleCount = Math.floor(tris);
+            viewer.usdCameras = cams;
+            viewer.activeCameraIndex = -1;
+            if (viewer.boxHelper) {
+              viewer.scene.remove(viewer.boxHelper);
+              viewer.boxHelper.dispose();
             }
-            sceneBox = new THREE.Box3();
+            viewer.sceneBox = new THREE.Box3();
 
-            boxHelper = new THREE.Box3Helper(sceneBox, new THREE.Color(0xffff00));
-            boxHelper.visible = showBoundingBox;
-            scene.add(boxHelper);
+            viewer.boxHelper = new THREE.Box3Helper(viewer.sceneBox, new THREE.Color(0xffff00));
+            viewer.boxHelper.visible = viewer.showBoundingBox;
+            viewer.scene.add(viewer.boxHelper);
 
             // Setup Animation
             if (group.animations && group.animations.length > 0) {
-              mixer = new THREE.AnimationMixer(group);
-              hasAnimation = true;
-              animationDuration = Math.max(...group.animations.map((a: THREE.AnimationClip) => a.duration));
-              animationProgress = 0;
-              isPlayingAnim = true;
+              viewer.mixer = new THREE.AnimationMixer(group);
+              viewer.hasAnimation = true;
+              viewer.animationDuration = Math.max(
+                ...group.animations.map((a: THREE.AnimationClip) => a.duration),
+              );
+              viewer.animationProgress = 0;
+              viewer.isPlayingAnim = true;
 
               group.animations.forEach((clip: THREE.AnimationClip) => {
-                mixer?.clipAction(clip).play();
+                viewer.mixer?.clipAction(clip).play();
               });
             } else {
-              mixer = null;
-              hasAnimation = false;
+              viewer.mixer = null;
+              viewer.hasAnimation = false;
             }
 
-            sceneBox.setFromObject(group, true);
-            let size = sceneBox.getSize(new THREE.Vector3()).length();
-            const center = sceneBox.getCenter(new THREE.Vector3());
+            viewer.sceneBox.setFromObject(group, true);
+            let size = viewer.sceneBox.getSize(new THREE.Vector3()).length();
+            const center = viewer.sceneBox.getCenter(new THREE.Vector3());
 
             if (size === 0 || !isFinite(size)) {
               console.warn("Bounding box size is 0 or invalid! Falling back to default scale.");
               size = 10;
             }
 
-            controls.reset();
+            viewer.controls.reset();
 
             group.position.x -= center.x;
             group.position.y -= center.y;
             group.position.z -= center.z;
 
-            camera.position.set(0, 0, 0);
+            viewer.camera.position.set(0, 0, 0);
 
-            camera.position.x += size / 2.0;
-            camera.position.y += size / 5.0;
-            camera.position.z += size;
+            viewer.camera.position.x += size / 2.0;
+            viewer.camera.position.y += size / 5.0;
+            viewer.camera.position.z += size;
 
-            camera.near = Math.max(0.01, size / 100);
-            camera.far = size * 100;
-            camera.updateProjectionMatrix();
+            viewer.camera.near = Math.max(0.01, size / 100);
+            viewer.camera.far = size * 100;
+            viewer.camera.updateProjectionMatrix();
 
-            controls.target.set(0, 0, 0);
-            controls.update();
-            controls.saveState();
+            viewer.controls.target.set(0, 0, 0);
+            viewer.controls.update();
+            viewer.controls.saveState();
 
-            if (gridHelper) {
-              scene.remove(gridHelper);
-              gridHelper.dispose();
+            if (viewer.gridHelper) {
+              viewer.scene.remove(viewer.gridHelper);
+              viewer.gridHelper.dispose();
             }
             const gridSize = Math.max(10, Math.pow(10, Math.ceil(Math.log10(size * 2))));
-            gridHelper = new THREE.GridHelper(gridSize, 100, 0x888888, 0x444444);
-            gridHelper.visible = showGrid;
-            scene.add(gridHelper);
+            viewer.gridHelper = new THREE.GridHelper(gridSize, 100, 0x888888, 0x444444);
+            viewer.gridHelper.visible = viewer.showGrid;
+            viewer.scene.add(viewer.gridHelper);
 
-            sceneCenter = center;
-            sceneSize = size;
+            viewer.sceneCenter = center;
+            viewer.sceneSize = size;
 
-            if (dirLight) {
+            if (viewer.dirLight) {
               const d = size * 1.2;
-              dirLight.shadow.camera.left = -d;
-              dirLight.shadow.camera.right = d;
-              dirLight.shadow.camera.top = d;
-              dirLight.shadow.camera.bottom = -d;
-              dirLight.shadow.camera.near = 0.1;
-              dirLight.shadow.camera.far = size * 4;
-              dirLight.shadow.camera.updateProjectionMatrix();
+              viewer.dirLight.shadow.camera.left = -d;
+              viewer.dirLight.shadow.camera.right = d;
+              viewer.dirLight.shadow.camera.top = d;
+              viewer.dirLight.shadow.camera.bottom = -d;
+              viewer.dirLight.shadow.camera.near = 0.1;
+              viewer.dirLight.shadow.camera.far = size * 4;
+              viewer.dirLight.shadow.camera.updateProjectionMatrix();
             }
 
             let meshCount = 0;
@@ -929,7 +645,7 @@
               helpers.forEach((h) => group.add(h));
             }
 
-            scene.add(group);
+            viewer.scene.add(group);
             loadingProgress = null;
           } catch (err: any) {
             console.error("ThreeJS USD Load Error:", err);
@@ -957,7 +673,7 @@
     ];
 
     if (canvas) {
-      initThreeJS();
+      viewer.init(canvas);
     }
 
     // Cleanup listeners
@@ -965,256 +681,12 @@
       window.removeEventListener("keydown", handleGlobalKeydown);
       window.removeEventListener("keyup", handleGlobalKeyup);
       unlisteners.forEach((u) => u.then((f) => f()));
-      if (animationFrameId) cancelAnimationFrame(animationFrameId);
-      if (renderer) renderer.dispose();
+      viewer.dispose();
     };
   });
 
-  function initThreeJS() {
-    scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1e1e1e);
-
-    const w = canvas.clientWidth || 800;
-    const h = canvas.clientHeight || 600;
-    const aspect = w / h;
-    camera = new THREE.PerspectiveCamera(fov, aspect, 0.1, 1000);
-    camera.position.z = 3;
-
-    renderer = new THREE.WebGLRenderer({
-      canvas,
-      antialias: true,
-    });
-    renderer.setSize(w, h, false);
-    renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.0;
-
-    // Enable shadows
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-
-    const pmremGenerator = new THREE.PMREMGenerator(renderer);
-    scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
-
-    controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = enableDamping;
-    controls.dampingFactor = 0.05;
-
-    const rawControls = controls as any;
-    if (rawControls._rotateLeft && rawControls._rotateUp) {
-      const orig_rotateLeft = rawControls._rotateLeft.bind(rawControls);
-      const orig_rotateUp = rawControls._rotateUp.bind(rawControls);
-      rawControls._rotateLeft = function (angle: number) {
-        orig_rotateLeft(invertMouseX ? -angle : angle);
-      };
-      rawControls._rotateUp = function (angle: number) {
-        orig_rotateUp(invertMouseY ? -angle : angle);
-      };
-    }
-
-    const MOUSE_MAPPING: Record<string, number> = {
-      rotate: THREE.MOUSE.ROTATE,
-      pan: THREE.MOUSE.PAN,
-      zoom: THREE.MOUSE.DOLLY,
-    };
-    controls.rotateSpeed = rotSpeedFactor;
-    controls.mouseButtons = {
-      LEFT: MOUSE_MAPPING[mouseButtonLeft] || THREE.MOUSE.ROTATE,
-      MIDDLE: MOUSE_MAPPING[mouseButtonMiddle] || THREE.MOUSE.DOLLY,
-      RIGHT: MOUSE_MAPPING[mouseButtonRight] || THREE.MOUSE.PAN,
-    };
-
-    // Setup Grid
-    gridHelper = new THREE.GridHelper(100, 100, 0x888888, 0x444444);
-    gridHelper.visible = showGrid;
-    scene.add(gridHelper);
-
-    // Setup Stats
-    stats = new Stats();
-    stats.dom.style.position = "absolute";
-    stats.dom.style.top = "10px";
-    stats.dom.style.right = "10px";
-    stats.dom.style.left = "auto"; // override default left
-    if (canvas && canvas.parentElement) {
-      canvas.parentElement.appendChild(stats.dom);
-    }
-
-    // Add lighting suitable for models
-    ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
-    scene.add(ambientLight);
-
-    dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
-    dirLight.position.set(5, 10, 7);
-    dirLight.castShadow = true;
-    dirLight.shadow.mapSize.width = 2048;
-    dirLight.shadow.mapSize.height = 2048;
-    dirLight.shadow.bias = -0.0001; // Reduce shadow acne
-    scene.add(dirLight);
-
-    // Handles window resizing correctly
-    const resizeObserver = new ResizeObserver(() => {
-      if (!canvas) return;
-      const width = canvas.parentElement?.clientWidth || canvas.clientWidth || 800;
-      const height = canvas.parentElement?.clientHeight || canvas.clientHeight || 600;
-
-      renderer.setSize(width, height, false);
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
-    });
-
-    resizeObserver.observe(canvas.parentElement!);
-
-    // Start animation loop
-    clock = new THREE.Clock();
-    let lastFrameTime = 0;
-    let lastNavTime = performance.now();
-
-    function animate(time: DOMHighResTimeStamp = 0) {
-      animationFrameId = requestAnimationFrame(animate);
-
-      if (showExportModal) {
-        lastFrameTime = time;
-        lastNavTime = performance.now();
-        return;
-      }
-
-      if (maxFps > 0 && time > 0) {
-        const interval = 1000 / maxFps;
-        const elapsed = time - lastFrameTime;
-
-        if (elapsed < interval) return;
-        lastFrameTime = time - (elapsed % interval);
-      } else if (maxFps === 0) {
-        lastFrameTime = time;
-      }
-
-      if (mixer && !isDraggingAnim) {
-        const delta = clock.getDelta();
-        if (isPlayingAnim) {
-          mixer.update(delta);
-
-          animationProgress += delta;
-          if (animationProgress > animationDuration) {
-            animationProgress %= animationDuration;
-          }
-        }
-      } else if (mixer) {
-        clock.getDelta();
-      }
-
-      if (keysPressed.size > 0 && camera && controls) {
-        const currentNavTime = performance.now();
-        const navDt = Math.min((currentNavTime - lastNavTime) / 1000, 0.1);
-        const baseSpeed = Math.max(1.0, sceneSize * 0.5) * navDt;
-        const speed = baseSpeed * moveSpeedFactor;
-        const turnSpeed = 1.5 * navDt;
-
-        let moved = false;
-        const forward = new THREE.Vector3();
-        camera.getWorldDirection(forward);
-        const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
-
-        if (keysPressed.has(keybindings.forward)) {
-          camera.position.addScaledVector(forward, speed);
-          controls.target.addScaledVector(forward, speed);
-          moved = true;
-        }
-        if (keysPressed.has(keybindings.backward)) {
-          camera.position.addScaledVector(forward, -speed);
-          controls.target.addScaledVector(forward, -speed);
-          moved = true;
-        }
-        if (keysPressed.has(keybindings.left)) {
-          camera.position.addScaledVector(right, -speed);
-          controls.target.addScaledVector(right, -speed);
-          moved = true;
-        }
-        if (keysPressed.has(keybindings.right)) {
-          camera.position.addScaledVector(right, speed);
-          controls.target.addScaledVector(right, speed);
-          moved = true;
-        }
-        if (keysPressed.has(keybindings.up)) {
-          camera.position.addScaledVector(camera.up, speed);
-          controls.target.addScaledVector(camera.up, speed);
-          moved = true;
-        }
-        if (keysPressed.has(keybindings.down)) {
-          camera.position.addScaledVector(camera.up, -speed);
-          controls.target.addScaledVector(camera.up, -speed);
-          moved = true;
-        }
-
-        if (keysPressed.has(keybindings.turnLeft)) {
-          forward.applyAxisAngle(camera.up, turnSpeed);
-          controls.target
-            .copy(camera.position)
-            .add(forward.clone().multiplyScalar(Math.max(1.0, camera.position.distanceTo(controls.target))));
-          moved = true;
-        }
-        if (keysPressed.has(keybindings.turnRight)) {
-          forward.applyAxisAngle(camera.up, -turnSpeed);
-          controls.target
-            .copy(camera.position)
-            .add(forward.clone().multiplyScalar(Math.max(1.0, camera.position.distanceTo(controls.target))));
-          moved = true;
-        }
-        if (moved) camera.updateProjectionMatrix();
-      }
-      lastNavTime = performance.now();
-
-      if (controls) controls.update();
-      if (stats) stats.update();
-      if (showBoundingBox && loadedGroup) {
-        sceneBox.setFromObject(loadedGroup, true);
-      }
-      if (selectedNode && selectionHelper) {
-        selectionHelper.box.setFromObject(selectedNode, true);
-      }
-
-      const renderCam =
-        activeCameraIndex >= 0 && usdCameras[activeCameraIndex] ? usdCameras[activeCameraIndex] : camera;
-
-      if (activeCameraIndex >= 0 && usdCameras[activeCameraIndex]) {
-        const c = usdCameras[activeCameraIndex] as THREE.PerspectiveCamera;
-
-        if (c.aspect !== undefined) {
-          const width = canvas.parentElement?.clientWidth || canvas.clientWidth;
-          const height = canvas.parentElement?.clientHeight || canvas.clientHeight;
-          c.aspect = width / height;
-          c.updateProjectionMatrix();
-        }
-      }
-
-      if (!scene) return;
-      renderer.render(scene, renderCam as THREE.Camera);
-
-      if (!hasShownWindow) {
-        hasShownWindow = true;
-        getCurrentWindow()
-          .show()
-          .catch((err) => console.error("Could not show window", err));
-      }
-    }
-    animate();
-  }
-
   async function openUsdFile() {
     await invoke("trigger_open_usd_dialog");
-  }
-
-  function resetCameraView() {
-    if (!camera || !controls || !sceneSize) return;
-
-    // Restore the OrbitControls exact target, un-pan, un-zoom, and original spherical coordinates
-    controls.reset();
-
-    fov = 75;
-    camera.fov = fov;
-    localStorage.setItem("cameraFov", "75");
-
-    camera.updateProjectionMatrix();
-    controls.update();
   }
 
   async function replaceWithColor(path: string, event: Event) {
@@ -1231,11 +703,11 @@
         fallback_color: color,
       };
 
-      if (loadedGroup) {
+      if (viewer.loadedGroup) {
         const threeColor = new THREE.Color(color);
         const searchName = path.split(/[\\/]/).pop()?.split(".")[0]?.toLowerCase() || "";
 
-        loadedGroup.traverse((child: any) => {
+        viewer.loadedGroup.traverse((child: any) => {
           if (child.isMesh && child.material) {
             const mats = Array.isArray(child.material) ? child.material : [child.material];
             for (const mat of mats) {
@@ -1374,45 +846,45 @@
     if (!node) return;
     node.userData.locked = locked;
     colorUpdateMap[node.uuid] = (colorUpdateMap[node.uuid] || 0) + 1;
-    selectedNode = selectedNode;
+    viewer.selectedNode = viewer.selectedNode;
   }
 
   function updateSelection(node: any) {
-    if (!scene) return;
+    if (!viewer.scene) return;
 
     // Toggle off if already selected
     if (node && selectedNodeId === node.uuid) {
       selectedNodeId = null;
-      selectedNode = null;
-      if (selectionHelper) {
-        scene.remove(selectionHelper);
-        selectionHelper.dispose();
-        selectionHelper = null;
+      viewer.selectedNode = null;
+      if (viewer.selectionHelper) {
+        viewer.scene.remove(viewer.selectionHelper);
+        viewer.selectionHelper.dispose();
+        viewer.selectionHelper = null;
       }
       return;
     }
 
     selectedNodeId = node ? node.uuid : null;
-    selectedNode = node ? node : null;
+    viewer.selectedNode = node ? node : null;
 
     // Remove previous selection helper
-    if (selectionHelper) {
-      scene.remove(selectionHelper);
-      selectionHelper.dispose();
-      selectionHelper = null;
+    if (viewer.selectionHelper) {
+      viewer.scene.remove(viewer.selectionHelper);
+      viewer.selectionHelper.dispose();
+      viewer.selectionHelper = null;
     }
 
     if (node) {
       const box = new THREE.Box3();
       box.setFromObject(node, true);
-      selectionHelper = new THREE.Box3Helper(box, new THREE.Color(0xffaa00)); // Orange highlight
-      scene.add(selectionHelper);
+      viewer.selectionHelper = new THREE.Box3Helper(box, new THREE.Color(0xffaa00)); // Orange highlight
+      viewer.scene.add(viewer.selectionHelper);
     }
   }
 
   // Expand / Collapse All
   function toggleAllExpanded(expand: boolean) {
-    if (!loadedGroup) return;
+    if (!viewer.loadedGroup) return;
     const applyExpand = (node: any) => {
       expandedNodes[node.uuid] = expand;
       if (node.children) {
@@ -1421,7 +893,7 @@
         }
       }
     };
-    applyExpand(loadedGroup);
+    applyExpand(viewer.loadedGroup);
   }
 
   function toggleVisibility(node: any) {
@@ -1628,49 +1100,49 @@
         />
       {/if}
       {#if activeTab === "scene"}
-        <SceneTab {loadedGroup} {toggleAllExpanded} {updateSelection} {treeNode} />
+        <SceneTab loadedGroup={viewer.loadedGroup} {toggleAllExpanded} {updateSelection} {treeNode} />
       {/if}
 
       {#if activeTab === "rendering"}
         <RenderingTab
-          bind:maxFps
-          bind:renderScale
+          bind:maxFps={viewerSettings.maxFps}
+          bind:renderScale={viewerSettings.renderScale}
           {saveGraphicsPreferences}
-          bind:toneMapping
-          bind:toneExposure
-          bind:ambientIntensity
-          bind:dirIntensity
-          bind:shadowsEnabled
-          bind:shadowMapSize
-          bind:shadowMapType
-          bind:anisotropy
-          bind:envMapIntensity
-          bind:backgroundColor
+          bind:toneMapping={viewerSettings.toneMapping}
+          bind:toneExposure={viewerSettings.toneExposure}
+          bind:ambientIntensity={viewerSettings.ambientIntensity}
+          bind:dirIntensity={viewerSettings.dirIntensity}
+          bind:shadowsEnabled={viewerSettings.shadowsEnabled}
+          bind:shadowMapSize={viewerSettings.shadowMapSize}
+          bind:shadowMapType={viewerSettings.shadowMapType}
+          bind:anisotropy={viewerSettings.anisotropy}
+          bind:envMapIntensity={viewerSettings.envMapIntensity}
+          bind:backgroundColor={viewer.backgroundColor}
           bind:lightAzimuth
           bind:lightElevation
         />
       {/if}
       {#if activeTab === "settings"}
         <SettingsTab
-          bind:showWireframe
-          bind:showGrid
-          bind:showBoundingBox
-          bind:moveSpeedFactor
-          bind:rotSpeedFactor
-          bind:invertMouseX
-          bind:invertMouseY
-          bind:mouseButtonLeft
-          bind:mouseButtonMiddle
-          bind:mouseButtonRight
-          bind:keybindings
-          bind:backgroundColor
-          bind:activeCameraIndex
+          bind:showWireframe={viewer.showWireframe}
+          bind:showGrid={viewer.showGrid}
+          bind:showBoundingBox={viewer.showBoundingBox}
+          bind:moveSpeedFactor={controlsState.moveSpeedFactor}
+          bind:rotSpeedFactor={controlsState.rotSpeedFactor}
+          bind:invertMouseX={controlsState.invertMouseX}
+          bind:invertMouseY={controlsState.invertMouseY}
+          bind:mouseButtonLeft={controlsState.mouseButtonLeft}
+          bind:mouseButtonMiddle={controlsState.mouseButtonMiddle}
+          bind:mouseButtonRight={controlsState.mouseButtonRight}
+          bind:keybindings={controlsState.keybindings}
+          bind:backgroundColor={viewer.backgroundColor}
+          bind:activeCameraIndex={viewer.activeCameraIndex}
           bind:omniverseUrl
-          {usdCameras}
-          {triangleCount}
+          usdCameras={viewer.usdCameras}
+          triangleCount={viewer.triangleCount}
           {saveControlPreferences}
           {formatKeyName}
-          {keysPressed}
+          keysPressed={viewer.keysPressed}
           {updateOmniverseUrl}
         />
       {/if}
@@ -1685,7 +1157,7 @@
   <section class="viewport">
     {#if rootFile}
       <div class="top-toolbar">
-        <button class="tool-btn" onclick={resetCameraView} title="Reset View">
+        <button class="tool-btn" onclick={() => viewer.resetCameraView()} title="Reset View">
           <svg
             width="14"
             height="14"
@@ -1717,7 +1189,7 @@
               <path d="M2 12A10 10 0 1 0 22 12 10 10 0 1 0 2 12Z"></path>
               <circle cx="12" cy="12" r="3"></circle>
             </svg>
-            <span>FOV: {fov}°</span>
+            <span>FOV: fov={viewer.fov}°</span>
           </button>
           {#if showFovSlider}
             <div class="slider-dropdown">
@@ -1727,14 +1199,14 @@
                 min="10"
                 max="120"
                 step="1"
-                bind:value={fov}
+                bind:value={viewer.fov}
                 oninput={() => {
-                  if (camera) {
-                    camera.fov = fov;
-                    camera.updateProjectionMatrix();
+                  if (viewer.camera) {
+                    viewer.camera.fov = viewer.fov;
+                    viewer.camera.updateProjectionMatrix();
                   }
                 }}
-                onchange={() => localStorage.setItem("cameraFov", fov.toString())}
+                onchange={() => localStorage.setItem("cameraFov", viewer.fov.toString())}
               />
             </div>
           {/if}
@@ -1742,11 +1214,11 @@
 
         <button
           class="tool-btn"
-          style={enableDamping ? "color: #0e639c;" : ""}
+          style={viewer.enableDamping ? "color: #0e639c;" : ""}
           onclick={() => {
-            enableDamping = !enableDamping;
-            if (controls) controls.enableDamping = enableDamping;
-            localStorage.setItem("cameraDamping", enableDamping.toString());
+            viewer.enableDamping = !viewer.enableDamping;
+            if (viewer.controls) viewer.controls.enableDamping = viewer.enableDamping;
+            localStorage.setItem("cameraDamping", viewer.enableDamping.toString());
           }}
           title="Toggle Camera Inertia"
         >
@@ -1760,7 +1232,7 @@
             stroke-linecap="round"
             stroke-linejoin="round"
           >
-            {#if enableDamping}
+            {#if viewer.enableDamping}
               <path d="M9.59 4.59A2 2 0 1 1 11 8H2"></path>
               <path d="M12.59 19.41A2 2 0 1 0 14 16H2"></path>
               <path d="M17.73 7.73A2.5 2.5 0 1 1 19.5 12H2"></path>
@@ -1769,7 +1241,7 @@
               <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line>
             {/if}
           </svg>
-          <span>Inertia: {enableDamping ? "On" : "Off"}</span>
+          <span>Inertia: {viewer.enableDamping ? "On" : "Off"}</span>
         </button>
 
         <div class="triangle-count" style="gap: 4px;">
@@ -1785,45 +1257,48 @@
           >
             <path d="M12 2L2 22h20L12 2z"></path>
           </svg>
-          <span>{triangleCount.toLocaleString()}</span>
+          <span>{viewer.triangleCount.toLocaleString()}</span>
         </div>
       </div>
     {/if}
 
     <canvas bind:this={canvas} class="webgl-canvas" class:visible={!!rootFile}></canvas>
 
-    {#if hasAnimation}
+    {#if viewer.hasAnimation}
       <div class="timeline-overlay">
         <button
           class="icon-btn"
           style="color: #d4d4d4"
-          onclick={() => (isPlayingAnim = !isPlayingAnim)}
-          title={isPlayingAnim ? "Pause" : "Play"}
+          onclick={() => (viewer.isPlayingAnim = !viewer.isPlayingAnim)}
+          title={viewer.isPlayingAnim ? "Pause" : "Play"}
         >
-          {isPlayingAnim ? "⏸" : "▶"}
+          {viewer.isPlayingAnim ? "⏸" : "▶"}
         </button>
         <input
           type="range"
           class="timeline-slider slider"
           min="0"
-          max={animationDuration}
+          max={viewer.animationDuration}
           step="0.01"
-          value={animationProgress}
+          value={viewer.animationProgress}
           oninput={(e) => {
-            animationProgress = parseFloat(e.currentTarget.value);
-            if (mixer) {
-              mixer.setTime(animationProgress);
-              if (showBoundingBox && loadedGroup) sceneBox.setFromObject(loadedGroup, true);
-              if (selectedNode && selectionHelper) {
+            viewer.animationProgress = parseFloat(e.currentTarget.value);
+            if (viewer.mixer) {
+              viewer.mixer.setTime(viewer.animationProgress);
+              if (viewer.showBoundingBox && viewer.loadedGroup)
+                viewer.sceneBox.setFromObject(viewer.loadedGroup, true);
+              if (viewer.selectedNode && viewer.selectionHelper) {
                 // @ts-ignore
-                selectionHelper.box.setFromObject(selectedNode, true);
+                viewer.selectionHelper.box.setFromObject(viewer.selectedNode, true);
               }
             }
           }}
-          onmousedown={() => (isDraggingAnim = true)}
-          onmouseup={() => (isDraggingAnim = false)}
+          onmousedown={() => (viewer.isDraggingAnim = true)}
+          onmouseup={() => (viewer.isDraggingAnim = false)}
         />
-        <span class="timeline-time">{animationProgress.toFixed(2)}s / {animationDuration.toFixed(2)}s</span>
+        <span class="timeline-time"
+          >{viewer.animationProgress.toFixed(2)}s / {viewer.animationDuration.toFixed(2)}s</span
+        >
       </div>
     {/if}
 
@@ -1847,12 +1322,12 @@
 {#if showExportModal}
   <ExportModal
     on:close={() => !isExporting && (showExportModal = false)}
-    {renderer}
-    {scene}
-    {camera}
-    {hasAnimation}
-    {animationDuration}
-    {mixer}
+    renderer={viewer.renderer}
+    scene={viewer.scene}
+    camera={viewer.camera}
+    hasAnimation={viewer.hasAnimation}
+    animationDuration={viewer.animationDuration}
+    mixer={viewer.mixer}
     {isExporting}
     {exportProgress}
     {exportStage}
