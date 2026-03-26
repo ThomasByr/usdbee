@@ -21,8 +21,9 @@ pub async fn trigger_open_usd_dialog(app: tauri::AppHandle) -> Result<(), String
 
                 let app_clone = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(e) = process_usd_file(app_clone, path_str).await {
+                    if let Err(e) = process_usd_file(app_clone.clone(), path_str).await {
                         eprintln!("Error loading USD: {}", e);
+                        let _ = app_clone.emit("usd-load-error", e);
                     }
                 });
             }
@@ -48,14 +49,59 @@ async fn unpack_usdz(path: &str) -> Result<(String, std::path::PathBuf), String>
 
             if !out_dir.exists() {
                 fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
-                archive.extract(&out_dir).map_err(|e| e.to_string())?;
+                for i in 0..archive.len() {
+                    let mut file = match archive.by_index(i) {
+                        Ok(f) => f,
+                        Err(_) => continue,
+                    };
+                    let filepath = match file.enclosed_name() {
+                        Some(path) => path.to_owned(),
+                        None => {
+                            let name = file.name().replace("\\", "/");
+                            std::path::PathBuf::from(name)
+                        }
+                    };
+                    let outpath = out_dir.join(filepath);
+                    if (*file.name()).ends_with("/") {
+                        let _ = fs::create_dir_all(&outpath);
+                    } else {
+                        if let Some(p) = outpath.parent() {
+                            let _ = fs::create_dir_all(&p);
+                        }
+                        if let Ok(mut outfile) = fs::File::create(&outpath) {
+                            let _ = std::io::copy(&mut file, &mut outfile);
+                        }
+                    }
+                }
             }
 
             if archive.len() > 0 {
+                for i in 0..archive.len() {
+                    if let Ok(file) = archive.by_index(i) {
+                        if !file.is_dir()
+                            && (file.name().ends_with(".usdc")
+                                || file.name().ends_with(".usda")
+                                || file.name().ends_with(".usd"))
+                        {
+                            let f_name = file.name().to_string();
+                            let root_file = out_dir.join(f_name);
+                            let abs_str = root_file
+                                .to_string_lossy()
+                                .replace("\\\\?\\", "")
+                                .replace("//?/", "");
+                            return Ok((abs_str, out_dir));
+                        }
+                    }
+                }
+                // fallback if no usd found, just use the first file
                 if let Ok(first_file) = archive.by_index(0) {
                     let f_name = first_file.name().to_string();
                     let root_file = out_dir.join(f_name);
-                    return Ok((root_file.to_string_lossy().to_string(), out_dir));
+                    let abs_str = root_file
+                        .to_string_lossy()
+                        .replace("\\\\?\\", "")
+                        .replace("//?/", "");
+                    return Ok((abs_str, out_dir));
                 }
             }
             Err("Empty USDZ archive".into())

@@ -369,6 +369,10 @@
         console.log("RECEIVED open-export-modal from Rust!");
         showExportModal = true;
       }),
+      listen<string>("usd-load-error", (event) => {
+        loadingProgress = null;
+        openErrorModal("Failed to extract or load USD: " + event.payload);
+      }),
       listen<string>("usd-load-start", (event) => {
         rootFile = event.payload;
         loadingProgress = { stage: "Starting...", percent: 0 };
