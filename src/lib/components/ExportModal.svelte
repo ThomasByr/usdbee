@@ -58,10 +58,13 @@
       renderer.getSize(originalSize);
       const originalClearAlpha = renderer.getClearAlpha();
       const originalClearColor = renderer.getClearColor(new THREE.Color());
+      const originalSceneBackground = scene.background;
 
       const isTransparent = format === "png" && bgTransparent;
       renderer.setClearAlpha(isTransparent ? 0 : 1);
-      if (!isTransparent) {
+      if (isTransparent) {
+        scene.background = null;
+      } else if (!isTransparent) {
         renderer.setClearColor(0x333333, 1);
       }
 
@@ -90,6 +93,7 @@
       camera.updateProjectionMatrix();
       renderer.setClearAlpha(originalClearAlpha);
       renderer.setClearColor(originalClearColor, originalClearAlpha);
+      scene.background = originalSceneBackground;
     } catch (err) {
       console.error("updatePreview error:", err);
     }

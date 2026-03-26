@@ -47,6 +47,7 @@ export async function runExport(
   const oldStyleWidth = renderer.domElement.style.width;
   const oldStyleHeight = renderer.domElement.style.height;
   const oldDisplay = renderer.domElement.style.display;
+  const oldSceneBackground = scene.background;
 
   // Apply export settings
   renderer.domElement.style.display = "none";
@@ -56,8 +57,12 @@ export async function runExport(
 
   if (format === "png" && bgTransparent) {
     renderer.setClearAlpha(0);
+    scene.background = null;
   } else {
     renderer.setClearAlpha(1);
+    if (!scene.background) {
+      scene.background = new THREE.Color(oldClearColor);
+    }
   }
 
   try {
@@ -206,6 +211,7 @@ export async function runExport(
     camera.updateProjectionMatrix();
     renderer.setClearAlpha(oldClearAlpha);
     renderer.setClearColor(oldClearColor, oldClearAlpha);
+    scene.background = oldSceneBackground;
     renderer.domElement.style.width = oldStyleWidth;
     renderer.domElement.style.height = oldStyleHeight;
     renderer.domElement.style.display = oldDisplay;

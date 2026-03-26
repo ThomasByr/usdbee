@@ -75,6 +75,8 @@ export class RendererKit {
     this.renderer = new THREE.WebGLRenderer({
       canvas: this.canvas,
       antialias: true,
+      alpha: true,
+      preserveDrawingBuffer: true,
     });
     this.renderer.setSize(w, h, false);
     this.renderer.setPixelRatio(window.devicePixelRatio);
