@@ -1336,6 +1336,7 @@
     camera={viewer.camera}
     hasAnimation={viewer.hasAnimation}
     animationDuration={viewer.animationDuration}
+    animationProgress={viewer.animationProgress}
     mixer={viewer.mixer}
     {isExporting}
     {exportProgress}

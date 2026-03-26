@@ -153,6 +153,7 @@ export class RendererKit {
     if (this.showExportModal) {
       this.lastFrameTime = time;
       this.lastNavTime = performance.now();
+      if (this.mixer) this.clock.getDelta(); // Drain accumulated time so animation doesn't jump
       return;
     }
 

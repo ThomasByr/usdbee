@@ -8,6 +8,7 @@
   export let camera: PerspectiveCamera | null = null;
   export let hasAnimation: boolean = false;
   export let animationDuration: number = 0;
+  export let animationProgress: number = 0;
   export let mixer: THREE.AnimationMixer | null = null;
   export let isExporting: boolean = false;
   export let exportProgress: number = 0;
@@ -94,6 +95,10 @@
       renderer.setClearAlpha(originalClearAlpha);
       renderer.setClearColor(originalClearColor, originalClearAlpha);
       scene.background = originalSceneBackground;
+
+      if (hasAnimation && mixer) {
+        mixer.setTime(animationProgress);
+      }
     } catch (err) {
       console.error("updatePreview error:", err);
     }
