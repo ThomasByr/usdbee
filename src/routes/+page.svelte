@@ -1,12 +1,10 @@
 <script lang="ts">
   import "./page.css";
   import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-  import { save } from "@tauri-apps/plugin-dialog";
-  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import { patchUsdLayerForThree } from "$lib/three/usdUtils";
-  import { formatBytes, formatKeyName, isTexture } from "$lib/utils/format";
+  import { formatKeyName } from "$lib/utils/format";
   import ErrorModal from "$lib/components/ErrorModal.svelte";
   import DependenciesTab from "$lib/components/DependenciesTab.svelte";
   import SceneTab from "$lib/components/SceneTab.svelte";
