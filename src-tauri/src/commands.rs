@@ -83,8 +83,11 @@ async fn unpack_usdz(path: &str) -> Result<(String, std::path::PathBuf), String>
                                 || file.name().ends_with(".usda")
                                 || file.name().ends_with(".usd"))
                         {
-                            let f_name = file.name().to_string();
-                            let root_file = out_dir.join(f_name);
+                            let filepath = match file.enclosed_name() {
+                                Some(path) => path.to_owned(),
+                                None => std::path::PathBuf::from(file.name().replace("\\", "/")),
+                            };
+                            let root_file = out_dir.join(filepath);
                             let abs_str = root_file
                                 .to_string_lossy()
                                 .replace("\\\\?\\", "")
@@ -95,8 +98,11 @@ async fn unpack_usdz(path: &str) -> Result<(String, std::path::PathBuf), String>
                 }
                 // fallback if no usd found, just use the first file
                 if let Ok(first_file) = archive.by_index(0) {
-                    let f_name = first_file.name().to_string();
-                    let root_file = out_dir.join(f_name);
+                    let filepath = match first_file.enclosed_name() {
+                        Some(path) => path.to_owned(),
+                        None => std::path::PathBuf::from(first_file.name().replace("\\", "/")),
+                    };
+                    let root_file = out_dir.join(filepath);
                     let abs_str = root_file
                         .to_string_lossy()
                         .replace("\\\\?\\", "")
