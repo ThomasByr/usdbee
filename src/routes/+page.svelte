@@ -148,6 +148,10 @@
   });
 
   $effect(() => {
+    viewer.showExportModal = showExportModal;
+  });
+
+  $effect(() => {
     if (viewer.gridHelper) viewer.gridHelper.visible = viewer.showGrid;
   });
 
