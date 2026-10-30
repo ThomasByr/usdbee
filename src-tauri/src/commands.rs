@@ -69,6 +69,19 @@ fn extract_archive<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     out_dir: &Path,
 ) -> Result<String, String> {
+    let result = extract_archive_inner(archive, out_dir);
+    if result.is_err() {
+        // Rejected or corrupt archives must not leave partially extracted
+        // content behind; cleanup is best-effort and the original error wins.
+        let _ = fs::remove_dir_all(out_dir);
+    }
+    result
+}
+
+fn extract_archive_inner<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    out_dir: &Path,
+) -> Result<String, String> {
     fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
     let mut root_file: Option<String> = None;
     let mut first_file: Option<String> = None;
@@ -466,5 +479,24 @@ mod tests {
         assert_eq!(root, tmp.path().join("assets/model.usda").to_string_lossy());
         assert!(tmp.path().join("assets/model.usda").exists());
         assert!(tmp.path().join("assets/texture.png").exists());
+    }
+
+    #[test]
+    fn rejected_archive_after_valid_entry_leaves_no_output_dir() {
+        let bytes = make_zip(&[
+            ("assets/model.usda", b"usd data"),
+            ("../traversal.txt", b"pwn"),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let out_dir = tmp.path().join("extracted");
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+        let result = extract_archive(&mut archive, &out_dir);
+
+        assert!(result.is_err(), "traversal entry must abort extraction");
+        assert!(
+            !out_dir.exists(),
+            "a rejected archive must not leave partially extracted content"
+        );
     }
 }
