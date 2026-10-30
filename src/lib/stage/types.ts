@@ -26,6 +26,8 @@ export interface PrimNode {
 export interface ValuePayload {
   type: string;
   data: unknown;
+  truncated?: boolean;
+  count?: number;
 }
 
 export interface AttributeInfo {

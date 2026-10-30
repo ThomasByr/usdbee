@@ -57,6 +57,18 @@ describe("formatValue", () => {
     expect(formatValue(payload("int_array", []))).toBe("[]");
   });
 
+  it("marks bounded array previews with their total count", () => {
+    expect(formatValue({ type: "int_array", data: [1, 2, 3], truncated: true, count: 5000 })).toBe(
+      "[1, 2, 3] … truncated (5000 total)",
+    );
+  });
+
+  it("renders dictionaries as JSON objects", () => {
+    expect(formatValue(payload("dict", { style: { type: "string", data: "flat" } }))).toBe(
+      '{"style":{"type":"string","data":"flat"}}',
+    );
+  });
+
   it("renders unsupported via its string representation", () => {
     expect(formatValue(payload("unsupported", "<opaque>"))).toBe("<opaque>");
   });

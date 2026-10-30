@@ -35,6 +35,7 @@ function matrixSize(type: string): number | null {
 function formatScalar(x: unknown): string {
   if (Array.isArray(x)) return "[" + x.map(formatScalar).join(", ") + "]";
   if (typeof x === "number") return num(x);
+  if (typeof x === "object" && x !== null) return JSON.stringify(x);
   return String(x);
 }
 
@@ -42,11 +43,14 @@ export function formatValue(value: ValuePayload): string {
   const { type, data } = value;
   if (type === "unauthored" || data === null || data === undefined) return "unauthored";
   const size = matrixSize(type);
-  if (size !== null && Array.isArray(data)) return formatMatrix(data, size);
-  if (type.startsWith("matrix") && type.endsWith("_array") && Array.isArray(data)) {
+  let formatted: string;
+  if (size !== null && Array.isArray(data)) {
+    formatted = formatMatrix(data, size);
+  } else if (type.startsWith("matrix") && type.endsWith("_array") && Array.isArray(data)) {
     const inner = matrixSize(type.slice(0, -6))!;
-    return (data as unknown[][]).map((m) => formatMatrix(m, inner)).join("\n\n");
+    formatted = (data as unknown[][]).map((m) => formatMatrix(m, inner)).join("\n\n");
+  } else {
+    formatted = formatScalar(data);
   }
-  if (Array.isArray(data)) return formatScalar(data);
-  return formatScalar(data);
+  return value.truncated ? `${formatted} … truncated (${value.count ?? "?"} total)` : formatted;
 }
