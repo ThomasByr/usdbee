@@ -3,8 +3,14 @@
     defaultPrim = "Scene"
 )
 
-def Xform "Scene"
+def Xform "Scene" (
+    customData = { string style = "flat" }
+)
 {
+    custom asset refAsset = @./asset.usda@
+    custom weirdType knots = 5
+    custom half roughness = 0.5
+
     def "WheelA" (
         instanceable = true
         prepend references = @./asset.usda@

@@ -5,6 +5,7 @@ mod models;
 mod omniverse;
 pub mod parser;
 pub mod stage;
+pub mod values;
 
 use tauri::Emitter;
 use tauri::{
@@ -70,6 +71,7 @@ pub fn run() {
             commands::save_file_bytes,
             stage::open_usd_path,
             stage::get_stage_tree,
+            stage::get_prim_details,
             omniverse::set_omniverse_url,
             omniverse::get_omniverse_url
         ])

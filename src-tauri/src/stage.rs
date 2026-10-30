@@ -10,6 +10,7 @@ use openusd::usd::{InitialLoadSet, PrimPredicate, Stage};
 use serde::{Deserialize, Serialize};
 
 use crate::fetcher::get_usdbee_cache_dir;
+use crate::values::{serialize_details, PrimDetails};
 
 pub enum StageRequest {
     Open {
@@ -18,6 +19,11 @@ pub enum StageRequest {
     },
     GetTree {
         reply: mpsc::Sender<Result<Vec<PrimNode>, String>>,
+    },
+    GetDetails {
+        path: String,
+        time: Option<f64>,
+        reply: mpsc::Sender<Result<PrimDetails, String>>,
     },
 }
 
@@ -44,6 +50,16 @@ pub fn spawn_stage_owner() -> StageState {
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| serialize_tree(stage)))
                             .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::GetDetails { path, time, reply } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            serialize_details(stage, &path, time)
+                        }))
+                        .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
                     };
                     let _ = reply.send(response);
@@ -180,6 +196,35 @@ pub fn request_stage_tree(sender: &mpsc::Sender<StageRequest>) -> Result<Vec<Pri
     let (reply, response) = mpsc::channel();
     sender
         .send(StageRequest::GetTree { reply })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn get_prim_details(
+    path: String,
+    time: Option<f64>,
+    state: tauri::State<'_, StageState>,
+) -> Result<PrimDetails, String> {
+    request_stage_details(&state.sender, &path, time)
+}
+
+pub fn request_stage_details(
+    sender: &mpsc::Sender<StageRequest>,
+    path: &str,
+    time: Option<f64>,
+) -> Result<PrimDetails, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::GetDetails {
+            path: path.to_string(),
+            time,
+            reply,
+        })
         .map_err(|_| "stage service unavailable".to_string())?;
     response
         .recv()
