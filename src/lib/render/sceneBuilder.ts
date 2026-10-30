@@ -64,23 +64,42 @@ async function buildNode(node: RenderNode, fetchers: SceneFetchers): Promise<THR
   if (node.has_geometry) {
     const geometry = await fetchGeometry(node, fetchers);
     if (geometry) {
-      const material = await fetchMaterial(node, fetchers);
-      let mesh: THREE.Mesh | THREE.InstancedMesh;
-      if (node.instances.length > 0) {
-        const instanced = new THREE.InstancedMesh(geometry, material, node.instances.length);
-        const matrix = new THREE.Matrix4();
-        node.instances.forEach((instance, i) => {
-          instanced.setMatrixAt(i, matrix.fromArray(instance));
-        });
-        instanced.instanceMatrix.needsUpdate = true;
-        mesh = instanced;
+      if (node.type_name === "Points") {
+        // Point clouds: a size-based PointsMaterial colored by the vertex
+        // colors when present, else the bound material's diffuse/fallback
+        // color.
+        const material = await fetchMaterial(node, fetchers);
+        const vertexColors = geometry.getAttribute("color") != null;
+        const points = new THREE.Points(
+          geometry,
+          new THREE.PointsMaterial({
+            size: 0.1,
+            sizeAttenuation: true,
+            vertexColors,
+            color: vertexColors ? 0xffffff : material.color,
+          }),
+        );
+        points.name = node.path;
+        object.add(points);
       } else {
-        mesh = new THREE.Mesh(geometry, material);
+        const material = await fetchMaterial(node, fetchers);
+        let mesh: THREE.Mesh | THREE.InstancedMesh;
+        if (node.instances.length > 0) {
+          const instanced = new THREE.InstancedMesh(geometry, material, node.instances.length);
+          const matrix = new THREE.Matrix4();
+          node.instances.forEach((instance, i) => {
+            instanced.setMatrixAt(i, matrix.fromArray(instance));
+          });
+          instanced.instanceMatrix.needsUpdate = true;
+          mesh = instanced;
+        } else {
+          mesh = new THREE.Mesh(geometry, material);
+        }
+        mesh.name = node.path;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        object.add(mesh);
       }
-      mesh.name = node.path;
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      object.add(mesh);
     }
   }
 
@@ -102,8 +121,8 @@ export async function buildScene(manifest: RenderNode[], fetchers: SceneFetchers
 // buffers) so a reload can drop the previous render objects.
 export function disposeScene(root: THREE.Object3D): void {
   root.traverse((obj) => {
-    const mesh = obj as THREE.Mesh;
-    if (mesh.isMesh || (mesh as THREE.InstancedMesh).isInstancedMesh) {
+    const mesh = obj as THREE.Mesh & { isPoints?: boolean };
+    if (mesh.isMesh || (mesh as THREE.InstancedMesh).isInstancedMesh || mesh.isPoints) {
       mesh.geometry?.dispose();
       const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       for (const material of materials) material?.dispose();

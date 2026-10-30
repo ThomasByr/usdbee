@@ -214,3 +214,25 @@ fn out_of_range_prototype_index_is_a_readable_error() {
         error
     );
 }
+
+#[test]
+fn manifest_counts_curves_and_points_as_geometry() {
+    let (stage, info) = open_stage(&fixture("curves_points.usda")).expect("stage should open");
+    assert!(
+        info.composition_errors.is_empty(),
+        "composition errors: {:?}",
+        info.composition_errors
+    );
+    let nodes = serialize_render_manifest(&stage, None).expect("manifest should serialize");
+
+    for (path, name, type_name) in [
+        ("/Scene/Stroke", "Stroke", "BasisCurves"),
+        ("/Scene/Dot", "Dot", "BasisCurves"),
+        ("/Scene/Dust", "Dust", "Points"),
+    ] {
+        let node = expect(&nodes, path);
+        assert_eq!(node.type_name, type_name);
+        assert!(node.has_geometry, "{name} renders geometry");
+        assert_eq!(node.material, None, "no binding authored on {name}");
+    }
+}

@@ -18,6 +18,10 @@ fn prim(stage: &openusd::usd::Stage, path: &str) -> Result<Prim, String> {
     stage.prim(prim_path).map_err(|e| e.to_string())
 }
 
+fn tessellate_stage(name: &str) -> (openusd::usd::Stage, usdbee_lib::stage::StageInfo) {
+    open_stage(&fixture(name)).expect("curves/points stage should open")
+}
+
 fn tessellate(stage: &openusd::usd::Stage, path: &str) -> Option<MeshData> {
     tessellate_prim(&prim(stage, path).expect("test prim should resolve"), None)
         .expect("tessellation should not fail for the tested prim")
@@ -229,4 +233,119 @@ fn mesh_without_topology_is_a_readable_error() {
     let error = tessellate_prim(&prim(&stage, "/Scene/Empty").expect("prim resolves"), None)
         .expect_err("missing topology is an error, not a fallback");
     assert!(error.contains("faceVertexCounts"), "got: {}", error);
+}
+
+#[test]
+fn curve_tessellates_to_six_sided_tube_with_pinned_counts() {
+    let (stage, _info) = tessellate_stage("curves_points.usda");
+
+    let mesh = tessellate(&stage, "/Scene/Stroke").expect("curve should tessellate");
+
+    // Controller-pinned counts: per curve of n=4 points, segments = 3, and
+    // per segment a 6-sided ring pair (12 vertices, rings duplicated per
+    // segment, not shared between neighbors) of 6 quads = 36 indices.
+    assert_eq!(mesh.positions.len(), 3 * 12);
+    assert_eq!(mesh.indices.len(), 3 * 36);
+    assert_eq!(mesh.normals.as_ref().map(|n| n.len()), Some(36));
+
+    // Curves render as tubes with no authored primvars: uvs/colors stay
+    // unset (the bound material color applies, controller resolution).
+    assert!(mesh.uvs.is_none());
+    assert!(mesh.colors.is_none());
+
+    // Winding pinned: first quad of segment 0, and the last indices close
+    // the tube back on k=0.
+    assert_eq!(&mesh.indices[0..6], &[0u32, 1, 7, 0, 7, 6]);
+    assert_eq!(&mesh.indices[105..108], &[29u32, 30, 35]);
+}
+
+#[test]
+fn curve_ring_vertices_sit_at_radius_from_their_segment_endpoints() {
+    let (stage, _info) = tessellate_stage("curves_points.usda");
+
+    let mesh = tessellate(&stage, "/Scene/Stroke").expect("curve should tessellate");
+
+    let radius = 0.1f32;
+    let centers = [
+        [0.0f32, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [2.0, 1.0, 0.0],
+    ];
+    for (vertex, position) in mesh.positions.iter().enumerate() {
+        let segment = vertex / 12;
+        let within = vertex % 12;
+        // Ring A centers the segment's start point, ring B its end point.
+        let center = centers[segment + within / 6];
+        let distance_sq = (position[0] - center[0]).powi(2)
+            + (position[1] - center[1]).powi(2)
+            + (position[2] - center[2]).powi(2);
+        assert!(
+            (distance_sq - radius * radius).abs() < 1e-6,
+            "vertex {vertex} at {position:?} is not at radius from center {center:?}"
+        );
+    }
+}
+
+#[test]
+fn curve_tube_normals_are_radial_and_unit_length() {
+    let (stage, _info) = tessellate_stage("curves_points.usda");
+
+    let mesh = tessellate(&stage, "/Scene/Stroke").expect("curve should tessellate");
+
+    let normals = mesh.normals.expect("tube normals are generated radially");
+    // Segment 0's frame: tangent (1, 0, 0) fixes u = (0, 0, 1) ring vertex
+    // 0, so normal[0] points along u and normal[1] at theta = 60 deg.
+    assert!(normals[0][2] > 0.99, "got {:?}", normals[0]);
+    assert!(
+        normals[1][2] > 0.49 && normals[1][1] < -0.49,
+        "got {:?}",
+        normals[1]
+    );
+    for normal in &normals {
+        let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+        assert!((length - 1.0).abs() < 1e-5, "not unit: {normal:?}");
+    }
+}
+
+#[test]
+fn degenerate_one_point_curve_tessellates_to_nothing() {
+    let (stage, _info) = tessellate_stage("curves_points.usda");
+
+    // A degenerate curve contributes nothing (degenerate-face discipline):
+    // the prim does not fail, it just renders no geometry.
+    let mesh = tessellate(&stage, "/Scene/Dot").expect("degenerate curve must not fail");
+    assert_eq!(mesh.positions, Vec::<[f32; 3]>::new());
+    assert_eq!(mesh.indices, Vec::<u32>::new());
+    assert_eq!(mesh.normals, None);
+}
+
+#[test]
+fn points_prim_tessellates_to_positions_only() {
+    let (stage, _info) = tessellate_stage("curves_points.usda");
+
+    let mesh = tessellate(&stage, "/Scene/Dust").expect("points prim should tessellate");
+
+    assert_eq!(
+        mesh.positions,
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0]
+        ]
+    );
+    assert_eq!(mesh.indices, Vec::<u32>::new());
+    assert_eq!(mesh.normals, None, "points carry no normals");
+    assert_eq!(mesh.uvs, None);
+    // Vertex-interpolated displayColor scatters per point.
+    assert_eq!(
+        mesh.colors,
+        Some(vec![
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0]
+        ])
+    );
 }

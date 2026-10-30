@@ -154,4 +154,23 @@ describe("buildScene", () => {
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
+
+  it("builds THREE.Points for Points nodes and a Mesh for BasisCurves", async () => {
+    const manifest = [
+      node({ path: "/World/Dust", name: "Dust", type_name: "Points", has_geometry: true }),
+      node({ path: "/World/Stroke", name: "Stroke", type_name: "BasisCurves", has_geometry: true }),
+    ];
+    const group = await buildScene(manifest, fetchers());
+
+    // Points render as THREE.Points — every decoded vertex is a point.
+    const points = group.getObjectByName("/World/Dust")!.children[0] as THREE.Points;
+    expect(points.isPoints).toBe(true);
+    expect((points.material as THREE.PointsMaterial).type).toBe("PointsMaterial");
+    expect(points.geometry.getAttribute("position").count).toBe(3);
+
+    // BasisCurves tube geometry is a real mesh: the existing Mesh path applies.
+    const mesh = group.getObjectByName("/World/Stroke")!.children[0] as THREE.Mesh;
+    expect(mesh.isMesh).toBe(true);
+    expect((mesh.material as THREE.MeshPhysicalMaterial).type).toBe("MeshPhysicalMaterial");
+  });
 });

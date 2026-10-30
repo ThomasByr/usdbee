@@ -269,7 +269,8 @@ fn stage_err(error: openusd::Error) -> String {
 /// via the schemas `ImageableExt` walk) is `proxy` or `guide` are excluded;
 /// `visible` is the computed visibility (an `invisible` opinion on the prim
 /// or any imageable ancestor clears it, re-authoring `inherited` stops the
-/// walk); mesh nodes carry their direct `material:binding` target path;
+/// walk); geometry nodes (Mesh/BasisCurves/Points) carry their direct
+/// `material:binding` target path;
 /// PointInstancer nodes carry one synthetic child per prototype with the
 /// per-prototype instance matrices (see `prototype_children`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +327,12 @@ fn direct_material(prim: &openusd::usd::Prim) -> Result<Option<String>, String> 
         .direct_binding("")
         .map_err(stage_err)?
         .map(|path| path.to_string()))
+}
+
+/// Exact type names the manifest treats as renderable geometry (Task 5:
+/// curves tessellate to tubes, points tessellate to point clouds).
+fn renders_geometry(type_name: &str) -> bool {
+    matches!(type_name, "Mesh" | "BasisCurves" | "Points")
 }
 
 /// One synthetic RenderNode per PointInstancer prototype, in `prototypes`
@@ -421,7 +428,7 @@ fn prototype_children(
                     // space; the prototype's own xform is folded into them.
                     transform: gf::Matrix4d::IDENTITY.0,
                     visible,
-                    has_geometry: type_name == "Mesh",
+                    has_geometry: renders_geometry(&type_name),
                     type_name,
                     animated: false,
                     children: Vec::new(),
@@ -461,14 +468,14 @@ pub fn serialize_render_manifest(
                 children_of(stage, &child, time)?
             };
             let node = RenderNode {
-                material: if type_name == "Mesh" {
+                material: if renders_geometry(&type_name) {
                     direct_material(&child)?
                 } else {
                     None
                 },
                 path: child.path().to_string(),
                 name: child.path().name().unwrap_or_default().to_string(),
-                has_geometry: type_name == "Mesh",
+                has_geometry: renders_geometry(&type_name),
                 type_name,
                 animated: false,
                 instances: Vec::new(),
@@ -608,7 +615,8 @@ fn synthetic_prototype(path: &sdf::Path) -> Result<Option<(usize, sdf::Path)>, S
 
 /// Packed geometry bytes for one prim, tessellating on demand and caching the
 /// result (keyed by the resolved path, so prototype children share one
-/// tessellation with the prototype prim). Missing prims and non-Mesh prims
+/// tessellation with the prototype prim). Missing prims and non-geometry
+/// prims (those outside `renders_geometry`) as well
 /// are readable per-call errors; a failed prim never poisons the cache.
 fn geometry_bytes(
     stage: &Stage,

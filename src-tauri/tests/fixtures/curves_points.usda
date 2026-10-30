@@ -1,0 +1,32 @@
+#usda 1.0
+(
+    defaultPrim = "Scene"
+)
+
+def Xform "Scene"
+{
+    # One polyline of 4 points (3 segments), constant width 0.2 -> radius 0.1.
+    def BasisCurves "Stroke"
+    {
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (2, 1, 0)]
+        int[] curveVertexCounts = [4]
+        float[] widths = [0.2]
+    }
+
+    def BasisCurves "Dot"
+    {
+        # Degenerate: 1 point, no segments -> tessellates to nothing.
+        point3f[] points = [(0, 0, 0)]
+        int[] curveVertexCounts = [1]
+        float[] widths = [0.2]
+    }
+
+    def Points "Dust"
+    {
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        float[] widths = [0.03, 0.03, 0.03, 0.03]
+        color3f[] primvars:displayColor = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)] (
+            interpolation = "vertex"
+        )
+    }
+}

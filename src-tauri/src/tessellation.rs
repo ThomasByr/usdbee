@@ -1,18 +1,22 @@
-//! Static-mesh tessellation (Phase 2, Task 1): one composed `Mesh` prim ->
-//! render-ready triangle soup. A pure function over the openusd `Prim` — no
-//! Tauri types; in the app this runs inside the stage-owner thread (Task 2
-//! will bridge it).
+//! Tessellation (Phase 2, Tasks 1/5): one composed geometry prim ->
+//! render-ready data. A pure function over the openusd `Prim` — no
+//! Tauri types; in the app this runs inside the stage-owner thread.
 //!
-//! Triangulation fans each face `(v0, vi, vi+1)` over `faceVertexIndices`
-//! and `faceVertexCounts`; holes and bridging are out of scope. Subdivision
-//! meshes render their base hull. Authored `normals`, `primvars:st` and
-//! `primvars:displayColor` are read at the queried time code; unauthored
-//! normals are generated as per-vertex area-weighted face-normal averages.
+//! `Mesh` prims triangulate by fanning each face `(v0, vi, vi+1)` over
+//! `faceVertexIndices` and `faceVertexCounts` (holes and bridging are out
+//! of scope; subdivision meshes render their base hull). `BasisCurves`
+//! prims tessellate to open 6-sided tubes (no end caps) with constant
+//! widths; `Points` prims tessellate to a point cloud (indices empty).
+//! Authored `normals`, `primvars:st` and `primvars:displayColor` are read
+//! at the queried time code; for meshes unauthored normals are generated
+//! as per-vertex area-weighted face-normal averages.
 
 use openusd::gf::{Vec2f, Vec3f};
 use openusd::sdf;
 use openusd::usd::{Prim, SchemaBase, TimeCode};
-use openusd_schemas::geom::{AttributeMetadata, Interpolation, Mesh, Primvar};
+use openusd_schemas::geom::{
+    AttributeMetadata, Curves, CurvesSchema, Interpolation, Mesh, Points, Primvar,
+};
 use openusd_schemas::geom::{MeshSchema, PointBasedSchema};
 use openusd_schemas::SchemaError;
 
@@ -69,54 +73,55 @@ fn context(path: &str, error: impl std::fmt::Display) -> String {
     format!("failed to tessellate {}: {}", path, error)
 }
 
-/// Tessellate one composed prim. `Ok(None)` for anything that is not a
-/// `Mesh`; `Err` names the prim path when the mesh itself cannot be
-/// tessellated. `time: Some(t)` reads time-sampled attributes at `t`;
-/// `None` reads the default-time values.
+/// Tessellate one composed prim. `Ok(None)` for anything that is not
+/// renderable geometry (Mesh, BasisCurves, Points); `Err` names the prim
+/// path when the geometry itself cannot be tessellated. `time: Some(t)`
+/// reads time-sampled attributes at `t`; `None` reads the default-time
+/// values.
 pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData>, String> {
     let path = prim.path().to_string();
-    let is_mesh = prim
+    // Typed views are registry-gated, and the stage owner registers the
+    // schemas registry anyway; the straight type-name compare keeps the
+    // dispatch readable alongside `from_prim_unchecked` (Task 1 precedent).
+    let type_name = prim
         .type_name()
         .map_err(|e| context(&path, e))?
-        .is_some_and(|t| t.as_str() == "Mesh");
-    // Typed `Mesh::from_prim` answers through the stage schema registry,
-    // which our stage owner does not register — compare the straight type
-    // name and view the prim unchecked instead.
-    if !is_mesh {
-        return Ok(None);
-    }
-    let mesh = Mesh::from_prim_unchecked(prim.clone());
+        .map(|t| t.to_string());
     let time_code = time.map(TimeCode::new);
+    match type_name.as_deref() {
+        Some("Mesh") => mesh_data(prim, time_code, &path),
+        Some("BasisCurves") => curves_data(prim, time_code, &path),
+        Some("Points") => points_data(prim, time_code, &path),
+        _ => Ok(None),
+    }
+}
 
-    let points: Vec<Vec3f> = expect_value(mesh.points_at(time_code), "points", &path)?;
+fn mesh_data(
+    prim: &Prim,
+    time_code: Option<TimeCode>,
+    path: &str,
+) -> Result<Option<MeshData>, String> {
+    let mesh = Mesh::from_prim_unchecked(prim.clone());
+
+    let points: Vec<Vec3f> = expect_value(mesh.points_at(time_code), "points", path)?;
     let counts: Vec<i32> = expect_value(
         mesh.face_vertex_counts_at(time_code),
         "faceVertexCounts",
-        &path,
+        path,
     )?;
     let index_list: Vec<i32> = expect_value(
         mesh.face_vertex_indices_at(time_code),
         "faceVertexIndices",
-        &path,
+        path,
     )?;
 
-    let vertex_count = points.len();
     // Non-finite positions cannot reach a GPU buffer: such vertices are
     // compacted away, surviving indices remap, and any face referencing a
     // dropped (or out-of-range) vertex contributes nothing at all. Zero
     // lengths and coincident vertices are NOT non-finite, so faces that use
     // them stay.
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(points.len());
-    let mut orig_to_new: Vec<Option<u32>> = Vec::with_capacity(points.len());
-    for point in points.iter() {
-        let keep = point.x.is_finite() && point.y.is_finite() && point.z.is_finite();
-        if keep {
-            orig_to_new.push(Some(positions.len() as u32));
-            positions.push([point.x, point.y, point.z]);
-        } else {
-            orig_to_new.push(None);
-        }
-    }
+    let (positions, orig_to_new) = compact_points(&points);
+    let vertex_count = points.len();
 
     // Face walk: (surviving original vertex, flat corner slot, authored face
     // id) triples feed the primvar scatter; the corner slot aligns with
@@ -155,16 +160,16 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
     // shortcut: an authored normal set that cannot map over the triangle
     // soup is dropped (normals: None) rather than falling back to generated
     // ones; revisit when the renderer cares about either lossy set.
-    let normals = match normals_attr_values(&mesh, time_code).map_err(|e| context(&path, e))? {
+    let normals = match normals_attr_values(&mesh, time_code).map_err(|e| context(path, e))? {
         Some((scope, values)) => meshable(scope, values, &corners, vertex_count, &orig_to_new)
             .map(|per_vertex| per_vertex.into_iter().map(|v| [v.x, v.y, v.z]).collect()),
         None => Some(generated_normals(&positions, &indices)),
     };
 
-    let uvs = read_primvar::<Vec2f>(&mesh, "primvars:st", time_code, &path)?
+    let uvs = read_primvar::<Vec2f>(mesh.prim(), "primvars:st", time_code, path)?
         .and_then(|(scope, values)| meshable(scope, values, &corners, vertex_count, &orig_to_new))
         .map(|per_vertex| per_vertex.into_iter().map(|v| [v.x, v.y]).collect());
-    let colors = read_primvar::<Vec3f>(&mesh, "primvars:displayColor", time_code, &path)?
+    let colors = read_primvar::<Vec3f>(mesh.prim(), "primvars:displayColor", time_code, path)?
         .and_then(|(scope, values)| meshable(scope, values, &corners, vertex_count, &orig_to_new))
         .map(|per_vertex| per_vertex.into_iter().map(|v| [v.x, v.y, v.z]).collect());
 
@@ -175,6 +180,202 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
         colors,
         indices,
     }))
+}
+
+/// 6-sided tube cross-section (controller resolution).
+const CURVE_SIDES: usize = 6;
+/// Unauthored (or non-positive, non-finite) curve width fallback per the
+/// brief: a constant width of 0.1 -> a 0.05 ring radius.
+const DEFAULT_CURVE_WIDTH: f32 = 0.1;
+
+fn curves_data(
+    prim: &Prim,
+    time_code: Option<TimeCode>,
+    path: &str,
+) -> Result<Option<MeshData>, String> {
+    let curves = Curves::from_prim_unchecked(prim.clone());
+    let points: Vec<Vec3f> = expect_value(curves.points_at(time_code), "points", path)?;
+    let counts: Vec<i32> = expect_value(
+        curves.curve_vertex_counts_at(time_code),
+        "curveVertexCounts",
+        path,
+    )?;
+    // Constant interpolation only (controller resolution): one width value
+    // rules the whole curve; vertex/curve-varying widths — or none — degrade
+    // to the first value / the 0.1 default. shortcut: per-vertex width
+    // detail is lost until the renderer needs tapered tubes.
+    let width = curves
+        .widths_at(time_code)
+        .map_err(|e| context(path, e))?
+        .into_iter()
+        .flatten()
+        .next();
+    let radius = width
+        .filter(|w| w.is_finite() && *w > 0.0)
+        .unwrap_or(DEFAULT_CURVE_WIDTH)
+        / 2.0;
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut cursor = 0usize;
+    for &count in counts.iter() {
+        let count = count.max(0) as usize;
+        let curve = points.get(cursor..cursor + count).unwrap_or(&[]);
+        cursor += count;
+        // A segment contributes only when both endpoints are finite and
+        // distinct; a curve with fewer than two usable points contributes
+        // nothing (degenerate-face discipline), and the prim never fails.
+        let usable_segments: Vec<usize> = (0..curve.len().saturating_sub(1))
+            .filter(|&i| {
+                let (a, b) = (curve[i], curve[i + 1]);
+                let delta = [b.x - a.x, b.y - a.y, b.z - a.z];
+                is_finite_vec3(a)
+                    && is_finite_vec3(b)
+                    && delta.iter().map(|d| d * d).sum::<f32>() > 0.0
+            })
+            .collect();
+        let Some(&first) = usable_segments.first() else {
+            continue;
+        };
+
+        // One fixed reference frame per curve, derived from the first
+        // segment's tangent. shortcut: parallel transport would keep ring
+        // orientation continuous around corners; a shared frame is the
+        // accepted approximation (corner continuity out of scope).
+        let tangent = normalize3([
+            curve[first + 1].x - curve[first].x,
+            curve[first + 1].y - curve[first].y,
+            curve[first + 1].z - curve[first].z,
+        ]);
+        let helper: [f32; 3] = if tangent[1].abs() > 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let u = normalize3(cross3(tangent, helper));
+        let v = cross3(tangent, u);
+
+        for i in usable_segments {
+            let (a, b) = (curve[i], curve[i + 1]);
+            let base = positions.len() as u32;
+            for center in [a, b] {
+                for k in 0..CURVE_SIDES {
+                    let theta = k as f32 * std::f32::consts::TAU / CURVE_SIDES as f32;
+                    let (sin, cos) = (theta.sin(), theta.cos());
+                    let radial = [
+                        u[0] * cos + v[0] * sin,
+                        u[1] * cos + v[1] * sin,
+                        u[2] * cos + v[2] * sin,
+                    ];
+                    positions.push([
+                        center.x + radius * radial[0],
+                        center.y + radius * radial[1],
+                        center.z + radius * radial[2],
+                    ]);
+                    // The normal is radial from the tube center axis per
+                    // ring vertex (the tube shape makes this exact).
+                    normals.push(radial);
+                }
+            }
+            // Ring A first (offsets base..base+6), ring B second; each quad
+            // fans to two outward-facing triangles.
+            for k in 0..CURVE_SIDES {
+                let next = ((k + 1) % CURVE_SIDES) as u32;
+                let sides = CURVE_SIDES as u32;
+                let (a_k, a_next) = (base + k as u32, base + next);
+                let (b_k, b_next) = (base + sides + k as u32, base + sides + next);
+                indices.extend_from_slice(&[a_k, a_next, b_next, a_k, b_next, b_k]);
+            }
+        }
+    }
+
+    let normals = if positions.is_empty() {
+        None
+    } else {
+        Some(normals)
+    };
+    // shortcut: curve primvars (uvs, displayColor) do not scatter onto tube
+    // rings yet — the bound material color applies; revisit when curves
+    // need per-vertex colors.
+    Ok(Some(MeshData {
+        positions,
+        normals,
+        uvs: None,
+        colors: None,
+        indices,
+    }))
+}
+
+fn points_data(
+    prim: &Prim,
+    time_code: Option<TimeCode>,
+    path: &str,
+) -> Result<Option<MeshData>, String> {
+    let points_schema = Points::from_prim_unchecked(prim.clone());
+    let points: Vec<Vec3f> = expect_value(points_schema.points_at(time_code), "points", path)?;
+
+    let (positions, orig_to_new) = compact_points(&points);
+    let vertex_count = points.len();
+
+    // No faces, so no indices and no face walk: vertex and constant
+    // primvars reuse the mesh scatter through the (empty) corners list,
+    // while uniform/faceVarying values answer None from it.
+    let corners: Vec<(u32, usize, usize)> = Vec::new();
+    let uvs = read_primvar::<Vec2f>(prim, "primvars:st", time_code, path)?
+        .and_then(|(scope, values)| meshable(scope, values, &corners, vertex_count, &orig_to_new))
+        .map(|per_vertex| per_vertex.into_iter().map(|v| [v.x, v.y]).collect());
+    let colors = read_primvar::<Vec3f>(prim, "primvars:displayColor", time_code, path)?
+        .and_then(|(scope, values)| meshable(scope, values, &corners, vertex_count, &orig_to_new))
+        .map(|per_vertex| per_vertex.into_iter().map(|v| [v.x, v.y, v.z]).collect());
+
+    // shortcut: the renderer's THREE.Points material ignores normals, so
+    // authored points norms are dropped until it asks for them.
+    Ok(Some(MeshData {
+        positions,
+        normals: None,
+        uvs,
+        colors,
+        indices: Vec::new(),
+    }))
+}
+
+fn is_finite_vec3(value: Vec3f) -> bool {
+    value.x.is_finite() && value.y.is_finite() && value.z.is_finite()
+}
+
+/// Non-finite positions cannot reach a GPU buffer: such vertices compact
+/// away and survivors remap (the mapping is the original-vertex -> slot
+/// list the primvar scatter consumes).
+fn compact_points(points: &[Vec3f]) -> (Vec<[f32; 3]>, Vec<Option<u32>>) {
+    let mut positions = Vec::with_capacity(points.len());
+    let mut orig_to_new = Vec::with_capacity(points.len());
+    for point in points.iter() {
+        if is_finite_vec3(*point) {
+            orig_to_new.push(Some(positions.len() as u32));
+            positions.push([point.x, point.y, point.z]);
+        } else {
+            orig_to_new.push(None);
+        }
+    }
+    (positions, orig_to_new)
+}
+
+fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn normalize3(value: [f32; 3]) -> [f32; 3] {
+    let length = (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt();
+    if length > 0.0 {
+        [value[0] / length, value[1] / length, value[2] / length]
+    } else {
+        [0.0, 0.0, 0.0]
+    }
 }
 
 /// Binary wire layout of one mesh (Phase 2, Task 2), little-endian:
@@ -271,7 +472,7 @@ fn normals_attr_values(
 /// applied (`compute_flattened`), paired with the interpolation the values
 /// must be scattered with.
 fn read_primvar<U>(
-    mesh: &Mesh,
+    prim: &Prim,
     name: &str,
     time_code: Option<TimeCode>,
     path: &str,
@@ -280,7 +481,7 @@ where
     Vec<U>: sdf::FromValue + std::convert::TryFrom<sdf::Value>,
     <Vec<U> as std::convert::TryFrom<sdf::Value>>::Error: Into<openusd::Error>,
 {
-    let Some(variable) = Primvar::from_attribute(mesh.prim().attribute(name)) else {
+    let Some(variable) = Primvar::from_attribute(prim.attribute(name)) else {
         return Ok(None);
     };
     let scope = Scope::from(variable.interpolation().map_err(|e| context(path, e))?);
