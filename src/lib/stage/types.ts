@@ -22,6 +22,34 @@ export interface PrimNode {
   children: PrimNode[];
 }
 
+// Rust stage.rs::RenderNode — render manifest node (Phase 2). `transform`
+// and each entry of `instances` are [f64; 16], row-major 4x4 in the USD
+// row-vector convention (translation in the last row), same as
+// PrimDetails.local_transform.
+export interface RenderNode {
+  path: string;
+  name: string;
+  type_name: string;
+  has_geometry: boolean;
+  animated: boolean;
+  material: string | null;
+  instances: number[][];
+  transform: number[];
+  visible: boolean;
+  children: RenderNode[];
+}
+
+// Rust tessellation.rs::pack_geometry header — first 20 bytes of the
+// get_geometry_data payload, little-endian. flags: bit0 has_normals,
+// bit1 has_uvs, bit2 has_colors.
+export interface GeometryHeader {
+  magic: number;
+  version: number;
+  vertex_count: number;
+  index_count: number;
+  flags: number;
+}
+
 // serde_json::Value — arbitrary JSON (number, string, bool, null, array...).
 export interface ValuePayload {
   type: string;

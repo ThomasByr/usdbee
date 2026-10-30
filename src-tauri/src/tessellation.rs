@@ -177,6 +177,67 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
     }))
 }
 
+/// Binary wire layout of one mesh (Phase 2, Task 2), little-endian:
+/// magic u32 = 0x55534442 ("USDB"), version u32 = 1, vertex_count u32,
+/// index_count u32, flags u32 (bit0 has_normals, bit1 has_uvs, bit2
+/// has_colors); then positions f32x3, normals f32x3, uvs f32x2, colors
+/// f32x3 in flag-bit order, then indices u32. Per-vertex arrays must be
+/// `positions.len()` long (tessellate_prim guarantees this).
+pub fn pack_geometry(mesh: &MeshData) -> Vec<u8> {
+    const MAGIC: u32 = 0x5553_4442;
+    const VERSION: u32 = 1;
+    let flags = mesh.normals.is_some() as u32
+        | (mesh.uvs.is_some() as u32) << 1
+        | (mesh.colors.is_some() as u32) << 2;
+    let mut bytes = Vec::with_capacity(
+        20 + mesh.positions.len() * 12
+            + mesh.normals.as_ref().map_or(0, |v| v.len() * 12)
+            + mesh.uvs.as_ref().map_or(0, |v| v.len() * 8)
+            + mesh.colors.as_ref().map_or(0, |v| v.len() * 12)
+            + mesh.indices.len() * 4,
+    );
+    for word in [
+        MAGIC,
+        VERSION,
+        mesh.positions.len() as u32,
+        mesh.indices.len() as u32,
+        flags,
+    ] {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    // Sections in flag-bit order: positions, normals, uvs, colors.
+    push_vec3s(&mut bytes, &mesh.positions);
+    if let Some(normals) = &mesh.normals {
+        push_vec3s(&mut bytes, normals);
+    }
+    if let Some(uvs) = &mesh.uvs {
+        push_vec2s(&mut bytes, uvs);
+    }
+    if let Some(colors) = &mesh.colors {
+        push_vec3s(&mut bytes, colors);
+    }
+    for index in &mesh.indices {
+        bytes.extend_from_slice(&index.to_le_bytes());
+    }
+    bytes
+}
+
+fn push_vec3s(bytes: &mut Vec<u8>, vectors: &[[f32; 3]]) {
+    for vector in vectors {
+        for component in vector {
+            bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+}
+
+fn push_vec2s(bytes: &mut Vec<u8>, vectors: &[[f32; 2]]) {
+    for vector in vectors {
+        for component in vector {
+            bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+}
+
 fn expect_value<T>(
     value: openusd::Result<Option<T>>,
     attribute: &str,

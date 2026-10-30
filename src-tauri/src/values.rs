@@ -206,21 +206,27 @@ pub fn serialize_payload(declared: Option<&ValueTypeName>, value: &Value) -> Val
         )),
         Value::Vec2f(v) => Some((vec_family(declared, "vec2f"), serde_json::json!([v.x, v.y]))),
         Value::Vec2d(v) => Some((vec_family(declared, "vec2d"), serde_json::json!([v.x, v.y]))),
-        Value::Vec2i(v) => Some((vec_family(declared, "vec2i"), serde_json::json!([v.x, v.y]))),        Value::Vec3h(v) => Some((
+        Value::Vec2i(v) => Some((vec_family(declared, "vec2i"), serde_json::json!([v.x, v.y]))),
+        Value::Vec3h(v) => Some((
             vec_family(declared, "vec3h"),
-            vec3_json(v.x.to_f32() as f64, v.y.to_f32() as f64, v.z.to_f32() as f64),
+            vec3_json(
+                v.x.to_f32() as f64,
+                v.y.to_f32() as f64,
+                v.z.to_f32() as f64,
+            ),
         )),
-        Value::Vec3f(v) => Some((vec_family(declared, "vec3f"), vec3_json(v.x as f64, v.y as f64, v.z as f64))),
+        Value::Vec3f(v) => Some((
+            vec_family(declared, "vec3f"),
+            vec3_json(v.x as f64, v.y as f64, v.z as f64),
+        )),
         Value::Vec3d(v) => Some((vec_family(declared, "vec3d"), vec3_json(v.x, v.y, v.z))),
-        Value::Vec3i(v) => Some((vec_family(declared, "vec3i"), serde_json::json!([v.x, v.y, v.z]))),
+        Value::Vec3i(v) => Some((
+            vec_family(declared, "vec3i"),
+            serde_json::json!([v.x, v.y, v.z]),
+        )),
         Value::Vec4h(v) => Some((
             vec_family(declared, "vec4h"),
-            serde_json::json!([
-                v.x.to_f32(),
-                v.y.to_f32(),
-                v.z.to_f32(),
-                v.w.to_f32()
-            ]),
+            serde_json::json!([v.x.to_f32(), v.y.to_f32(), v.z.to_f32(), v.w.to_f32()]),
         )),
         Value::Vec4f(v) => Some((
             vec_family(declared, "vec4f"),
@@ -233,7 +239,8 @@ pub fn serialize_payload(declared: Option<&ValueTypeName>, value: &Value) -> Val
         Value::Vec4i(v) => Some((
             vec_family(declared, "vec4i"),
             serde_json::json!([v.x, v.y, v.z, v.w]),
-        )),        Value::Vec2hVec(v) => Some((
+        )),
+        Value::Vec2hVec(v) => Some((
             format!("{}_array", vec_family(declared, "vec2h")),
             serde_json::json!(v
                 .iter()
@@ -251,7 +258,8 @@ pub fn serialize_payload(declared: Option<&ValueTypeName>, value: &Value) -> Val
         Value::Vec2iVec(v) => Some((
             format!("{}_array", vec_family(declared, "vec2i")),
             serde_json::json!(v.iter().map(|v| [v.x, v.y]).collect::<Vec<_>>()),
-        )),        Value::Vec3hVec(v) => Some((
+        )),
+        Value::Vec3hVec(v) => Some((
             format!("{}_array", vec_family(declared, "vec3h")),
             serde_json::json!(v
                 .iter()
@@ -289,17 +297,11 @@ pub fn serialize_payload(declared: Option<&ValueTypeName>, value: &Value) -> Val
         )),
         Value::Vec4dVec(v) => Some((
             format!("{}_array", vec_family(declared, "vec4d")),
-            serde_json::json!(v
-                .iter()
-                .map(|v| [v.x, v.y, v.z, v.w])
-                .collect::<Vec<_>>()),
+            serde_json::json!(v.iter().map(|v| [v.x, v.y, v.z, v.w]).collect::<Vec<_>>()),
         )),
         Value::Vec4iVec(v) => Some((
             format!("{}_array", vec_family(declared, "vec4i")),
-            serde_json::json!(v
-                .iter()
-                .map(|v| [v.x, v.y, v.z, v.w])
-                .collect::<Vec<_>>()),
+            serde_json::json!(v.iter().map(|v| [v.x, v.y, v.z, v.w]).collect::<Vec<_>>()),
         )),
         Value::Matrix2d(m) => Some(("matrix2d".into(), serde_json::json!(m.0))),
         Value::Matrix3d(m) => Some(("matrix3d".into(), serde_json::json!(m.0))),
@@ -326,10 +328,7 @@ pub fn serialize_payload(declared: Option<&ValueTypeName>, value: &Value) -> Val
                 values
                     .iter()
                     .map(|(key, value)| {
-                        (
-                            key.clone(),
-                            nested_payload(serialize_payload(None, value)),
-                        )
+                        (key.clone(), nested_payload(serialize_payload(None, value)))
                     })
                     .collect(),
             ),
@@ -555,8 +554,7 @@ fn composition_arcs(stage: &Stage, prim: &Prim) -> Vec<String> {
     let mut arcs = Vec::new();
     let path = prim.path().clone();
 
-    if let Ok(Some(Value::ReferenceListOp(op))) = stage.field::<Value>(path.clone(), "references")
-    {
+    if let Ok(Some(Value::ReferenceListOp(op))) = stage.field::<Value>(path.clone(), "references") {
         for reference in list_op_items(&op) {
             push_unique(
                 &mut arcs,
@@ -593,7 +591,7 @@ fn composition_arcs(stage: &Stage, prim: &Prim) -> Vec<String> {
 /// row-vector (`v' = v * M`), so each op in xformOpOrder pre-multiplies the
 /// accumulator, giving the USD contract that the first listed op applies
 /// last.
-fn local_transform(prim: &Prim, time: Option<f64>) -> Result<Option<gf::Matrix4d>, String> {
+pub fn local_transform(prim: &Prim, time: Option<f64>) -> Result<Option<gf::Matrix4d>, String> {
     Ok(match compose_xform(prim, time)? {
         ComposedXform::NoOps | ComposedXform::Unsupported => None,
         ComposedXform::Matrix(matrix) => Some(matrix),
@@ -638,15 +636,13 @@ fn compose_xform(prim: &Prim, time: Option<f64>) -> Result<ComposedXform, String
 
 /// Whether the prim's `xformOpOrder` contains `!resetXformStack!`.
 fn resets_xform_stack(prim: &Prim, time: Option<f64>) -> Result<bool, String> {
-    Ok(
-        matches!(
-            prim.attribute("xformOpOrder")
-                .get_at::<Value>(time.map(TimeCode::new))
-                .map_err(err)?,
-            Some(Value::TokenVec(ops))
-                if ops.iter().any(|op| op.as_str() == "!resetXformStack!")
-        ),
-    )
+    Ok(matches!(
+        prim.attribute("xformOpOrder")
+            .get_at::<Value>(time.map(TimeCode::new))
+            .map_err(err)?,
+        Some(Value::TokenVec(ops))
+            if ops.iter().any(|op| op.as_str() == "!resetXformStack!")
+    ))
 }
 
 /// shortcut: unsupported xform ops yield None, Phase 3 extends coverage
@@ -705,10 +701,7 @@ fn op_transform(prim: &Prim, op: &str, time: Option<f64>) -> Result<Option<gf::M
             Some(matrix * rotate(order[2], angle(order[2])))
         }
         ("orient", Value::Quatf(q)) => Some(gf::Matrix4d::from_quat([
-            q.w as f64,
-            q.x as f64,
-            q.y as f64,
-            q.z as f64,
+            q.w as f64, q.x as f64, q.y as f64, q.z as f64,
         ])),
         ("orient", Value::Quatd(q)) => Some(gf::Matrix4d::from_quat([q.w, q.x, q.y, q.z])),
         ("transform", Value::Matrix4d(matrix)) => Some(*matrix),
@@ -818,8 +811,14 @@ mod tests {
             payload(None, &Value::Vec3i(gf::Vec3i { x: 1, y: 2, z: 3 })).data,
             json!([1, 2, 3])
         );
-        assert_eq!(payload(None, &Value::Vec4f(gf::Vec4f::default())).r#type, "vec4f");
-        assert_eq!(payload(None, &Value::Vec4d(gf::Vec4d::default())).r#type, "vec4d");
+        assert_eq!(
+            payload(None, &Value::Vec4f(gf::Vec4f::default())).r#type,
+            "vec4f"
+        );
+        assert_eq!(
+            payload(None, &Value::Vec4d(gf::Vec4d::default())).r#type,
+            "vec4d"
+        );
     }
 
     #[test]
@@ -865,7 +864,10 @@ mod tests {
         let matrix_payload = payload(None, &matrix);
         assert_eq!(matrix_payload.r#type, "matrix4d");
         assert_eq!(matrix_payload.data.as_array().map(Vec::len), Some(16));
-        assert_eq!(matrix_payload.data, json!(gf::Matrix4d::translation([1.0, 2.0, 3.0]).0));
+        assert_eq!(
+            matrix_payload.data,
+            json!(gf::Matrix4d::translation([1.0, 2.0, 3.0]).0)
+        );
     }
 
     #[test]
@@ -874,7 +876,10 @@ mod tests {
             payload(None, &Value::IntVec(vec![1, 2])).r#type,
             "int_array"
         );
-        assert_eq!(payload(None, &Value::IntVec(vec![1, 2])).data, json!([1, 2]));
+        assert_eq!(
+            payload(None, &Value::IntVec(vec![1, 2])).data,
+            json!([1, 2])
+        );
         assert_eq!(
             payload(None, &Value::FloatVec(vec![1.0])).r#type,
             "float_array"
@@ -905,7 +910,12 @@ mod tests {
         assert_eq!(payload.data.as_array().map(Vec::len), Some(4096));
         assert_eq!(payload.truncated, Some(true));
         assert_eq!(payload.count, Some(5000));
-        assert!(serde_json::to_string(&payload).expect("payload serializes").len() < 32_768);
+        assert!(
+            serde_json::to_string(&payload)
+                .expect("payload serializes")
+                .len()
+                < 32_768
+        );
     }
 
     #[test]
