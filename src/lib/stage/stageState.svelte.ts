@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { PrimDetails, PrimNode, StageInfo } from "./types";
 
+let loadGeneration = 0;
+let selectionGeneration = 0;
+
 export const stageState = $state({
   stageInfo: null as StageInfo | null,
   tree: [] as PrimNode[],
@@ -10,15 +13,22 @@ export const stageState = $state({
   error: null as string | null,
 
   async loadStage(path: string): Promise<void> {
+    const generation = ++loadGeneration;
+    selectionGeneration += 1;
     this.status = "loading";
     this.error = null;
     this.selectedPath = null;
     this.details = null;
     try {
-      this.stageInfo = await invoke<StageInfo>("open_usd_path", { path });
-      this.tree = await invoke<PrimNode[]>("get_stage_tree");
+      const stageInfo = await invoke<StageInfo>("open_usd_path", { path });
+      if (generation !== loadGeneration) return;
+      this.stageInfo = stageInfo;
+      const tree = await invoke<PrimNode[]>("get_stage_tree");
+      if (generation !== loadGeneration) return;
+      this.tree = tree;
       this.status = "ready";
     } catch (e) {
+      if (generation !== loadGeneration) return;
       this.stageInfo = null;
       this.tree = [];
       this.status = "error";
@@ -26,12 +36,38 @@ export const stageState = $state({
     }
   },
 
+  async adoptOpenedStage(stageInfo: StageInfo): Promise<void> {
+    const generation = ++loadGeneration;
+    selectionGeneration += 1;
+    this.stageInfo = stageInfo;
+    this.tree = [];
+    this.selectedPath = null;
+    this.details = null;
+    this.status = "loading";
+    this.error = null;
+    try {
+      const tree = await invoke<PrimNode[]>("get_stage_tree");
+      if (generation !== loadGeneration) return;
+      this.tree = tree;
+      this.status = "ready";
+    } catch (e) {
+      if (generation !== loadGeneration) return;
+      this.tree = [];
+      this.status = "error";
+      this.error = typeof e === "string" ? e : String(e);
+    }
+  },
+
   async selectPrim(path: string): Promise<void> {
+    const generation = ++selectionGeneration;
     this.selectedPath = path;
+    this.details = null;
     if (this.status !== "ready") return;
     try {
-      this.details = await invoke<PrimDetails>("get_prim_details", { path });
+      const details = await invoke<PrimDetails>("get_prim_details", { path });
+      if (generation === selectionGeneration) this.details = details;
     } catch (e) {
+      if (generation !== selectionGeneration) return;
       this.details = null;
       this.error = typeof e === "string" ? e : String(e);
     }

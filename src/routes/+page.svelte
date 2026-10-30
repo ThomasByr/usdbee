@@ -24,6 +24,7 @@
     saveControlPreferences,
   } from "$lib/state/controlsState.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
+  import type { StageInfo } from "$lib/stage/types";
   import { stageModalErrorLines } from "$lib/stage/modalErrors";
   import * as THREE from "three";
   import { RendererKit } from "$lib/three/RendererKit.svelte";
@@ -412,13 +413,15 @@
       listen<{ stage: string; percent: number }>("usd-load-progress", (event) => {
         loadingProgress = event.payload;
       }),
+      listen<StageInfo>("usd-stage-opened", (event) => {
+        stageState.adoptOpenedStage(event.payload);
+      }),
       listen("usd-scene-loaded", async (event: any) => {
         loadingProgress = null;
 
         rootFile = event.payload.root_file;
         dependencies = event.payload.dependencies;
 
-        if (rootFile) stageState.loadStage(rootFile);
         if (rootFile && canvas) {
           try {
             if (!viewer.scene) return;
@@ -1150,6 +1153,18 @@
           </div>
           <PropertyInspector />
         </div>
+        <details>
+          <summary>Viewport Objects</summary>
+          {#if viewer.loadedGroup}
+            <div>
+              <button class="tree-action-btn" onclick={() => toggleAllExpanded(true)}>Expand all</button>
+              <button class="tree-action-btn" onclick={() => toggleAllExpanded(false)}>Collapse all</button>
+            </div>
+            {@render treeNode(viewer.loadedGroup)}
+          {:else}
+            <p>No viewport objects loaded.</p>
+          {/if}
+        </details>
       {/if}
 
       {#if activeTab === "rendering"}
