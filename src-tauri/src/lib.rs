@@ -3,6 +3,7 @@ mod fetcher;
 mod models;
 mod omniverse;
 pub mod parser;
+pub mod stage;
 
 use tauri::Emitter;
 use tauri::{
@@ -34,6 +35,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            app.manage(stage::spawn_stage_owner());
             let initial_url = omniverse::load_omniverse_url_from_disk();
             app.manage(omniverse::AppState {
                 omniverse_server: std::sync::Mutex::new(initial_url),
@@ -65,6 +67,7 @@ pub fn run() {
             commands::set_fallback_color,
             commands::read_file_bytes,
             commands::save_file_bytes,
+            stage::open_usd_path,
             omniverse::set_omniverse_url,
             omniverse::get_omniverse_url
         ])

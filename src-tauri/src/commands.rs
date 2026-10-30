@@ -211,9 +211,10 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
         .map_err(|e| format!("Failed to read omniverse server URL: {}", e))?
         .clone();
 
-    let scan = match tauri::async_runtime::spawn_blocking({
+    let (scan, stage_info) = match tauri::async_runtime::spawn_blocking({
         let p_str = path.clone();
-        move || -> Result<DependencyScan, String> {
+        let stage_app = app.clone();
+        move || -> Result<(DependencyScan, crate::stage::StageInfo), String> {
             let handle = std::thread::Builder::new()
                 .stack_size(32 * 1024 * 1024)
                 .name("usd_deps_parser".into())
@@ -222,7 +223,11 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
                     // Remote fetches stay off the async runtime; a failure
                     // here aborts the load (Phase 0 ruling).
                     resolve_remote_dependencies(&mut scan, &server_url)?;
-                    Ok(scan)
+                    let stage_info = crate::stage::open_usd_path(
+                        p_str,
+                        stage_app.state::<crate::stage::StageState>(),
+                    )?;
+                    Ok((scan, stage_info))
                 })
                 .map_err(|e| format!("Failed to spawn parser thread: {}", e))?;
             handle
@@ -232,7 +237,7 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
     })
     .await
     {
-        Ok(Ok(scan)) => scan,
+        Ok(Ok(result)) => result,
         Ok(Err(e)) => return Err(e),
         Err(e) => return Err(format!("Stack overflow or extraction failed: {}", e)),
     };
@@ -317,6 +322,8 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
     .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
     app.emit("usd-scene-loaded", scene)
         .unwrap_or_else(|e| eprintln!("Failed to emit usd-scene-loaded: {}", e));
+    app.emit("usd-stage-opened", stage_info)
+        .unwrap_or_else(|e| eprintln!("Failed to emit usd-stage-opened: {}", e));
     Ok(())
 }
 
