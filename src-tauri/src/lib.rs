@@ -1,5 +1,6 @@
 mod commands;
 mod fetcher;
+pub use fetcher::get_usdbee_cache_dir;
 mod models;
 mod omniverse;
 pub mod parser;

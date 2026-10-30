@@ -53,16 +53,41 @@ def Xform "Scene"
 }
 
 #[test]
-fn copied_stage_resolves_reference_outside_fixture_layout() {
+fn search_path_reference_resolves_only_via_resolver_roots() {
+    // The referenced asset exists ONLY under the extracted-usdz resolver root,
+    // under a name unique to this test process, so no anchor-dir or cwd
+    // fallback can find it: removing the resolver search paths must fail here.
+    let pin = format!("resolver_pin_{}", std::process::id());
+    let pin_dir = usdbee_lib::get_usdbee_cache_dir()
+        .join("extracted")
+        .join(&pin);
+    fs::create_dir_all(&pin_dir).expect("resolver root should be creatable");
+    fs::write(
+        pin_dir.join("asset.usda"),
+        "#usda 1.0\n(\n    defaultPrim = \"Pinned\"\n)\n\ndef Xform \"Pinned\"\n{\n}\n",
+    )
+    .expect("pinned asset should be written");
+
     let dir = tempfile::tempdir().expect("temp dir should be created");
-    let root = dir.path().join("scene_with_ref.usda");
-    fs::copy(fixture("scene_with_ref.usda"), &root).expect("scene should be copied");
-    fs::copy(fixture("asset.usda"), dir.path().join("asset.usda"))
-        .expect("referenced asset should be copied");
+    let root = dir.path().join("search_pinned.usda");
+    fs::write(
+        &root,
+        format!(
+            "#usda 1.0\n\ndef Xform \"Scene\"\n{{\n    def \"Pinned\" (\n        references = @{}/asset.usda@\n    )\n    {{\n    }}\n}}\n",
+            pin
+        ),
+    )
+    .expect("test stage should be written");
 
-    let (_stage, info) = open_stage(&root).expect("copied stage should open");
+    let (_stage, info) = open_stage(&root).expect("search-path stage should open");
 
-    assert!(info.composition_errors.is_empty());
+    let _ = fs::remove_dir_all(&pin_dir);
+    assert!(
+        info.composition_errors.is_empty(),
+        "search-path reference {}/asset.usda must resolve via the resolver search paths: {:?}",
+        pin,
+        info.composition_errors
+    );
 }
 
 #[test]

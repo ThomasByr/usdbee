@@ -88,16 +88,24 @@ pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
     Ok((stage, info))
 }
 
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
-pub fn open_usd_path(
+pub async fn open_usd_path(
     path: String,
     state: tauri::State<'_, StageState>,
 ) -> Result<StageInfo, String> {
+    request_stage_open(&PathBuf::from(path), &state.sender)
+}
+
+pub fn request_stage_open(
+    path: &Path,
+    sender: &mpsc::Sender<StageRequest>,
+) -> Result<StageInfo, String> {
     let (reply, response) = mpsc::channel();
-    state
-        .sender
+    sender
         .send(StageRequest::Open {
-            path: PathBuf::from(path),
+            path: path.to_path_buf(),
             reply,
         })
         .map_err(|_| "stage service unavailable".to_string())?;
