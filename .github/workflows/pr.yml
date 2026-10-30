@@ -41,6 +41,17 @@ jobs:
       - name: install frontend dependencies
         run: npm install # change this to npm, pnpm or bun depending on which one you use.
 
+      # cargo test runs only on the ubuntu job: linux is the fastest runner and running it on every OS would slow the matrix without extra coverage.
+      - name: run Rust tests
+        if: matrix.platform == 'ubuntu-22.04'
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: run frontend tests
+        run: npm test
+
+      - name: type check frontend
+        run: npm run check
+
       # If tagName and releaseId are omitted tauri-action will only build the app and won't try to upload any assets.
       - uses: tauri-apps/tauri-action@v0
         env:

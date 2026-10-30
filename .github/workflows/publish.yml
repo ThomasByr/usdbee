@@ -56,6 +56,17 @@ jobs:
       - name: install frontend dependencies
         run: npm install
 
+      # cargo test runs only on the ubuntu jobs: linux is the fastest runner and running it on every OS would slow the matrix without extra coverage.
+      - name: run Rust tests
+        if: matrix.platform == 'ubuntu-24.04' || matrix.platform == 'ubuntu-24.04-arm'
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: run frontend tests
+        run: npm test
+
+      - name: type check frontend
+        run: npm run check
+
       - name: Extract version from tag
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
         shell: bash
