@@ -22,6 +22,10 @@ use serde::{Deserialize, Serialize};
 pub struct ValuePayload {
     pub r#type: String,
     pub data: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
 }
 
 /// A prim attribute with its value resolved at the queried time code
@@ -73,6 +77,43 @@ pub fn unauthored() -> ValuePayload {
     ValuePayload {
         r#type: "unauthored".to_string(),
         data: serde_json::Value::Null,
+        truncated: None,
+        count: None,
+    }
+}
+
+const MAX_ARRAY_ELEMENTS: usize = 4096;
+
+fn nested_payload(payload: ValuePayload) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert("type".to_string(), serde_json::json!(payload.r#type));
+    object.insert("data".to_string(), payload.data);
+    if let Some(truncated) = payload.truncated {
+        object.insert("truncated".to_string(), serde_json::json!(truncated));
+    }
+    if let Some(count) = payload.count {
+        object.insert("count".to_string(), serde_json::json!(count));
+    }
+    serde_json::Value::Object(object)
+}
+
+fn bounded_payload(r#type: String, mut data: serde_json::Value) -> ValuePayload {
+    let mut truncated = None;
+    let mut count = None;
+    if r#type.ends_with("_array") {
+        if let Some(values) = data.as_array_mut() {
+            if values.len() > MAX_ARRAY_ELEMENTS {
+                count = Some(values.len());
+                values.truncate(MAX_ARRAY_ELEMENTS);
+                truncated = Some(true);
+            }
+        }
+    }
+    ValuePayload {
+        r#type,
+        data,
+        truncated,
+        count,
     }
 }
 
@@ -279,16 +320,32 @@ pub fn serialize_payload(declared: Option<&ValueTypeName>, value: &Value) -> Val
             "path_array".into(),
             serde_json::json!(v.iter().map(|p| p.to_string()).collect::<Vec<_>>()),
         )),
+        Value::Dictionary(values) | Value::UnregisteredDictionary(values) => Some((
+            "dict".into(),
+            serde_json::Value::Object(
+                values
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            nested_payload(serialize_payload(None, value)),
+                        )
+                    })
+                    .collect(),
+            ),
+        )),
         _ => None,
     };
     match known {
-        Some((r#type, data)) => ValuePayload { r#type, data },
-        // Exotic values (dictionaries, list ops, payloads, expressions) and
-        // unregistered spellings degrade to a readable string representation
+        Some((r#type, data)) => bounded_payload(r#type, data),
+        // Exotic values (list ops, payloads, expressions) and unregistered
+        // spellings degrade to a readable string representation
         // instead of failing the whole details payload.
         None => ValuePayload {
             r#type: "unsupported".to_string(),
             data: serde_json::Value::String(string_repr(value)),
+            truncated: None,
+            count: None,
         },
     }
 }
@@ -840,15 +897,43 @@ mod tests {
     }
 
     #[test]
-    fn exotic_values_never_abort() {
+    fn large_arrays_are_bounded_and_report_their_total_count() {
+        let values = Value::FloatVec((0..5000).map(|value| value as f32).collect());
+        let payload = payload(None, &values);
+
+        assert_eq!(payload.r#type, "float_array");
+        assert_eq!(payload.data.as_array().map(Vec::len), Some(4096));
+        assert_eq!(payload.truncated, Some(true));
+        assert_eq!(payload.count, Some(5000));
+        assert!(serde_json::to_string(&payload).expect("payload serializes").len() < 32_768);
+    }
+
+    #[test]
+    fn dictionaries_serialize_as_recursive_objects() {
         let dictionary = Value::Dictionary(
-            [("style".to_string(), Value::String("flat".into()))]
-                .into_iter()
-                .collect(),
+            [
+                ("style".to_string(), Value::String("flat".into())),
+                ("priority".to_string(), Value::Int(2)),
+            ]
+            .into_iter()
+            .collect(),
         );
         let payload = payload(None, &dictionary);
+        assert_eq!(payload.r#type, "dict");
+        assert_eq!(
+            payload.data,
+            json!({
+                "style": { "type": "string", "data": "flat" },
+                "priority": { "type": "int", "data": 2 }
+            })
+        );
+    }
+
+    #[test]
+    fn exotic_values_never_abort() {
+        let payload = payload(None, &Value::UnregisteredValue("opaque".into()));
         assert_eq!(payload.r#type, "unsupported");
-        assert!(payload.data.as_str().unwrap_or("").contains("style"));
+        assert_eq!(payload.data, json!("opaque"));
     }
 
     #[test]

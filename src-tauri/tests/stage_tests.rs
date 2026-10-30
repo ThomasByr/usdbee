@@ -2,9 +2,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
+use usdbee_lib::parser::{resolve_remote_dependencies, scan_dependencies};
 use usdbee_lib::stage::{
-    open_stage, request_stage_details, request_stage_tree, spawn_stage_owner, PrimNode, StageRequest,
-    StageState,
+    open_stage, request_stage_details, request_stage_tree, serialize_tree, spawn_stage_owner,
+    PrimNode, StageRequest, StageState,
 };
 use usdbee_lib::values::PrimDetails;
 
@@ -15,12 +16,98 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 #[test]
+fn fetched_remote_reference_composes_into_the_stage() {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("HTTP server should bind");
+    let port = listener.local_addr().expect("server address").port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("HTTP request should arrive");
+        let mut request = [0; 1024];
+        let _ = stream.read(&mut request);
+        let body = "#usda 1.0\n\ndef Xform \"Remote\"\n{\n    def Sphere \"Wheel\"\n    {\n    }\n}\n";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("HTTP response should be written");
+    });
+
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = dir.path().join("remote_root.usda");
+    let url = format!(
+        "http://127.0.0.1:{}/remote_{}/asset.usda",
+        port,
+        std::process::id()
+    );
+    fs::write(
+        &root,
+        format!(
+            "#usda 1.0\n\ndef Xform \"Scene\"\n{{\n    def \"Car\" (\n        references = @{}@</Remote>\n    )\n    {{\n    }}\n}}\n",
+            url
+        ),
+    )
+    .expect("test stage should be written");
+
+    let mut scan = scan_dependencies(&root).expect("dependencies should scan");
+    resolve_remote_dependencies(&mut scan, "").expect("remote layer should download");
+    let (stage, info) = open_stage(&root).expect("stage should open after fetching");
+    server.join().expect("HTTP server should finish");
+
+    assert!(
+        info.composition_errors.is_empty(),
+        "remote reference should resolve: {:?}",
+        info.composition_errors
+    );
+    let tree = serialize_tree(&stage).expect("tree should serialize");
+    let car = node(&tree[0].children, "/Scene/Car");
+    assert_eq!(car.children.len(), 1);
+    assert_eq!(car.children[0].path, "/Scene/Car/Wheel");
+}
+
+#[test]
 fn opens_basic_stage_with_default_time_codes_per_second() {
     let (_stage, info) = open_stage(&fixture("basic.usda")).expect("basic stage should open");
 
     assert!(!info.root_layer.is_empty());
     assert_eq!(info.time_codes_per_second, 24.0);
     assert!(info.composition_errors.is_empty());
+}
+
+#[test]
+fn opens_generated_usdc_and_usdz_stages() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let source = fixture("basic.usda");
+    let layer = openusd::sdf::Layer::open(
+        source
+            .to_str()
+            .expect("fixture path should be valid UTF-8"),
+    )
+    .expect("source layer should open");
+
+    for extension in ["usdc", "usdz"] {
+        let path = dir.path().join(format!("basic.{}", extension));
+        layer
+            .export(
+                path.to_str()
+                    .expect("temporary stage path should be valid UTF-8"),
+            )
+            .expect("binary stage should be generated");
+
+        let (stage, info) = open_stage(&path).expect("generated stage should open");
+        assert!(
+            info.composition_errors.is_empty(),
+            "{} composition errors: {:?}",
+            extension,
+            info.composition_errors
+        );
+        let tree = serialize_tree(&stage).expect("generated stage tree should serialize");
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].path, "/World");
+        assert_eq!(tree[0].children.len(), 2);
+    }
 }
 
 #[test]
@@ -324,11 +411,17 @@ fn details_exotic_types_serialize_without_error() {
     assert_eq!(knots.value.r#type, "unsupported");
     assert!(knots.value.data.as_str().unwrap_or("").contains('5'));
 
-    assert!(details.metadata.iter().any(|(key, value)| {
-        key == "customData"
-            && value.r#type == "unsupported"
-            && value.data.as_str().unwrap_or("").contains("style")
-    }));
+    let custom_data = details
+        .metadata
+        .iter()
+        .find(|(key, _)| key == "customData")
+        .map(|(_, value)| value)
+        .expect("customData metadata");
+    assert_eq!(custom_data.r#type, "dict");
+    assert_eq!(
+        custom_data.data["style"],
+        serde_json::json!({ "type": "string", "data": "flat" })
+    );
 }
 
 #[test]
