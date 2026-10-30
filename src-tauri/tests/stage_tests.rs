@@ -2,7 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use usdbee_lib::stage::{open_stage, spawn_stage_owner, StageRequest};
+use usdbee_lib::stage::{
+    open_stage, request_stage_tree, spawn_stage_owner, PrimNode, StageRequest, StageState,
+};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -88,6 +90,132 @@ fn search_path_reference_resolves_only_via_resolver_roots() {
         pin,
         info.composition_errors
     );
+}
+
+fn open_via_owner(state: &StageState, name: &str) {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    state
+        .sender
+        .send(StageRequest::Open {
+            path: fixture(name),
+            reply: reply_tx,
+        })
+        .expect("stage owner should accept an open request");
+    reply_rx
+        .recv()
+        .expect("stage owner should reply")
+        .expect("stage should open");
+}
+
+fn tree_via_owner(state: &StageState) -> Vec<PrimNode> {
+    request_stage_tree(&state.sender).expect("tree should serialize")
+}
+
+fn node<'a>(nodes: &'a [PrimNode], path: &str) -> &'a PrimNode {
+    nodes
+        .iter()
+        .find(|n| n.path == path)
+        .unwrap_or_else(|| panic!("expected prim {} in tree {:?}", path, nodes))
+}
+
+#[test]
+fn basic_tree_matches_authored_hierarchy() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "basic.usda");
+    let tree = tree_via_owner(&state);
+
+    assert_eq!(tree.len(), 1, "pseudo-root has one child: {:?}", tree);
+    let world = &tree[0];
+    assert_eq!(world.path, "/World");
+    assert_eq!(world.name, "World");
+    assert_eq!(world.type_name, "Xform");
+    assert_eq!(world.kind, "");
+    assert!(world.is_active);
+    assert!(!world.is_instance);
+    assert!(!world.is_abstract);
+
+    assert_eq!(world.children.len(), 2);
+    let ground = node(&world.children, "/World/Ground");
+    assert_eq!(ground.type_name, "Xform");
+    assert!(ground.is_active);
+    assert!(ground.children.is_empty());
+
+    let ball = node(&world.children, "/World/Ball");
+    assert_eq!(ball.type_name, "Mesh");
+    assert!(ball.is_active);
+    assert!(ball.children.is_empty());
+}
+
+#[test]
+fn variants_tree_reflects_selected_variant_children() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "variants.usda");
+    let tree = tree_via_owner(&state);
+
+    assert_eq!(tree.len(), 1);
+    let prop = &tree[0];
+    assert_eq!(prop.path, "/Prop");
+    assert_eq!(prop.type_name, "Xform");
+    assert_eq!(prop.children.len(), 1, "only the selected variant composes");
+    let shape = &prop.children[0];
+    assert_eq!(shape.path, "/Prop/Shape");
+    assert_eq!(shape.type_name, "Sphere");
+    assert!(shape.children.is_empty());
+}
+
+#[test]
+fn instanced_tree_lists_instances_without_children() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "instanced.usda");
+    let tree = tree_via_owner(&state);
+
+    assert_eq!(tree.len(), 1);
+    let scene = &tree[0];
+    assert_eq!(scene.path, "/Scene");
+    assert_eq!(scene.children.len(), 2);
+    for wheel in &scene.children {
+        assert!(wheel.is_instance, "{} must be an instance", wheel.path);
+        assert_eq!(wheel.type_name, "Xform");
+        assert!(wheel.children.is_empty(), "instances must not expand");
+    }
+    assert_eq!(scene.children[0].path, "/Scene/WheelA");
+    assert_eq!(scene.children[1].path, "/Scene/WheelB");
+}
+
+#[test]
+fn referenced_children_appear_under_referencing_prim() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "scene_with_ref.usda");
+    let tree = tree_via_owner(&state);
+
+    assert_eq!(tree.len(), 1);
+    let car = node(&tree[0].children, "/Scene/Car");
+    assert_eq!(car.type_name, "Xform");
+    assert_eq!(car.children.len(), 1);
+    let wheel = &car.children[0];
+    assert_eq!(wheel.path, "/Scene/Car/Wheel");
+    assert_eq!(wheel.type_name, "Sphere");
+}
+
+#[test]
+fn reopening_a_stage_replaces_the_tree_completely() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "basic.usda");
+    let first = tree_via_owner(&state);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].path, "/World");
+
+    open_via_owner(&state, "variants.usda");
+    let second = tree_via_owner(&state);
+    assert_eq!(second.len(), 1, "no stale nodes from the previous stage");
+    assert_eq!(second[0].path, "/Prop");
+}
+
+#[test]
+fn tree_request_without_open_stage_fails() {
+    let state = spawn_stage_owner();
+    let error = request_stage_tree(&state.sender).expect_err("no stage is open");
+    assert!(error.contains("no stage open"), "got: {}", error);
 }
 
 #[test]

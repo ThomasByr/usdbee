@@ -1,9 +1,11 @@
+use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
 use openusd::ar::DefaultResolver;
+use openusd::sdf;
 use openusd::usd::{InitialLoadSet, PrimPredicate, Stage};
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +16,9 @@ pub enum StageRequest {
         path: PathBuf,
         reply: mpsc::Sender<Result<StageInfo, String>>,
     },
+    GetTree {
+        reply: mpsc::Sender<Result<Vec<PrimNode>, String>>,
+    },
 }
 
 pub struct StageState {
@@ -23,29 +28,39 @@ pub struct StageState {
 pub fn spawn_stage_owner() -> StageState {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let mut _current_stage = None;
+        let mut current_stage = None;
         while let Ok(request) = receiver.recv() {
             match request {
                 StageRequest::Open { path, reply } => {
                     let response = catch_unwind(AssertUnwindSafe(|| {
                         let (stage, info) = open_stage(&path)?;
-                        _current_stage = Some(stage);
+                        current_stage = Some(stage);
                         Ok(info)
                     }))
-                    .unwrap_or_else(|payload| {
-                        let message = payload
-                            .downcast_ref::<&str>()
-                            .map(|message| (*message).to_owned())
-                            .or_else(|| payload.downcast_ref::<String>().cloned())
-                            .unwrap_or_else(|| "unknown panic".to_string());
-                        Err(format!("internal stage error: {}", message))
-                    });
+                    .unwrap_or_else(panic_reply);
+                    let _ = reply.send(response);
+                }
+                StageRequest::GetTree { reply } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| serialize_tree(stage)))
+                            .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
                     let _ = reply.send(response);
                 }
             }
         }
     });
     StageState { sender }
+}
+
+fn panic_reply<T>(payload: Box<dyn Any + Send>) -> Result<T, String> {
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string());
+    Err(format!("internal stage error: {}", message))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +101,89 @@ pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
     };
 
     Ok((stage, info))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PrimNode {
+    pub path: String,
+    pub name: String,
+    pub type_name: String,
+    pub kind: String,
+    pub is_active: bool,
+    pub is_instance: bool,
+    pub is_abstract: bool,
+    pub children: Vec<PrimNode>,
+}
+
+// Chosen predicate, recorded per the brief: openusd `PrimPredicate::DEFAULT`
+// rejects prims with the ABSTRACT status bit (class specifiers, spec 11.3);
+// we mirror just that rejection here — `Prim::children()` returns every
+// composed child, and we skip abstract ones. Inactive prims are kept with
+// `is_active: false` (the flag exists for the frontend) and naturally have no
+// composed children. Instance prims are kept but not descended into:
+// `Prim::children()` on an instance lists its instance proxies, which we
+// skip — prototype details arrive in Task 4.
+pub fn serialize_tree(stage: &Stage) -> Result<Vec<PrimNode>, String> {
+    fn children_of(prim: &openusd::usd::Prim) -> Result<Vec<PrimNode>, String> {
+        let mut nodes = Vec::new();
+        for child in prim.children().map_err(stage_err)? {
+            if child.is_abstract().map_err(stage_err)? {
+                continue;
+            }
+            let is_instance = child.is_instance().map_err(stage_err)?;
+            let node = PrimNode {
+                path: child.path().to_string(),
+                name: child.path().name().unwrap_or_default().to_string(),
+                type_name: child
+                    .type_name()
+                    .map_err(stage_err)?
+                    .map(|t| t.to_string())
+                    .unwrap_or_default(),
+                kind: child
+                    .kind()
+                    .map_err(stage_err)?
+                    .map(|t| t.to_string())
+                    .unwrap_or_default(),
+                is_active: child.is_active().map_err(stage_err)?,
+                is_instance,
+                is_abstract: false,
+                children: if is_instance {
+                    Vec::new()
+                } else {
+                    children_of(&child)?
+                },
+            };
+            nodes.push(node);
+        }
+        Ok(nodes)
+    }
+
+    let pseudo_root = stage
+        .prim(sdf::Path::abs_root())
+        .map_err(|e| format!("invalid pseudo-root path: {}", e))?;
+    children_of(&pseudo_root)
+}
+
+fn stage_err(error: openusd::Error) -> String {
+    format!("failed to compose prim tree: {}", error)
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn get_stage_tree(state: tauri::State<'_, StageState>) -> Result<Vec<PrimNode>, String> {
+    request_stage_tree(&state.sender)
+}
+
+pub fn request_stage_tree(sender: &mpsc::Sender<StageRequest>) -> Result<Vec<PrimNode>, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::GetTree { reply })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
 }
 
 // Async command so Tauri runs it off the main thread; the body stays

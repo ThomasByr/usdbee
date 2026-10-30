@@ -69,6 +69,7 @@ pub fn run() {
             commands::read_file_bytes,
             commands::save_file_bytes,
             stage::open_usd_path,
+            stage::get_stage_tree,
             omniverse::set_omniverse_url,
             omniverse::get_omniverse_url
         ])
