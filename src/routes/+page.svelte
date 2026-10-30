@@ -7,7 +7,7 @@
   import { formatKeyName } from "$lib/utils/format";
   import ErrorModal from "$lib/components/ErrorModal.svelte";
   import DependenciesTab from "$lib/components/DependenciesTab.svelte";
-  import SceneTab from "$lib/components/SceneTab.svelte";
+  import PrimTree from "$lib/components/stage/PrimTree.svelte";
   import RenderingTab from "$lib/components/RenderingTab.svelte";
   import SettingsTab from "$lib/components/SettingsTab.svelte";
   import ExportModal from "$lib/components/ExportModal.svelte";
@@ -853,6 +853,15 @@
     }
   }
 
+  function highlightPrimObject(name: string) {
+    if (!viewer.loadedGroup || !name || !viewer.scene) return;
+    let found: THREE.Object3D | null = null;
+    viewer.loadedGroup.traverse((o) => {
+      if (!found && o.name === name) found = o;
+    });
+    if (found) updateSelection(found);
+  }
+
   function toggleBranchLock(node: any, locked: boolean) {
     if (!node) return;
     node.userData.locked = locked;
@@ -1111,7 +1120,7 @@
         />
       {/if}
       {#if activeTab === "scene"}
-        <SceneTab loadedGroup={viewer.loadedGroup} {toggleAllExpanded} {updateSelection} {treeNode} />
+        <PrimTree onHighlight={(node) => highlightPrimObject(node.name)} />
       {/if}
 
       {#if activeTab === "rendering"}
