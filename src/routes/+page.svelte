@@ -24,6 +24,7 @@
     saveControlPreferences,
   } from "$lib/state/controlsState.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
+  import { stageModalErrorLines } from "$lib/stage/modalErrors";
   import * as THREE from "three";
   import { RendererKit } from "$lib/three/RendererKit.svelte";
   import { USDLoader } from "three/addons/loaders/USDLoader.js";
@@ -66,7 +67,7 @@
   let sidebarWidth = $state<number>(320);
   let isResizing = $state<boolean>(false);
   let filterText = $state<string>("");
-  let modalError = $state<string | null>(null);
+  let modalError = $state<string | string[] | null>(null);
   let showExportModal = $state<boolean>(false);
   let isExporting = $state<boolean>(false);
   let exportProgress = $state<number>(0);
@@ -84,7 +85,7 @@
     }
   }
 
-  function openErrorModal(msg: string) {
+  function openErrorModal(msg: string | string[]) {
     modalError = msg;
   }
 
@@ -144,6 +145,18 @@
         )
       : [],
   );
+
+  // Stage-open failures and composition errors surface in the shared modal;
+  // rendering failures keep their own openErrorModal(string) path.
+  $effect(() => {
+    const stageLines = stageModalErrorLines({
+      status: stageState.status,
+      error: stageState.error,
+      compositionErrors: stageState.stageInfo?.composition_errors ?? [],
+    });
+    if (stageLines) openErrorModal(stageLines);
+    else if (typeof modalError === "object") closeErrorModal();
+  });
 
   $effect(() => {
     if (viewer.scene) viewer.scene.background = new THREE.Color(viewer.backgroundColor);
@@ -1342,7 +1355,11 @@
 </main>
 
 {#if modalError}
-  <ErrorModal error={modalError} onClose={closeErrorModal} />
+  {#if typeof modalError === "object"}
+    <ErrorModal lines={modalError} onClose={closeErrorModal} />
+  {:else}
+    <ErrorModal error={modalError} onClose={closeErrorModal} />
+  {/if}
 {/if}
 
 {#if showExportModal}
