@@ -27,6 +27,13 @@ pub fn extract_dependencies(
 
     let mut queue = vec![file_path.to_path_buf()];
 
+    // Hoisted: compiling these per scanned file made clippy's regex-in-loop fire.
+    let re_usda = BytesRegex::new(r#"@([^@\n\r"']+)@"#).ok();
+    let re_fallback = BytesRegex::new(
+        r#"([a-zA-Z0-9_/\\\.\-\ ]+\.(?:png|jpg|jpeg|exr|tif|tiff|usd|usda|usdc|usdz))"#,
+    )
+    .ok();
+
     while let Some(current_path) = queue.pop() {
         if !current_path.exists() {
             continue;
@@ -85,8 +92,8 @@ pub fn extract_dependencies(
                 let mut found_paths = std::collections::HashSet::new();
 
                 if ext == "usda" || content.starts_with(b"#usda") {
-                    if let Ok(re_usda) = BytesRegex::new(r#"@([^@\n\r"']+)@"#) {
-                        for caps in re_usda.captures_iter(&content) {
+                    if let Some(re) = &re_usda {
+                        for caps in re.captures_iter(&content) {
                             if let Ok(p) = std::str::from_utf8(&caps[1]) {
                                 found_paths.insert(p.trim().to_string());
                             }
@@ -114,10 +121,8 @@ pub fn extract_dependencies(
                         }
                     }
                 } else {
-                    if let Ok(re_fallback) = BytesRegex::new(
-                        r#"([a-zA-Z0-9_/\\\.\-\ ]+\.(?:png|jpg|jpeg|exr|tif|tiff|usd|usda|usdc|usdz))"#,
-                    ) {
-                        for caps in re_fallback.captures_iter(&content) {
+                    if let Some(re) = &re_fallback {
+                        for caps in re.captures_iter(&content) {
                             if let Ok(p) = std::str::from_utf8(&caps[1]) {
                                 found_paths.insert(p.trim().to_string());
                             }
@@ -158,14 +163,10 @@ pub fn extract_dependencies(
                         let cache_dir = get_usdbee_cache_dir();
                         fs::create_dir_all(&cache_dir).ok();
 
-                        let mut error_msg = None;
-                        let absolute_dep = match fetch_and_cache_url(&url, &cache_dir) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                error_msg = Some(e);
-                                PathBuf::from(&url)
-                            }
-                        };
+                        // A failed remote fetch fails the whole load: the
+                        // caller turns this error into a usd-load-error event
+                        // instead of a silently unresolved dependency.
+                        let absolute_dep = fetch_and_cache_url(&url, &cache_dir)?;
 
                         let resolved = absolute_dep.exists();
                         let size = if resolved {
@@ -181,7 +182,7 @@ pub fn extract_dependencies(
                                 resolved,
                                 size_bytes: size,
                                 fallback_color: None,
-                                error_msg,
+                                error_msg: None,
                             },
                         );
                         continue;
@@ -252,4 +253,130 @@ pub fn extract_dependencies(
     }
 
     Ok(deps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    // One-shot local HTTP server so remote-dependency handling is exercised
+    // against the real ureq path without network access.
+    fn spawn_http_server(response: &'static [u8]) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut conn, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = conn.read(&mut buf); // drain request head; ignore errors
+                let _ = conn.write_all(response);
+            }
+        });
+        port
+    }
+
+    fn write_usda(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn detects_local_references_and_recurses() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usda(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\n(references = @./a.usda@)\n",
+        );
+        write_usda(
+            dir.path(),
+            "a.usda",
+            "#usda 1.0\n(references = @./b.usda@)\n",
+        );
+        write_usda(dir.path(), "b.usda", "#usda 1.0\n");
+
+        let deps = extract_dependencies(&dir.path().join("root.usda"), "").unwrap();
+
+        let a = deps
+            .get("a.usda")
+            .expect("direct local reference must be detected");
+        assert!(a.resolved, "a.usda exists and must be resolved");
+        assert!(a.error_msg.is_none());
+
+        let b = deps
+            .get("b.usda")
+            .expect("scan must recurse into referenced files");
+        assert!(b.resolved);
+    }
+
+    #[test]
+    fn missing_local_reference_recorded_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        write_usda(
+            dir.path(),
+            "root.usda",
+            "#usda 1.0\n(references = @./missing.usda@)\n",
+        );
+
+        let deps = extract_dependencies(&dir.path().join("root.usda"), "").unwrap();
+
+        // Recorded actual behavior: the dep is keyed by its root-relative path,
+        // reported unresolved with a canonicalize error message. It is not
+        // scanned further and does not fail the whole scan.
+        let dep = deps
+            .get("missing.usda")
+            .expect("missing local reference must appear in deps");
+        assert!(!dep.resolved);
+        assert!(dep.error_msg.is_some());
+        assert_eq!(deps.len(), 1);
+    }
+
+    #[test]
+    fn remote_fetch_failure_fails_the_scan() {
+        let port = spawn_http_server(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        write_usda(
+            dir.path(),
+            "root.usda",
+            &format!("#usda 1.0\n(asset = @http://127.0.0.1:{}/tex.png@)\n", port),
+        );
+
+        let result = extract_dependencies(&dir.path().join("root.usda"), "");
+
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("a failed dependency download must fail the whole load"),
+        };
+        assert!(
+            err.contains("Failed to download"),
+            "error must stay user-readable, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn remote_fetch_success_resolves_dependency() {
+        let port = spawn_http_server(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nusdbytes",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("http://127.0.0.1:{}/tex.png", port);
+        write_usda(
+            dir.path(),
+            "root.usda",
+            &format!("#usda 1.0\n(asset = @{}@)\n", url),
+        );
+
+        let deps = extract_dependencies(&dir.path().join("root.usda"), "").unwrap();
+
+        let dep = deps
+            .get(&url)
+            .expect("remote dep is keyed by its original URL");
+        assert!(dep.resolved, "fetched dep must resolve to the cache file");
+        assert_eq!(dep.size_bytes, Some(8));
+        assert!(dep.error_msg.is_none());
+    }
 }
