@@ -12,6 +12,8 @@ export const stageState = $state({
   async loadStage(path: string): Promise<void> {
     this.status = "loading";
     this.error = null;
+    this.selectedPath = null;
+    this.details = null;
     try {
       this.stageInfo = await invoke<StageInfo>("open_usd_path", { path });
       this.tree = await invoke<PrimNode[]>("get_stage_tree");
