@@ -8,6 +8,7 @@
   import ErrorModal from "$lib/components/ErrorModal.svelte";
   import DependenciesTab from "$lib/components/DependenciesTab.svelte";
   import PrimTree from "$lib/components/stage/PrimTree.svelte";
+  import PropertyInspector from "$lib/components/stage/PropertyInspector.svelte";
   import RenderingTab from "$lib/components/RenderingTab.svelte";
   import SettingsTab from "$lib/components/SettingsTab.svelte";
   import ExportModal from "$lib/components/ExportModal.svelte";
@@ -1120,7 +1121,12 @@
         />
       {/if}
       {#if activeTab === "scene"}
-        <PrimTree onHighlight={(node) => highlightPrimObject(node.name)} />
+        <div class="scene-split">
+          <div class="scene-tree-wrap">
+            <PrimTree onHighlight={(node) => highlightPrimObject(node.name)} />
+          </div>
+          <PropertyInspector />
+        </div>
       {/if}
 
       {#if activeTab === "rendering"}
