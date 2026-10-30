@@ -300,8 +300,34 @@ pub async fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
     std::fs::read(&path).map_err(|e| e.to_string())
 }
 
+pub const EXPORT_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "mp4"];
+const MAX_EXPORT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+pub(crate) fn validate_export(path: &str, bytes: &[u8]) -> Result<(), String> {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !EXPORT_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(format!(
+            "Unsupported export format '{}'. Allowed formats: {}.",
+            ext,
+            EXPORT_EXTENSIONS.join(", ")
+        ));
+    }
+    if bytes.is_empty() {
+        return Err("Cannot export an empty file.".into());
+    }
+    if bytes.len() as u64 > MAX_EXPORT_BYTES {
+        return Err("Export exceeds the maximum size of 4 GiB.".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn save_file_bytes(path: String, bytes: Vec<u8>) -> Result<(), String> {
+    validate_export(&path, &bytes)?;
     std::fs::write(&path, bytes).map_err(|e| e.to_string())
 }
 
@@ -318,6 +344,47 @@ mod tests {
             w.write_all(data).unwrap();
         }
         w.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn export_rejects_unlisted_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.sh");
+
+        let result = validate_export(path.to_string_lossy().as_ref(), b"evil".as_slice());
+
+        assert!(result.is_err(), ".sh export must be rejected");
+        assert!(result.unwrap_err().contains("png"), "error must list allowed extension");
+    }
+
+    #[test]
+    fn export_rejects_extensionless_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload");
+
+        let result = validate_export(path.to_string_lossy().as_ref(), b"data".as_slice());
+
+        assert!(result.is_err(), "extensionless export must be rejected");
+    }
+
+    #[test]
+    fn export_rejects_empty_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.png");
+
+        let result = validate_export(path.to_string_lossy().as_ref(), b"".as_slice());
+
+        assert!(result.is_err(), "empty payload must be rejected");
+    }
+
+    #[test]
+    fn export_accepts_whitelisted_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.png");
+
+        let result = validate_export(path.to_string_lossy().as_ref(), b"png data".as_slice());
+
+        assert!(result.is_ok(), "whitelisted export must pass validation");
     }
 
     #[test]
