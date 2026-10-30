@@ -22,6 +22,7 @@
     loadControlPreferences,
     saveControlPreferences,
   } from "$lib/state/controlsState.svelte";
+  import { stageState } from "$lib/stage/stageState.svelte";
   import * as THREE from "three";
   import { RendererKit } from "$lib/three/RendererKit.svelte";
   import { USDLoader } from "three/addons/loaders/USDLoader.js";
@@ -393,6 +394,7 @@
         rootFile = event.payload.root_file;
         dependencies = event.payload.dependencies;
 
+        if (rootFile) stageState.loadStage(rootFile);
         if (rootFile && canvas) {
           try {
             if (!viewer.scene) return;
