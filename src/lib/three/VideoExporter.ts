@@ -122,9 +122,8 @@ export async function runExport(
         const startTime = config.mp4Crop ? config.mp4Crop.start : 0;
         const endTime = config.mp4Crop ? config.mp4Crop.end : animationDuration || 2;
         const fps = 30;
-        // Without a playhead driver the crop range is plain seconds
-        // (legacy behavior); with one it is playhead units and the rate
-        // converts frames to real-time seconds.
+        // With a playhead driver the crop range is playhead units and the
+        // rate converts frames to real-time seconds.
         const rate = onBeforeFrame && playbackRate ? playbackRate : 1;
         const totalFrames = Math.max(1, Math.ceil(((endTime - startTime) * fps) / rate));
 

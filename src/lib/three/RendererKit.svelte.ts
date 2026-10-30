@@ -25,9 +25,9 @@ export class RendererKit {
   stats: any = null;
 
   loadedGroup = $state.raw<THREE.Group | null>(null);
-  // Task 6: playback driver hook. When the host assigns this (rust
-  // backend), each animation-frame tick advances the playhead with the
-  // frame delta in seconds; null = nothing animates (legacy backend).
+  // Task 6: playback driver hook. When the host assigns this, each
+  // animation-frame tick advances the playhead with the frame delta in
+  // seconds; null = nothing animates.
   onAdvanceTime: ((deltaSeconds: number) => void) | null = null;
   clock: THREE.Clock;
   usdCameras = $state<THREE.Camera[]>([]);

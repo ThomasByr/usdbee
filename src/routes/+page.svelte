@@ -1,9 +1,8 @@
 <script lang="ts">
   import "./page.css";
-  import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+  import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
-  import { patchUsdLayerForThree } from "$lib/three/usdUtils";
   import { formatKeyName } from "$lib/utils/format";
   import ErrorModal from "$lib/components/ErrorModal.svelte";
   import DependenciesTab from "$lib/components/DependenciesTab.svelte";
@@ -35,7 +34,6 @@
   import { stageModalErrorLines } from "$lib/stage/modalErrors";
   import * as THREE from "three";
   import { RendererKit } from "$lib/three/RendererKit.svelte";
-  import { USDLoader } from "three/addons/loaders/USDLoader.js";
 
   // State
   let rootFile = $state<string | null>(null);
@@ -131,17 +129,11 @@
         camera: viewer.camera,
         animationDuration: viewer.animationDuration,
         animationProgress: viewer.animationProgress,
-        // Task 6: on the rust backend the exporter steps USD time codes —
-        // the rate is time_codes_per_second and each frame re-fetches
-        // animated geometry through setStageTime. Legacy has no animation.
-        playbackRate:
-          viewerSettings.renderBackend === "rust"
-            ? (stageState.stageInfo?.time_codes_per_second ?? 24)
-            : undefined,
-        onBeforeFrame:
-          viewerSettings.renderBackend === "rust"
-            ? (t: number) => renderState.setStageTime(toAbsoluteTime(t, startTimeCode()))
-            : undefined,
+        // Task 6: the exporter steps USD time codes — the rate is
+        // time_codes_per_second and each frame re-fetches animated geometry
+        // through setStageTime.
+        playbackRate: stageState.stageInfo?.time_codes_per_second ?? 24,
+        onBeforeFrame: (t: number) => renderState.setStageTime(toAbsoluteTime(t, startTimeCode())),
       },
       detail,
       {
@@ -430,11 +422,7 @@
         loadingProgress = { stage: "Starting...", percent: 0 };
         dependencies = null;
 
-        // Remove previous model if exists
-        if (viewer.loadedGroup && viewer.scene) {
-          viewer.scene.remove(viewer.loadedGroup);
-          viewer.loadedGroup = null;
-        }
+        removeLoadedGroup();
       }),
       listen<{ stage: string; percent: number }>("usd-load-progress", (event) => {
         loadingProgress = event.payload;
@@ -447,304 +435,24 @@
       }),
     ];
 
-    // Phase 2: the viewport scene load, branched on renderBackend. "rust"
-    // composes the scene from the Rust manifest (no zip, no USDLoader);
-    // "legacy" keeps the original Three.js USDLoader path untouched.
+    // The viewport scene load: compose the scene from the Rust manifest
+    // (no zip, no Three.js USD parsing).
     async function handleSceneLoaded(payload: any) {
       loadingProgress = null;
       rootFile = payload.root_file;
       dependencies = payload.dependencies;
+      await loadRustScene();
+    }
 
-      if (viewerSettings.renderBackend === "rust") {
-        await loadRustScene();
-        return;
-      }
-
-      if (rootFile && canvas) {
-          try {
-            if (!viewer.scene) return;
-            const ext = rootFile.split(".").pop()?.toLowerCase() || "usd";
-
-            const manager = new THREE.LoadingManager();
-            manager.setURLModifier((url) => {
-              if (url.startsWith("data:") || url.startsWith("blob:") || url.startsWith("asset:")) return url;
-              const cleanUrl = url.toLowerCase().split(/[?#]/)[0].replace(/\\/g, "/");
-              const targetName = cleanUrl.split("/").pop() || "";
-
-              const match = Object.entries(dependencies || {}).find(([k]) => {
-                const cleanKey = k.toLowerCase().replace(/\\/g, "/");
-
-                return (
-                  cleanKey.endsWith(cleanUrl) ||
-                  cleanUrl.endsWith(cleanKey) ||
-                  cleanKey.split("/").pop() === targetName
-                );
-              });
-              if (match?.[1]?.resolved && match[1].path) {
-                return convertFileSrc(match[1].path);
-              }
-              return url;
-            });
-
-            const loader = new USDLoader(manager);
-            let group: THREE.Group;
-
-            loadingProgress = {
-              stage: "Packing Remote Dependencies...",
-              percent: 20,
-            };
-
-            const fflate = await import("fflate");
-            const rootUrl = convertFileSrc(rootFile);
-            // patchUsdLayerForThree imported from utils
-
-            // Fetch the root file
-            const rootRes = await fetch(rootUrl);
-            if (!rootRes.ok) throw new Error(`Root fetch failed: HTTP ${rootRes.status} on ${rootUrl}`);
-            const rawRootBytes = new Uint8Array(await rootRes.arrayBuffer());
-            const rootBytes = patchUsdLayerForThree(rootFile, rawRootBytes);
-
-            const rootFileName = rootFile.split(/[/\\]/).pop() || `usdbee_root.${ext}`;
-            const zipData: Record<string, Uint8Array> = {
-              [rootFileName]: rootBytes,
-            };
-
-            const depsEntries = Object.entries(dependencies || {});
-            let loadedCount = 0;
-
-            for (const [relPath, depInfo] of depsEntries) {
-              if (depInfo.resolved && depInfo.path) {
-                try {
-                  loadingProgress = {
-                    stage: `Packing ${relPath}...`,
-                    percent: 20 + Math.floor((loadedCount / depsEntries.length) * 60),
-                  };
-
-                  const depUrl = convertFileSrc(depInfo.path);
-                  const res = await fetch(depUrl);
-                  if (!res.ok) throw new Error(`Dep fetch failed: HTTP ${res.status} on ${depUrl}`);
-                  const rawBytes = new Uint8Array(await res.arrayBuffer());
-                  const bytes = patchUsdLayerForThree(relPath, rawBytes);
-
-                  const safePath = relPath.split("?")[0].replace(/:\/\//g, "/").replace(/:/g, "_");
-
-                  const candidatePaths = new Set<string>([
-                    relPath,
-                    safePath,
-                    safePath.replace(/\\/g, "/"),
-                    safePath.replace(/\\/g, "/").replace(/^\.\//, ""),
-                    safePath.replace(/\\/g, "/").replace(/^\/+/, ""),
-                    safePath.split("/").pop()!?.split("\\").pop()! || "",
-                  ]);
-
-                  for (const candidatePath of candidatePaths) {
-                    if (candidatePath) {
-                      zipData[candidatePath] = bytes;
-                    }
-                  }
-
-                  const baseName = safePath.split("/").pop()?.split("\\").pop();
-                  if (baseName && baseName !== safePath && baseName !== rootFileName) {
-                    zipData[baseName] = bytes;
-                  }
-                } catch (e) {
-                  console.warn("Failed to load dependency into zip:", relPath, e);
-                }
-              }
-              loadedCount++;
-              if (loadedCount % 5 === 0 || loadedCount === depsEntries.length) {
-                loadingProgress = {
-                  stage: "Packing Remote Dependencies...",
-                  percent: 20 + Math.floor((loadedCount / depsEntries.length) * 50),
-                };
-              }
-            }
-
-            loadingProgress = {
-              stage: "Zipping Archive in Memory...",
-              percent: 75,
-            };
-
-            const zippedBuffer = fflate.zipSync(zipData, { level: 0 });
-
-            loadingProgress = { stage: "Parsing USDZ...", percent: 85 };
-            group = loader.parse(zippedBuffer.buffer as ArrayBuffer);
-
-            viewer.loadedGroup = group;
-
-            // Extract Triangles and Cameras
-            let tris = 0;
-            const cams: THREE.Camera[] = [];
-            group.traverse((obj) => {
-              const mesh = obj as THREE.Mesh;
-              if ((obj as any).isMesh) {
-                mesh.castShadow = true;
-                mesh.receiveShadow = true;
-                if (mesh.geometry) {
-                  if (mesh.geometry.index) {
-                    tris += mesh.geometry.index.count / 3;
-                  } else if (mesh.geometry.attributes.position) {
-                    tris += mesh.geometry.attributes.position.count / 3;
-                  }
-                }
-              }
-              if ((obj as any).isCamera) cams.push(obj as THREE.Camera);
-
-              if ((obj as any).isSkinnedMesh) {
-                const skinnedMesh = obj as THREE.SkinnedMesh;
-                let maxBoneIndex = -1;
-                if (skinnedMesh.geometry && skinnedMesh.geometry.attributes.skinIndex) {
-                  const skinIndices = skinnedMesh.geometry.attributes.skinIndex;
-                  for (let i = 0; i < skinIndices.count * skinIndices.itemSize; i++) {
-                    maxBoneIndex = Math.max(maxBoneIndex, skinIndices.array[i]);
-                  }
-                }
-
-                let isSkeletonBroken =
-                  !skinnedMesh.skeleton ||
-                  !skinnedMesh.skeleton.bones ||
-                  skinnedMesh.skeleton.bones.length <= maxBoneIndex;
-
-                if (!isSkeletonBroken && skinnedMesh.skeleton && skinnedMesh.skeleton.bones) {
-                  for (let i = 0; i <= maxBoneIndex; i++) {
-                    if (!skinnedMesh.skeleton.bones[i]) isSkeletonBroken = true;
-                  }
-                }
-
-                if (isSkeletonBroken) {
-                  console.warn("SkinnedMesh missing or incomplete bones, downgrading to static Mesh");
-                  (skinnedMesh as any).isSkinnedMesh = false; // Prevent MatrixWorld crashes
-                  (skinnedMesh as any).getVertexPosition = THREE.Mesh.prototype.getVertexPosition; // Prevent applyBoneTransform
-                  if (skinnedMesh.geometry) {
-                    delete (skinnedMesh.geometry.attributes as any).skinIndex;
-                    delete (skinnedMesh.geometry.attributes as any).skinWeight;
-                  }
-                }
-              }
-            });
-            viewer.triangleCount = Math.floor(tris);
-            viewer.usdCameras = cams;
-            viewer.activeCameraIndex = -1;
-            if (viewer.boxHelper) {
-              viewer.scene.remove(viewer.boxHelper);
-              viewer.boxHelper.dispose();
-            }
-            viewer.sceneBox = new THREE.Box3();
-
-            viewer.boxHelper = new THREE.Box3Helper(viewer.sceneBox, new THREE.Color(0xffff00));
-            viewer.boxHelper.visible = viewer.showBoundingBox;
-            viewer.scene.add(viewer.boxHelper);
-
-            // Task 6: legacy USDLoader playback is gone with the mixer —
-            // the rust backend owns animation via stage time codes.
-            viewer.hasAnimation = false;
-
-            viewer.sceneBox.setFromObject(group, true);
-            let size = viewer.sceneBox.getSize(new THREE.Vector3()).length();
-            const center = viewer.sceneBox.getCenter(new THREE.Vector3());
-
-            if (size === 0 || !isFinite(size)) {
-              console.warn("Bounding box size is 0 or invalid! Falling back to default scale.");
-              size = 10;
-            }
-
-            viewer.controls.reset();
-
-            group.position.x -= center.x;
-            group.position.y -= center.y;
-            group.position.z -= center.z;
-
-            viewer.camera.position.set(0, 0, 0);
-
-            viewer.camera.position.x += size / 2.0;
-            viewer.camera.position.y += size / 5.0;
-            viewer.camera.position.z += size;
-
-            viewer.camera.near = Math.max(0.01, size / 100);
-            viewer.camera.far = size * 100;
-            viewer.camera.updateProjectionMatrix();
-
-            viewer.controls.target.set(0, 0, 0);
-            viewer.controls.update();
-            viewer.controls.saveState();
-
-            if (viewer.gridHelper) {
-              viewer.scene.remove(viewer.gridHelper);
-              viewer.gridHelper.dispose();
-            }
-            const gridSize = Math.max(10, Math.pow(10, Math.ceil(Math.log10(size * 2))));
-            viewer.gridHelper = new THREE.GridHelper(gridSize, 100, 0x888888, 0x444444);
-            viewer.gridHelper.visible = viewer.showGrid;
-            viewer.scene.add(viewer.gridHelper);
-
-            viewer.sceneCenter = center;
-            viewer.sceneSize = size;
-
-            if (viewer.dirLight) {
-              const d = size * 1.2;
-              viewer.dirLight.shadow.camera.left = -d;
-              viewer.dirLight.shadow.camera.right = d;
-              viewer.dirLight.shadow.camera.top = d;
-              viewer.dirLight.shadow.camera.bottom = -d;
-              viewer.dirLight.shadow.camera.near = 0.1;
-              viewer.dirLight.shadow.camera.far = size * 4;
-              viewer.dirLight.shadow.camera.updateProjectionMatrix();
-            }
-
-            let meshCount = 0;
-            group.traverse((obj) => {
-              if ((obj as any).isMesh) meshCount++;
-            });
-            if (meshCount === 0) {
-              const helpers: THREE.SkeletonHelper[] = [];
-              group.traverse((obj) => {
-                if (obj.userData?.isSkelRoot || obj.type === "Bone") {
-                  const helper = new THREE.SkeletonHelper(obj);
-                  helpers.push(helper);
-                }
-              });
-              helpers.forEach((h) => group.add(h));
-            }
-
-            viewer.scene.add(group);
-            loadingProgress = null;
-          } catch (err: any) {
-            console.error("ThreeJS USD Load Error:", err);
-            openErrorModal("Error Rendering USD:\n\n" + err.message);
-            loadingProgress = null;
-
-            let errMsg = err.message || String(err);
-            if (
-              errMsg.includes("Offset is outside the bounds of the DataView") ||
-              errMsg.includes("Unsupported scalar type")
-            ) {
-              errMsg =
-                "Three.js unsupported OpenUSD format: this file uses node properties or schemas not yet recognized by the WebGL viewport.\n\nRaw Error: " +
-                errMsg;
-            } else if (errMsg.includes("The first ZIP entry must be a USD layer")) {
-              errMsg =
-                "Three.js USD parser error: " +
-                errMsg +
-                "\nEnsure your root file format matches the internal structure.";
-            }
-
-            openErrorModal("Error Rendering USD:\n\n" + errMsg);
-          }
-        }
-      }
-
-    sceneLoadedHandler = handleSceneLoaded;
 
     if (canvas) {
       viewer.init(canvas);
     }
 
-    // Task 6 playback driver: on the rust backend the render loop advances
-    // the stage playhead in USD time codes. The seconds -> time-code rate
-    // conversion lives ONLY here and in the exporter (spec §8) —
-    // advanceStageTime. Legacy backend: inert (scrubber only).
+    // Task 6 playback driver: the render loop advances the stage playhead
+    // in USD time codes. The seconds -> time-code rate conversion lives
+    // ONLY here and in the exporter (spec §8) — advanceStageTime.
     viewer.onAdvanceTime = (deltaSeconds: number) => {
-      if (viewerSettings.renderBackend !== "rust") return;
       const info = stageState.stageInfo;
       const start = info?.start_time_code ?? 0;
       const end = info?.end_time_code ?? 0;
@@ -770,10 +478,6 @@
     };
   });
 
-  // Phase 2 rust backend: assigned inside onMount so the legacy load flow
-  // (defined there, wrapped as handleSceneLoaded) stays untouched.
-  let sceneLoadedHandler: ((payload: any) => Promise<void>) | null = null;
-
   function removeLoadedGroup() {
     if (viewer.loadedGroup && viewer.scene) {
       viewer.scene.remove(viewer.loadedGroup);
@@ -782,9 +486,8 @@
     }
   }
 
-  // Camera fit / grid / light framing shared shape of the legacy tail,
-// reduced to what the rust scene needs (no skinned meshes, no USD cameras,
-// no animation clips — those are Task 6 material).
+  // Camera fit / grid / light framing for the rust scene (no skinned
+  // meshes, no USD cameras).
   function integrateScene(group: THREE.Group) {
     viewer.loadedGroup = group;
     let tris = 0;
@@ -874,18 +577,6 @@
       loadingProgress = null;
     }
   }
-
-  // Phase 2: switching the backend reloads the open scene through the
-  // selected path (simplest correct behavior — dispose, then rebuild).
-  let lastBackend = viewerSettings.renderBackend;
-  $effect(() => {
-    const backend = viewerSettings.renderBackend;
-    if (backend === lastBackend) return;
-    lastBackend = backend;
-    if (!rootFile || !viewer.scene || !sceneLoadedHandler) return;
-    removeLoadedGroup();
-    void sceneLoadedHandler({ root_file: rootFile, dependencies });
-  });
 
   async function openUsdFile() {
     await invoke("trigger_open_usd_dialog");
@@ -1044,20 +735,13 @@
     }
   }
 
-  // Rust-path objects are named by their exact prim path, so the path hits
-  // first; legacy USDLoader objects are named by prim name, so the name
-  // fallback keeps that path highlighting unchanged.
-  function highlightPrimObject(path: string, name: string) {
-    if (!viewer.loadedGroup || !viewer.scene || (!path && !name)) return;
+  // Rust-path objects are named by their exact prim path.
+  function highlightPrimObject(path: string) {
+    if (!viewer.loadedGroup || !viewer.scene || !path) return;
     let found: THREE.Object3D | null = null;
     viewer.loadedGroup.traverse((o) => {
       if (!found && o.name === path) found = o;
     });
-    if (!found) {
-      viewer.loadedGroup.traverse((o) => {
-        if (!found && o.name === name) found = o;
-      });
-    }
     if (found) updateSelection(found);
   }
 
@@ -1321,7 +1005,7 @@
       {#if activeTab === "scene"}
         <div class="scene-split">
           <div class="scene-tree-wrap">
-            <PrimTree onHighlight={(node) => highlightPrimObject(node.path, node.name)} />
+            <PrimTree onHighlight={(node) => highlightPrimObject(node.path)} />
           </div>
           <PropertyInspector />
         </div>
@@ -1371,7 +1055,6 @@
           bind:mouseButtonMiddle={controlsState.mouseButtonMiddle}
           bind:mouseButtonRight={controlsState.mouseButtonRight}
           bind:keybindings={controlsState.keybindings}
-          bind:renderBackend={viewerSettings.renderBackend}
           bind:backgroundColor={viewer.backgroundColor}
           bind:activeCameraIndex={viewer.activeCameraIndex}
           bind:omniverseUrl
@@ -1520,9 +1203,7 @@
           value={viewer.animationProgress}
           oninput={(e) => {
             viewer.animationProgress = parseFloat(e.currentTarget.value);
-            if (viewerSettings.renderBackend === "rust") {
-              void renderState.setStageTime(toAbsoluteTime(viewer.animationProgress, startTimeCode()));
-            }
+            void renderState.setStageTime(toAbsoluteTime(viewer.animationProgress, startTimeCode()));
             if (viewer.showBoundingBox && viewer.loadedGroup)
               viewer.sceneBox.setFromObject(viewer.loadedGroup, true);
             if (viewer.selectedNode && viewer.selectionHelper) {
@@ -1567,11 +1248,7 @@
     hasAnimation={viewer.hasAnimation}
     animationDuration={viewer.animationDuration}
     animationProgress={viewer.animationProgress}
-    previewAt={
-      viewerSettings.renderBackend === "rust"
-        ? (t: number) => renderState.setStageTime(toAbsoluteTime(t, startTimeCode()))
-        : null
-    }
+    previewAt={(t: number) => renderState.setStageTime(toAbsoluteTime(t, startTimeCode()))}
     {isExporting}
     {exportProgress}
     {exportStage}

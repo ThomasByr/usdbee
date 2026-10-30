@@ -10,10 +10,6 @@ export const viewerSettings = $state({
   anisotropy: 8,
   envMapIntensity: 1.0,
   toneMapping: "ACESFilmic",
-  // Phase 2: which pipeline builds the viewport scene — "legacy" (Three.js
-  // USDLoader over the packed zip) or "rust" (manifest from the composed
-  // stage). Switching reloads the open scene through the selected backend.
-  renderBackend: "legacy" as "legacy" | "rust",
 });
 
 export function saveGraphicsPreferences() {
@@ -27,7 +23,6 @@ export function saveGraphicsPreferences() {
       anisotropy: viewerSettings.anisotropy,
       envMapIntensity: viewerSettings.envMapIntensity,
       toneMapping: viewerSettings.toneMapping,
-      renderBackend: viewerSettings.renderBackend,
     }),
   );
 }
@@ -44,8 +39,6 @@ export function loadGraphicsPreferences() {
       if (parsed.anisotropy !== undefined) viewerSettings.anisotropy = parsed.anisotropy;
       if (parsed.envMapIntensity !== undefined) viewerSettings.envMapIntensity = parsed.envMapIntensity;
       if (parsed.toneMapping !== undefined) viewerSettings.toneMapping = parsed.toneMapping;
-      if (parsed.renderBackend === "rust" || parsed.renderBackend === "legacy")
-        viewerSettings.renderBackend = parsed.renderBackend;
     } catch (e) {
       console.warn("Failed to load graphics preferences", e);
     }
