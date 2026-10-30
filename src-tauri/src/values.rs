@@ -529,37 +529,79 @@ fn composition_arcs(stage: &Stage, prim: &Prim) -> Vec<String> {
 }
 
 /// The prim's local transform from its `xformOpOrder` at `time`
-/// (`None` = default time). `None` when the prim authors no xformOpOrder.
+/// (`None` = default time). `None` when the prim authors no xformOpOrder,
+/// or when an op cannot be evaluated (no data beats wrong data).
 /// openusd 0.8 core ships no xform cache (that is openusd-schemas
 /// territory), so the ops are evaluated here: matrices are row-major and
 /// row-vector (`v' = v * M`), so each op in xformOpOrder pre-multiplies the
 /// accumulator, giving the USD contract that the first listed op applies
 /// last.
 fn local_transform(prim: &Prim, time: Option<f64>) -> Result<Option<gf::Matrix4d>, String> {
+    Ok(match compose_xform(prim, time)? {
+        ComposedXform::NoOps | ComposedXform::Unsupported => None,
+        ComposedXform::Matrix(matrix) => Some(matrix),
+    })
+}
+
+/// The outcome of composing a prim's `xformOpOrder`.
+enum ComposedXform {
+    /// No `xformOpOrder` authored: the prim contributes the identity.
+    NoOps,
+    Matrix(gf::Matrix4d),
+    /// Ops are authored but at least one cannot be evaluated.
+    Unsupported,
+}
+
+fn compose_xform(prim: &Prim, time: Option<f64>) -> Result<ComposedXform, String> {
     let order = prim
         .attribute("xformOpOrder")
         .get_at::<Value>(time.map(TimeCode::new))
         .map_err(err)?;
     let Some(Value::TokenVec(ops)) = order else {
-        return Ok(None);
+        return Ok(ComposedXform::NoOps);
     };
     let mut acc = gf::Matrix4d::IDENTITY;
     for op in ops {
-        if op.as_str() == "!resetXformStack!" {
+        let op = op.as_str();
+        if op == "!resetXformStack!" {
+            acc = gf::Matrix4d::IDENTITY;
             continue;
         }
-        if let Some(matrix) = op_transform(prim, op.as_str(), time)? {
-            acc = matrix * acc;
-        }
+        let Some(matrix) = op_transform(prim, op, time)? else {
+            eprintln!(
+                "xform op {op} on {} is not supported; reporting no transform",
+                prim.path()
+            );
+            return Ok(ComposedXform::Unsupported);
+        };
+        acc = matrix * acc;
     }
-    Ok(Some(acc))
+    Ok(ComposedXform::Matrix(acc))
 }
 
-/// shortcut: only translate, scale, single-axis rotate, XYZ-family rotate,
-/// orient and transform ops are evaluated; unknown ops compose as identity,
-/// and all rotate triplets apply as Rx*Ry*Rz; upgrade if a scene needs the
-/// full Euler-order matrix.
+/// Whether the prim's `xformOpOrder` contains `!resetXformStack!`.
+fn resets_xform_stack(prim: &Prim, time: Option<f64>) -> Result<bool, String> {
+    Ok(
+        matches!(
+            prim.attribute("xformOpOrder")
+                .get_at::<Value>(time.map(TimeCode::new))
+                .map_err(err)?,
+            Some(Value::TokenVec(ops))
+                if ops.iter().any(|op| op.as_str() == "!resetXformStack!")
+        ),
+    )
+}
+
+/// shortcut: unsupported xform ops yield None, Phase 3 extends coverage
+///
+/// Only plain `xformOp:<name>` attributes are evaluated. Suffixed forms
+/// (`xformOp:translate:pivot`), inverted forms (leading `!`), and any op
+/// whose value cannot be decoded yield `None` so the caller reports no
+/// transform instead of a plausible-but-wrong matrix.
 fn op_transform(prim: &Prim, op: &str, time: Option<f64>) -> Result<Option<gf::Matrix4d>, String> {
+    let Some(name) = op.strip_prefix("xformOp:") else {
+        return Ok(None);
+    };
     let Some(value) = prim
         .attribute(op)
         .value_at::<Value>(time.map(TimeCode::new))
@@ -574,66 +616,76 @@ fn op_transform(prim: &Prim, op: &str, time: Option<f64>) -> Result<Option<gf::M
             _ => None,
         }
     };
-    Ok(match &value {
-        Value::Vec3d(_) | Value::Vec3f(_) => {
-            let Some(components) = vec3(&value) else {
+    let rotate = |axis: u8, degrees: f64| match axis {
+        b'X' => gf::Matrix4d::rotation_x(degrees.to_radians()),
+        b'Y' => gf::Matrix4d::rotation_y(degrees.to_radians()),
+        _ => gf::Matrix4d::rotation_z(degrees.to_radians()),
+    };
+    Ok(match (name, &value) {
+        ("translate", v) => vec3(v).map(gf::Matrix4d::translation),
+        ("scale", v) => vec3(v).map(gf::Matrix4d::scale),
+        ("rotateX", Value::Double(degrees)) => Some(rotate(b'X', *degrees)),
+        ("rotateY", Value::Double(degrees)) => Some(rotate(b'Y', *degrees)),
+        ("rotateZ", Value::Double(degrees)) => Some(rotate(b'Z', *degrees)),
+        // rotateZYX & friends: the first axis named is the most local (USD
+        // xformOp.h), so in the row-vector convention its matrix is
+        // leftmost and each axis uses its own vec3 component, in degrees.
+        (name, v) if name.starts_with("rotate") && name.len() == "rotate".len() + 3 => {
+            let order = &name.as_bytes()["rotate".len()..];
+            if !order.iter().all(|axis| matches!(axis, b'X' | b'Y' | b'Z')) {
+                return Ok(None);
+            }
+            let Some([x, y, z]) = vec3(v) else {
                 return Ok(None);
             };
-            if op.ends_with("translate") {
-                Some(gf::Matrix4d::translation(components))
-            } else if op.ends_with("scale") {
-                Some(gf::Matrix4d::scale(components))
-            } else if op.contains("rotate") {
-                let [x, y, z] = components;
-                Some(
-                    gf::Matrix4d::rotation_x(x.to_radians())
-                        * gf::Matrix4d::rotation_y(y.to_radians())
-                        * gf::Matrix4d::rotation_z(z.to_radians()),
-                )
-            } else {
-                None
-            }
+            let angle = |axis: u8| match axis {
+                b'X' => x,
+                b'Y' => y,
+                _ => z,
+            };
+            let mut matrix = rotate(order[0], angle(order[0]));
+            matrix = matrix * rotate(order[1], angle(order[1]));
+            Some(matrix * rotate(order[2], angle(order[2])))
         }
-        Value::Double(degrees) => match op {
-            _ if op.ends_with("rotateX") => {
-                Some(gf::Matrix4d::rotation_x(degrees.to_radians()))
-            }
-            _ if op.ends_with("rotateY") => {
-                Some(gf::Matrix4d::rotation_y(degrees.to_radians()))
-            }
-            _ if op.ends_with("rotateZ") => {
-                Some(gf::Matrix4d::rotation_z(degrees.to_radians()))
-            }
-            _ => None,
-        },
-        Value::Quatf(q) => Some(gf::Matrix4d::from_quat([
+        ("orient", Value::Quatf(q)) => Some(gf::Matrix4d::from_quat([
             q.w as f64,
             q.x as f64,
             q.y as f64,
             q.z as f64,
         ])),
-        Value::Quatd(q) => Some(gf::Matrix4d::from_quat([q.w, q.x, q.y, q.z])),
-        Value::Matrix4d(matrix) => Some(*matrix),
+        ("orient", Value::Quatd(q)) => Some(gf::Matrix4d::from_quat([q.w, q.x, q.y, q.z])),
+        ("transform", Value::Matrix4d(matrix)) => Some(*matrix),
         _ => None,
     })
 }
 
 /// The prim's world transform: its local transform composed with every
-/// ancestor's (identity for ancestors without xformOpOrder). `None` only
-/// when no prim in the chain authors an xformOpOrder.
+/// ancestor's (identity for ancestors without xformOpOrder), stopping at a
+/// prim that resets the xform stack (it does not inherit ancestor
+/// transforms). `None` when no prim in the chain authors an xformOpOrder or
+/// an op in the chain cannot be evaluated.
 fn world_transform(prim: &Prim, time: Option<f64>) -> Result<Option<[f64; 16]>, String> {
     let mut chain = Vec::new();
     let mut current = Some(prim.clone());
     while let Some(ancestor) = current {
         current = ancestor.parent();
+        let resets = resets_xform_stack(&ancestor, time)?;
         chain.push(ancestor);
+        if resets {
+            break;
+        }
     }
     let mut acc = gf::Matrix4d::IDENTITY;
     let mut authored = false;
     for ancestor in chain.iter().rev() {
-        if let Some(matrix) = local_transform(ancestor, time)? {
-            acc = matrix * acc;
-            authored = true;
+        match compose_xform(ancestor, time)? {
+            ComposedXform::NoOps => {}
+            ComposedXform::Matrix(matrix) => {
+                acc = matrix * acc;
+                authored = true;
+            }
+            // An unevaluable ancestor would make the composed world wrong.
+            ComposedXform::Unsupported => return Ok(None),
         }
     }
     Ok(authored.then_some(acc.0))

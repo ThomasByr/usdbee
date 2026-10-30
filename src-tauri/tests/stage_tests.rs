@@ -388,7 +388,7 @@ fn details_instance_points_at_prototype() {
         .instance_of
         .as_deref()
         .expect("instance must point at its prototype");
-    assert!(prototype.starts_with('/'), "prototype path: {}", prototype);
+    assert_eq!(prototype, "/__Prototype_0");
 
     assert!(details
         .metadata
@@ -411,6 +411,80 @@ fn details_local_and_world_transforms_differ() {
     assert_eq!(world[12], 1.0);
     assert_eq!(world[13], 2.0);
     assert_eq!(world[14], 2.0);
+}
+
+fn assert_matrix_close(expected: &[f64; 16], actual: &[f64; 16]) {
+    for (i, (e, a)) in expected.iter().zip(actual).enumerate() {
+        assert!((e - a).abs() < 1e-9, "matrix element {i}: expected {e}, got {a}");
+    }
+}
+
+#[test]
+fn details_composes_euler_ops_in_authored_order() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "xforms.usda");
+
+    // xformOp:rotateZYX (90, 90, 90): the first axis named is the most local
+    // (USD xformOp.h), so the row-vector matrix is Rz(90)·Ry(90)·Rx(90).
+    let triplet = details_via_owner(&state, "/World/TripletZYX", None)
+        .local_transform
+        .expect("triplet op is evaluated");
+    assert_matrix_close(
+        &[0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        &triplet,
+    );
+
+    // Single-axis ops listed [rotateZ, rotateY, rotateX]: ops apply in the
+    // reverse of the listed order, so the matrix is Rx(90)·Ry(90)·Rz(90).
+    let singles = details_via_owner(&state, "/World/SinglesZYX", None)
+        .local_transform
+        .expect("single-axis ops are evaluated");
+    assert_matrix_close(
+        &[0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        &singles,
+    );
+
+    assert!(
+        (triplet[5] - singles[5]).abs() > 1.0,
+        "authored order must change the matrix"
+    );
+}
+
+#[test]
+fn details_reset_xform_stack_discards_prior_ops_and_inheritance() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "xforms.usda");
+    let details = details_via_owner(&state, "/World/Reset", None);
+
+    // The translate before !resetXformStack! is discarded; only rotateZ(90)
+    // survives, so the local matrix is a pure rotation with no translation.
+    let local = details
+        .local_transform
+        .expect("ops after the reset compose");
+    assert_matrix_close(
+        &[0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        &local,
+    );
+
+    // The reset also stops the parent /World translate (10, 0, 0) from
+    // composing into the world transform.
+    let world = details
+        .world_transform
+        .expect("world equals the reset local");
+    assert_matrix_close(&local, &world);
+}
+
+#[test]
+fn details_unsupported_xform_ops_yield_no_transform() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "xforms.usda");
+    let details = details_via_owner(&state, "/World/Pivoted", None);
+
+    assert!(
+        details.local_transform.is_none(),
+        "pivot ops must not silently compose a wrong matrix"
+    );
+    assert!(details.world_transform.is_none());
 }
 
 #[test]
