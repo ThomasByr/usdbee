@@ -2,7 +2,7 @@ mod commands;
 mod fetcher;
 mod models;
 mod omniverse;
-mod parser;
+pub mod parser;
 
 use tauri::Emitter;
 use tauri::{

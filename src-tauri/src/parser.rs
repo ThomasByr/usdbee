@@ -2,257 +2,171 @@ use crate::fetcher::{fetch_and_cache_url, get_usdbee_cache_dir};
 use crate::models::UsdDependencyNode;
 use crate::omniverse::resolve_omniverse_uri;
 
-use regex::bytes::Regex as BytesRegex;
-use std::collections::HashMap;
+use openusd::usd::Stage;
+use openusd::usd_utils::compute_all_dependencies;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn extract_dependencies(
-    file_path: &Path,
-    server_url: &str,
-) -> Result<HashMap<String, UsdDependencyNode>, String> {
-    let mut deps = HashMap::new();
-    let mut visited = std::collections::HashSet::new();
-    let original_root = file_path
-        .parent()
-        .unwrap_or(Path::new(""))
+/// One dependency of a scanned scene, in the shape the `usd-scene-loaded`
+/// event's dependency map already consumes.
+#[derive(Debug)]
+pub struct DependencyEntry {
+    /// Map key: the root-relative path, or the original remote URL.
+    pub key: String,
+    pub node: UsdDependencyNode,
+}
+
+/// What a scene depends on, in openusd's discovery order: layers first,
+/// then other assets, then unresolvable paths.
+pub struct DependencyScan {
+    pub root: PathBuf,
+    pub entries: Vec<DependencyEntry>,
+}
+
+/// Scans every layer and asset `root` reaches, through openusd's
+/// `compute_all_dependencies`. Local paths are reported in full; remote
+/// dependencies (http(s), omniverse) are reported as pending entries that
+/// [`resolve_remote_dependencies`] fetches.
+pub fn scan_dependencies(root: &Path) -> Result<DependencyScan, String> {
+    let root = root
         .canonicalize()
-        .unwrap_or_else(|_| Path::new("").to_path_buf());
+        .map_err(|e| format!("Failed to resolve {}: {}", root.display(), e))?;
+    let root_str = clean(&root.to_string_lossy());
 
-    let root_str = original_root
-        .to_string_lossy()
-        .replace("\\\\?\\", "")
-        .replace("//?/", "");
-    let root_dir = PathBuf::from(&root_str);
+    let stage = Stage::open(&root_str)
+        .map_err(|e| format!("Failed to open USD stage {}: {}", root_str, e))?;
+    let deps = compute_all_dependencies(&stage, &root_str)
+        .map_err(|e| format!("Failed to compute dependencies of {}: {}", root_str, e))?;
 
-    let mut queue = vec![file_path.to_path_buf()];
+    let root_dir = root.parent().unwrap_or(Path::new(""));
 
-    // Hoisted: compiling these per scanned file made clippy's regex-in-loop fire.
-    let re_usda = BytesRegex::new(r#"@([^@\n\r"']+)@"#).ok();
-    let re_fallback = BytesRegex::new(
-        r#"([a-zA-Z0-9_/\\\.\-\ ]+\.(?:png|jpg|jpeg|exr|tif|tiff|usd|usda|usdc|usdz))"#,
-    )
-    .ok();
-
-    while let Some(current_path) = queue.pop() {
-        if !current_path.exists() {
-            continue;
-        }
-
-        let absolute_path = match current_path.canonicalize() {
-            Ok(p) => p
-                .to_string_lossy()
-                .replace("\\\\?\\", "")
-                .replace("//?/", ""),
-            Err(_) => current_path
-                .to_string_lossy()
-                .replace("\\\\?\\", "")
-                .replace("//?/", ""),
-        };
-
-        if visited.contains(&absolute_path) {
-            continue;
-        }
-        visited.insert(absolute_path.clone());
-
-        let ext = current_path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        let is_zip = ext == "usdz";
-
-        if is_zip {
-            if let Ok(file) = fs::File::open(&current_path) {
-                if let Ok(mut archive) = zip::ZipArchive::new(file) {
-                    for i in 0..archive.len() {
-                        if let Ok(file_in_zip) = archive.by_index(i) {
-                            let name = file_in_zip.name().to_string();
-                            if name.ends_with('/') || name.is_empty() {
-                                continue;
-                            }
-                            let size = file_in_zip.size();
-
-                            deps.insert(
-                                name.clone(),
-                                UsdDependencyNode {
-                                    path: name,
-                                    resolved: true,
-                                    size_bytes: Some(size),
-                                    fallback_color: None,
-                                    error_msg: None,
-                                },
-                            );
-                        }
-                    }
-                }
-            }
+    // layers[0] is the root itself; the entries are what it reaches.
+    let mut entries = Vec::new();
+    for identifier in deps.layers.iter().skip(1).chain(&deps.assets) {
+        let path = clean(identifier);
+        let size = fs::metadata(identifier).map(|m| m.len()).ok();
+        entries.push(DependencyEntry {
+            key: relative_key(identifier, root_dir),
+            node: UsdDependencyNode {
+                path,
+                resolved: true,
+                size_bytes: size,
+                fallback_color: None,
+                error_msg: None,
+            },
+        });
+    }
+    for identifier in &deps.unresolved {
+        if let Some(url) = remote_url(identifier) {
+            entries.push(DependencyEntry {
+                key: url.clone(),
+                node: UsdDependencyNode {
+                    path: url,
+                    resolved: false,
+                    size_bytes: None,
+                    fallback_color: None,
+                    error_msg: None,
+                },
+            });
         } else {
-            if let Ok(content) = fs::read(&current_path) {
-                let mut found_paths = std::collections::HashSet::new();
-
-                if ext == "usda" || content.starts_with(b"#usda") {
-                    if let Some(re) = &re_usda {
-                        for caps in re.captures_iter(&content) {
-                            if let Ok(p) = std::str::from_utf8(&caps[1]) {
-                                found_paths.insert(p.trim().to_string());
-                            }
-                        }
-                    }
-                } else if content.starts_with(b"PXR-USDC") {
-                    if let Ok(crate_file) =
-                        openusd::usdc::CrateFile::open(std::io::Cursor::new(&content))
-                    {
-                        for token in crate_file.tokens {
-                            let token_lower = token.to_lowercase();
-                            if token_lower.ends_with(".usd")
-                                || token_lower.ends_with(".usda")
-                                || token_lower.ends_with(".usdc")
-                                || token_lower.ends_with(".usdz")
-                                || token_lower.ends_with(".png")
-                                || token_lower.ends_with(".jpg")
-                                || token_lower.ends_with(".jpeg")
-                                || token_lower.ends_with(".exr")
-                                || token_lower.ends_with(".tif")
-                                || token_lower.ends_with(".tiff")
-                            {
-                                found_paths.insert(token);
-                            }
-                        }
-                    }
-                } else {
-                    if let Some(re) = &re_fallback {
-                        for caps in re.captures_iter(&content) {
-                            if let Ok(p) = std::str::from_utf8(&caps[1]) {
-                                found_paths.insert(p.trim().to_string());
-                            }
-                        }
-                    }
-                }
-
-                let current_dir = current_path.parent().unwrap_or(Path::new(""));
-                let file_name = current_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap_or("");
-
-                for mut p in found_paths {
-                    if p.is_empty() || p == file_name {
-                        continue;
-                    }
-
-                    let original_p = p.clone(); // Keep original for key
-
-                    if p.starts_with("omni:") || p.starts_with("omniverse:") {
-                        p = resolve_omniverse_uri(&p, server_url);
-                    }
-
-                    if p.starts_with("http://")
-                        || p.starts_with("https://")
-                        || p.starts_with("http:/")
-                        || p.starts_with("https:/")
-                    {
-                        let mut url = p.clone();
-                        if url.starts_with("http:/") && !url.starts_with("http://") {
-                            url = url.replacen("http:/", "http://", 1);
-                        } else if url.starts_with("https:/") && !url.starts_with("https://") {
-                            url = url.replacen("https:/", "https://", 1);
-                        }
-
-                        let cache_dir = get_usdbee_cache_dir();
-                        fs::create_dir_all(&cache_dir).ok();
-
-                        // A failed remote fetch fails the whole load: the
-                        // caller turns this error into a usd-load-error event
-                        // instead of a silently unresolved dependency.
-                        let absolute_dep = fetch_and_cache_url(&url, &cache_dir)?;
-
-                        let resolved = absolute_dep.exists();
-                        let size = if resolved {
-                            fs::metadata(&absolute_dep).map(|m| m.len()).ok()
-                        } else {
-                            None
-                        };
-
-                        deps.insert(
-                            original_p.clone(),
-                            UsdDependencyNode {
-                                path: absolute_dep.to_string_lossy().to_string(),
-                                resolved,
-                                size_bytes: size,
-                                fallback_color: None,
-                                error_msg: None,
-                            },
-                        );
-                        continue;
-                    }
-
-                    let clean_p = p.replace("\\", "/");
-                    let mut dep_path = current_dir.join(&clean_p);
-
-                    if !dep_path.exists() {
-                        let root_dep = root_dir.join(&clean_p);
-                        if root_dep.exists() {
-                            dep_path = root_dep;
-                        }
-                    }
-
-                    let mut error_msg = None;
-                    let absolute_dep = match dep_path.canonicalize() {
-                        Ok(p) => {
-                            let clean = p
-                                .to_string_lossy()
-                                .replace("\\\\?\\", "")
-                                .replace("//?/", "");
-                            PathBuf::from(&clean)
-                        }
-                        Err(e) => {
-                            error_msg = Some(format!(
-                                "Failed to resolve path:\n{} \nError: {}",
-                                dep_path.display(),
-                                e
-                            ));
-                            dep_path.clone()
-                        }
-                    };
-
-                    let relative_to_root = pathdiff::diff_paths(&absolute_dep, &root_dir)
-                        .unwrap_or_else(|| dep_path.clone());
-
-                    let relative_to_root_str =
-                        relative_to_root.to_string_lossy().replace("\\", "/");
-
-                    let resolved = absolute_dep.exists();
-                    let size = if resolved {
-                        fs::metadata(&absolute_dep).map(|m| m.len()).ok()
-                    } else {
-                        if error_msg.is_none() {
-                            error_msg = Some("File not found at resolved location".to_string());
-                        }
-                        None
-                    };
-
-                    deps.insert(
-                        relative_to_root_str.clone(),
-                        UsdDependencyNode {
-                            path: absolute_dep.to_string_lossy().replace("\\", "/"),
-                            resolved,
-                            size_bytes: size,
-                            fallback_color: None,
-                            error_msg,
-                        },
-                    );
-
-                    if resolved {
-                        queue.push(absolute_dep);
-                    }
-                }
-            }
+            entries.push(DependencyEntry {
+                key: relative_key(identifier, root_dir),
+                node: UsdDependencyNode {
+                    path: clean(identifier),
+                    resolved: false,
+                    size_bytes: None,
+                    fallback_color: None,
+                    error_msg: Some("File not found at resolved location".to_string()),
+                },
+            });
         }
     }
 
-    Ok(deps)
+    Ok(DependencyScan { root, entries })
+}
+
+/// Fetches the remote dependencies a scan found into the download cache.
+/// A failed fetch aborts the whole load: the caller turns this error into a
+/// usd-load-error event instead of a silently unresolved dependency.
+pub fn resolve_remote_dependencies(
+    scan: &mut DependencyScan,
+    server_url: &str,
+) -> Result<(), String> {
+    if !scan.entries.iter().any(|e| is_remote(&e.key)) {
+        return Ok(());
+    }
+    let cache_dir = get_usdbee_cache_dir();
+    fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+
+    for entry in &mut scan.entries {
+        if !is_remote(&entry.key) {
+            continue;
+        }
+        let url = &entry.key;
+        let target = if url.starts_with("omni://") || url.starts_with("omniverse://") {
+            resolve_omniverse_uri(url, server_url)
+        } else {
+            url.clone()
+        };
+
+        let absolute_dep = fetch_and_cache_url(&target, &cache_dir)?;
+        let resolved = absolute_dep.exists();
+        let size = if resolved {
+            fs::metadata(&absolute_dep).map(|m| m.len()).ok()
+        } else {
+            None
+        };
+
+        entry.node.path = clean(&absolute_dep.to_string_lossy());
+        entry.node.resolved = resolved;
+        entry.node.size_bytes = size;
+    }
+    Ok(())
+}
+
+/// The `http(s)`/omniverse URL an unresolved identifier names, if any.
+/// openusd's resolver reads `http://a/b` as the relative path `http:/a/b`,
+/// so both spellings restore to the URL as authored.
+fn remote_url(identifier: &str) -> Option<String> {
+    for (single, double) in [
+        ("http:/", "http://"),
+        ("https:/", "https://"),
+        ("omni:/", "omni://"),
+        ("omniverse:/", "omniverse://"),
+    ] {
+        if let Some(rest) = identifier.strip_prefix(single) {
+            return if rest.starts_with('/') {
+                Some(identifier.to_string())
+            } else {
+                Some(format!("{double}{rest}"))
+            };
+        }
+    }
+    None
+}
+
+fn is_remote(identifier: &str) -> bool {
+    remote_url(identifier).is_some()
+}
+
+/// `identifier` spelled relative to the root layer's directory, the key the
+/// frontend's dependency map and URLModifier expect.
+fn relative_key(identifier: &str, root_dir: &Path) -> String {
+    let path = Path::new(identifier);
+    let relative = if path.is_absolute() {
+        pathdiff::diff_paths(path, root_dir).unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    clean(&relative.to_string_lossy())
+}
+
+/// Strips Windows UNC prefixes and normalizes separators to `/`.
+fn clean(path: &str) -> String {
+    path.replace("\\\\?\\", "")
+        .replace("//?/", "")
+        .replace('\\', "/")
 }
 
 #[cfg(test)]
@@ -281,33 +195,41 @@ mod tests {
         path
     }
 
+    fn scan(dir: &Path, name: &str) -> DependencyScan {
+        scan_dependencies(&dir.join(name)).unwrap()
+    }
+
     #[test]
     fn detects_local_references_and_recurses() {
         let dir = tempfile::tempdir().unwrap();
         write_usda(
             dir.path(),
             "root.usda",
-            "#usda 1.0\n(references = @./a.usda@)\n",
+            "#usda 1.0\ndef \"R\" (references = @./a.usda@)\n{\n}\n",
         );
         write_usda(
             dir.path(),
             "a.usda",
-            "#usda 1.0\n(references = @./b.usda@)\n",
+            "#usda 1.0\ndef \"A\" (references = @./b.usda@)\n{\n}\n",
         );
-        write_usda(dir.path(), "b.usda", "#usda 1.0\n");
+        write_usda(dir.path(), "b.usda", "#usda 1.0\ndef \"B\"\n{\n}\n");
 
-        let deps = extract_dependencies(&dir.path().join("root.usda"), "").unwrap();
+        let deps = scan(dir.path(), "root.usda");
 
         let a = deps
-            .get("a.usda")
+            .entries
+            .iter()
+            .find(|e| e.key == "a.usda")
             .expect("direct local reference must be detected");
-        assert!(a.resolved, "a.usda exists and must be resolved");
-        assert!(a.error_msg.is_none());
+        assert!(a.node.resolved, "a.usda exists and must be resolved");
+        assert!(a.node.error_msg.is_none());
 
         let b = deps
-            .get("b.usda")
+            .entries
+            .iter()
+            .find(|e| e.key == "b.usda")
             .expect("scan must recurse into referenced files");
-        assert!(b.resolved);
+        assert!(b.node.resolved);
     }
 
     #[test]
@@ -316,20 +238,48 @@ mod tests {
         write_usda(
             dir.path(),
             "root.usda",
-            "#usda 1.0\n(references = @./missing.usda@)\n",
+            "#usda 1.0\ndef \"R\" (references = @./missing.usda@)\n{\n}\n",
         );
 
-        let deps = extract_dependencies(&dir.path().join("root.usda"), "").unwrap();
+        let deps = scan(dir.path(), "root.usda");
 
-        // Recorded actual behavior: the dep is keyed by its root-relative path,
-        // reported unresolved with a canonicalize error message. It is not
-        // scanned further and does not fail the whole scan.
-        let dep = deps
-            .get("missing.usda")
-            .expect("missing local reference must appear in deps");
-        assert!(!dep.resolved);
-        assert!(dep.error_msg.is_some());
-        assert_eq!(deps.len(), 1);
+        // A missing layer is reportable, not fatal: openusd records it as
+        // unresolved and the scan still succeeds.
+        assert_eq!(deps.entries.len(), 1, "entries: {:?}", deps.entries);
+        let dep = &deps.entries[0];
+        assert_eq!(dep.key, "missing.usda");
+        assert!(!dep.node.resolved);
+        assert!(dep.node.error_msg.is_some());
+    }
+
+    #[test]
+    fn remote_fetch_leaves_local_entries_alone() {
+        let port = spawn_http_server(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nusdbytes",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("http://127.0.0.1:{}/tex.png", port);
+        write_usda(
+            dir.path(),
+            "root.usda",
+            &format!(
+                "#usda 1.0\ndef \"R\" (references = @./asset.usda@)\n{{\n    asset t = @{}@\n}}\n",
+                url
+            ),
+        );
+        write_usda(dir.path(), "asset.usda", "#usda 1.0\ndef \"A\"\n{\n}\n");
+
+        let mut deps = scan(dir.path(), "root.usda");
+        resolve_remote_dependencies(&mut deps, "").unwrap();
+
+        let local = deps
+            .entries
+            .iter()
+            .find(|e| e.key == "asset.usda")
+            .expect("local dep must stay in the scan");
+        assert!(local.node.resolved);
+        assert!(local.node.path.ends_with("asset.usda"));
+        assert!(local.node.error_msg.is_none());
     }
 
     #[test]
@@ -341,10 +291,14 @@ mod tests {
         write_usda(
             dir.path(),
             "root.usda",
-            &format!("#usda 1.0\n(asset = @http://127.0.0.1:{}/tex.png@)\n", port),
+            &format!(
+                "#usda 1.0\ndef \"R\"\n{{\n    asset t = @http://127.0.0.1:{}/tex.png@\n}}\n",
+                port
+            ),
         );
 
-        let result = extract_dependencies(&dir.path().join("root.usda"), "");
+        let mut deps = scan(dir.path(), "root.usda");
+        let result = resolve_remote_dependencies(&mut deps, "");
 
         let err = match result {
             Err(e) => e,
@@ -367,16 +321,30 @@ mod tests {
         write_usda(
             dir.path(),
             "root.usda",
-            &format!("#usda 1.0\n(asset = @{}@)\n", url),
+            &format!("#usda 1.0\ndef \"R\"\n{{\n    asset t = @{}@\n}}\n", url),
         );
 
-        let deps = extract_dependencies(&dir.path().join("root.usda"), "").unwrap();
+        let mut deps = scan(dir.path(), "root.usda");
+        let dep = deps
+            .entries
+            .iter()
+            .find(|e| e.key == url)
+            .expect("remote dep is keyed by its original URL");
+        assert!(!dep.node.resolved, "not fetched until resolve_remote runs");
+
+        resolve_remote_dependencies(&mut deps, "").unwrap();
 
         let dep = deps
-            .get(&url)
+            .entries
+            .iter()
+            .find(|e| e.key == url)
             .expect("remote dep is keyed by its original URL");
-        assert!(dep.resolved, "fetched dep must resolve to the cache file");
-        assert_eq!(dep.size_bytes, Some(8));
-        assert!(dep.error_msg.is_none());
+        assert!(
+            dep.node.resolved,
+            "fetched dep must resolve to the cache file"
+        );
+        assert_eq!(dep.node.size_bytes, Some(8));
+        assert!(dep.node.error_msg.is_none());
+        assert!(!dep.node.path.starts_with("http"), "path is the cache file");
     }
 }

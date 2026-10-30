@@ -1,0 +1,21 @@
+#usda 1.0
+(
+    defaultPrim = "Scene"
+)
+
+def Xform "Scene"
+{
+    def "WheelA" (
+        instanceable = true
+        prepend references = @./asset.usda@
+    )
+    {
+    }
+
+    def "WheelB" (
+        instanceable = true
+        prepend references = @./asset.usda@
+    )
+    {
+    }
+}

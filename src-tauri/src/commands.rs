@@ -1,6 +1,6 @@
 use crate::fetcher::get_usdbee_cache_dir;
 use crate::models::{ProgressEvent, UsdDependencyNode, UsdSceneData};
-use crate::parser::extract_dependencies;
+use crate::parser::{resolve_remote_dependencies, scan_dependencies, DependencyScan};
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -211,13 +211,19 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
         .map_err(|e| format!("Failed to read omniverse server URL: {}", e))?
         .clone();
 
-    let mut dependencies = match tauri::async_runtime::spawn_blocking({
+    let scan = match tauri::async_runtime::spawn_blocking({
         let p_str = path.clone();
-        move || -> Result<HashMap<String, UsdDependencyNode>, String> {
+        move || -> Result<DependencyScan, String> {
             let handle = std::thread::Builder::new()
                 .stack_size(32 * 1024 * 1024)
                 .name("usd_deps_parser".into())
-                .spawn(move || extract_dependencies(Path::new(&p_str), &server_url))
+                .spawn(move || {
+                    let mut scan = scan_dependencies(Path::new(&p_str))?;
+                    // Remote fetches stay off the async runtime; a failure
+                    // here aborts the load (Phase 0 ruling).
+                    resolve_remote_dependencies(&mut scan, &server_url)?;
+                    Ok(scan)
+                })
                 .map_err(|e| format!("Failed to spawn parser thread: {}", e))?;
             handle
                 .join()
@@ -226,10 +232,16 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
     })
     .await
     {
-        Ok(Ok(deps)) => deps,
+        Ok(Ok(scan)) => scan,
         Ok(Err(e)) => return Err(e),
         Err(e) => return Err(format!("Stack overflow or extraction failed: {}", e)),
     };
+
+    let mut dependencies: HashMap<String, UsdDependencyNode> = scan
+        .entries
+        .into_iter()
+        .map(|entry| (entry.key, entry.node))
+        .collect();
 
     // Fallback: If this was a USDZ archive, simply pre-populate all extracted files into dependencies.
     // Three.js loads the patched blob via object URL, which loses directory context. The URLModifier

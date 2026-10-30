@@ -1,0 +1,38 @@
+#usda 1.0
+(
+    defaultPrim = "Prop"
+)
+
+def Xform "Prop" (
+    prepend variantSets = "color"
+    prepend variantSets = "size"
+    variants = {
+        string color = "red"
+        string size = "big"
+    }
+)
+{
+    variantSet "color" = {
+        "red" {
+            def Sphere "Shape"
+            {
+                color3f[] primvars:displayColor = [(1, 0, 0)]
+            }
+        }
+        "blue" {
+            def Sphere "Shape"
+            {
+                color3f[] primvars:displayColor = [(0, 0, 1)]
+            }
+        }
+    }
+
+    variantSet "size" = {
+        "big" {
+            double scale = 2
+        }
+        "small" {
+            double scale = 0.5
+        }
+    }
+}

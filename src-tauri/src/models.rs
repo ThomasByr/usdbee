@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-#[derive(serde::Serialize, Clone)]
+#[derive(serde::Serialize, Clone, Debug)]
 pub struct UsdDependencyNode {
     pub path: String,
     pub resolved: bool,
