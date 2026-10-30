@@ -1,0 +1,164 @@
+// Phase 2, Task 6: time codes end-to-end. The manifest's `animated` flags
+// (own sampled geometry/xform attrs, plus ancestor xform sampling) and
+// `get_geometry_data` time resolution — differing positions across times,
+// equal counts, and linear interpolation at a non-integer time.
+
+use std::path::PathBuf;
+use std::sync::mpsc;
+
+use usdbee_lib::stage::{
+    open_stage, request_geometry_data, serialize_render_manifest, spawn_stage_owner, RenderNode,
+    StageState,
+};
+
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+fn manifest_at(time: Option<f64>) -> Vec<RenderNode> {
+    let (stage, info) = open_stage(&fixture("animated.usda")).expect("stage should open");
+    assert!(
+        info.composition_errors.is_empty(),
+        "composition errors: {:?}",
+        info.composition_errors
+    );
+    serialize_render_manifest(&stage, time).expect("manifest should serialize")
+}
+
+fn find<'a>(nodes: &'a [RenderNode], path: &str) -> Option<&'a RenderNode> {
+    nodes
+        .iter()
+        .find(|n| n.path == path)
+        .or_else(|| nodes.iter().find_map(|n| find(&n.children, path)))
+}
+
+fn expect<'a>(nodes: &'a [RenderNode], path: &str) -> &'a RenderNode {
+    find(nodes, path).unwrap_or_else(|| panic!("expected prim {} in manifest", path))
+}
+
+fn open_via_owner(state: &StageState, name: &str) {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    state
+        .sender
+        .send(usdbee_lib::stage::StageRequest::Open {
+            path: fixture(name),
+            reply: reply_tx,
+        })
+        .expect("stage owner should accept an open request");
+    reply_rx
+        .recv()
+        .expect("stage owner should reply")
+        .expect("stage should open");
+}
+
+fn u32_le(bytes: &[u8], index: usize) -> u32 {
+    u32::from_le_bytes(bytes[index..index + 4].try_into().unwrap())
+}
+
+fn f32_le(bytes: &[u8], index: usize) -> f32 {
+    f32::from_le_bytes(bytes[index..index + 4].try_into().unwrap())
+}
+
+// The packed payload's positions start right after the 20-byte header;
+// vertex i sits at 20 + i * 12 + axis * 4.
+fn position(bytes: &[u8], vertex: usize, axis: usize) -> f32 {
+    f32_le(bytes, 20 + vertex * 12 + axis * 4)
+}
+
+fn vertex_count(bytes: &[u8]) -> usize {
+    u32_le(bytes, 8) as usize
+}
+
+#[test]
+fn manifest_flags_own_geometry_and_xform_sampling() {
+    let nodes = manifest_at(Some(0.0));
+
+    // /Scene itself authors no sampled attrs.
+    let scene = expect(&nodes, "/Scene");
+    assert!(!scene.animated, "static Xform root must not be flagged");
+
+    // Pulse authors xformOp:translate timeSamples.
+    let pulse = expect(&nodes, "/Scene/Pulse");
+    assert!(pulse.animated, "sampled xformOps flag the prim");
+
+    // Wobble's points are sampled -> deforming geometry.
+    let wobble = expect(&nodes, "/Scene/Wobble");
+    assert!(wobble.animated, "sampled points flag the prim");
+    assert!(wobble.has_geometry);
+
+    // Still authors only default-time values.
+    let still = expect(&nodes, "/Scene/Still");
+    assert!(
+        !still.animated,
+        "a static sibling with no time samples must not be flagged"
+    );
+}
+
+#[test]
+fn manifest_flags_children_of_an_animated_xform() {
+    let nodes = manifest_at(Some(0.0));
+
+    // USD semantics pinned: a prim under a moving Xform moves with the
+    // parent, so the ancestor's xformOp time samples propagate the flag
+    // down the walk even though the child itself is fully static.
+    let mover = expect(&nodes, "/Scene/Mover");
+    assert!(mover.animated, "sampled xformOps flag the prim");
+
+    let child = expect(&nodes, "/Scene/Mover/Child");
+    assert!(
+        child.animated,
+        "a static child under an animated xform must be flagged"
+    );
+    assert!(child.has_geometry);
+}
+
+#[test]
+fn geometry_positions_differ_by_time_with_equal_counts() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+
+    let at_start = request_geometry_data(&state.sender, "/Scene/Wobble", Some(0.0))
+        .expect("geometry at t=0 should pack");
+    let at_end = request_geometry_data(&state.sender, "/Scene/Wobble", Some(10.0))
+        .expect("geometry at t=10 should pack");
+
+    assert_eq!(vertex_count(&at_start), 3);
+    assert_eq!(
+        vertex_count(&at_end),
+        vertex_count(&at_start),
+        "vertex counts stay equal across time"
+    );
+    assert_eq!(
+        position(&at_end, 1, 0),
+        2.0,
+        "authored points at t=10 read through"
+    );
+    assert!(
+        position(&at_start, 1, 0) != position(&at_end, 1, 0),
+        "positions differ between t=0 and t=10"
+    );
+}
+
+#[test]
+fn geometry_interpolates_linearly_at_non_integer_time() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+
+    // points sampled at t=0 (x=1) and t=10 (x=2): reading at t=2.5 must
+    // resolve to the linear interpolation, one quarter of the way.
+    let bytes = request_geometry_data(&state.sender, "/Scene/Wobble", Some(2.5))
+        .expect("geometry at t=2.5 should pack");
+    assert_eq!(vertex_count(&bytes), 3, "interpolation keeps the counts");
+    assert!(
+        (position(&bytes, 1, 0) - 1.25).abs() < 1e-6,
+        "linear interpolation at t=2.5, got {}",
+        position(&bytes, 1, 0)
+    );
+    assert!(
+        (position(&bytes, 2, 1) - 1.25).abs() < 1e-6,
+        "linear interpolation on the second axis, got {}",
+        position(&bytes, 2, 1)
+    );
+}

@@ -335,6 +335,57 @@ fn renders_geometry(type_name: &str) -> bool {
     matches!(type_name, "Mesh" | "BasisCurves" | "Points")
 }
 
+/// Whether any of the prim's attributes accepted by `selector` authors
+/// time samples. `Attribute::num_time_samples()` is the openusd equivalent
+/// of C++ `UsdAttribute::GetNumTimeSamples` (composed across arcs), so
+/// `> 0` is exactly "has authored time samples" — no value-diffing
+/// fallback needed (Task 6 controller ruling 1).
+fn any_sampled_attribute(
+    prim: &openusd::usd::Prim,
+    selector: impl Fn(&str) -> bool,
+) -> Result<bool, String> {
+    for attribute in prim.attributes().map_err(stage_err)? {
+        if selector(attribute.name()) && attribute.num_time_samples().map_err(stage_err)? > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The prim's rendered geometry deforms over time: points, normals,
+/// widths or any primvar carries time samples (Task 6 ruling 1a).
+fn samples_geometry(prim: &openusd::usd::Prim) -> Result<bool, String> {
+    any_sampled_attribute(prim, |name| {
+        matches!(name, "points" | "normals" | "widths") || name.starts_with("primvars:")
+    })
+}
+
+/// The prim moves its descendants over time: its own xformOps carry time
+/// samples, or (PointInstancer) its per-instance arrays do — both change
+/// where children/instances land, so they propagate the `animated` flag
+/// down the walk like an ancestor xform does.
+///
+/// Task 6 animated-flag decision overall: `animated` is true when the
+/// prim's own geometry deforms, its own transform moves, or any ancestor
+/// transform moves (a moving parent carries every descendant). The
+/// ancestor propagation is deliberately over-broad past a
+/// `!resetXformStack!` — the extra refetch is harmless and the manifest
+/// transform stays correct.
+fn samples_transform(prim: &openusd::usd::Prim) -> Result<bool, String> {
+    let is_instancer = prim
+        .type_name()
+        .map_err(stage_err)?
+        .is_some_and(|token| token == "PointInstancer");
+    any_sampled_attribute(prim, |name| {
+        name.starts_with("xformOp:")
+            || (is_instancer
+                && matches!(
+                    name,
+                    "positions" | "orientations" | "scales" | "protoIndices"
+                ))
+    })
+}
+
 /// One synthetic RenderNode per PointInstancer prototype, in `prototypes`
 /// order (controller ruling): the child's path is `<instancer>/__proto_<i>`,
 /// its type/geometry/material come from the prototype prim, and its
@@ -349,6 +400,7 @@ fn prototype_children(
     stage: &Stage,
     prim: &openusd::usd::Prim,
     time: Option<f64>,
+    instancer_moves: bool,
 ) -> Result<Vec<RenderNode>, String> {
     let instancer = PointInstancer::from_prim_unchecked(prim.clone());
     let time_code = time.map(TimeCode::new);
@@ -396,6 +448,12 @@ fn prototype_children(
                     .unwrap_or_default();
                 let proto_xform =
                     local_transform(&prototype, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
+                // The prototype root's own xform is folded into every
+                // instance matrix, so sampled proto xformOps animate the
+                // child as much as the instancer's own arrays do.
+                let animated = instancer_moves
+                    || samples_transform(&prototype)?
+                    || (renders_geometry(&type_name) && samples_geometry(&prototype)?);
                 let mut instances = Vec::new();
                 for (i, &proto_index) in proto_indices.iter().enumerate() {
                     if proto_index < 0 || proto_index as usize != index {
@@ -430,7 +488,7 @@ fn prototype_children(
                     visible,
                     has_geometry: renders_geometry(&type_name),
                     type_name,
-                    animated: false,
+                    animated,
                     children: Vec::new(),
                 });
             }
@@ -447,6 +505,7 @@ pub fn serialize_render_manifest(
         stage: &Stage,
         prim: &openusd::usd::Prim,
         time: Option<f64>,
+        ancestor_moves: bool,
     ) -> Result<Vec<RenderNode>, String> {
         let mut nodes = Vec::new();
         for child in visible_children(prim)? {
@@ -460,12 +519,15 @@ pub fn serialize_render_manifest(
                 .map_err(stage_err)?
                 .map(|t| t.to_string())
                 .unwrap_or_default();
+            let self_moves = samples_transform(&child)?;
+            let deforms = renders_geometry(&type_name) && samples_geometry(&child)?;
+            let moves = ancestor_moves || self_moves;
             let children = if type_name == "PointInstancer" {
-                prototype_children(stage, &child, time)?
+                prototype_children(stage, &child, time, moves)?
             } else if is_instance {
                 Vec::new()
             } else {
-                children_of(stage, &child, time)?
+                children_of(stage, &child, time, moves)?
             };
             let node = RenderNode {
                 material: if renders_geometry(&type_name) {
@@ -477,7 +539,7 @@ pub fn serialize_render_manifest(
                 name: child.path().name().unwrap_or_default().to_string(),
                 has_geometry: renders_geometry(&type_name),
                 type_name,
-                animated: false,
+                animated: deforms || moves,
                 instances: Vec::new(),
                 transform: local_transform(&child, time)?
                     .map(|matrix| matrix.0)
@@ -493,7 +555,7 @@ pub fn serialize_render_manifest(
     let pseudo_root = stage
         .prim(sdf::Path::abs_root())
         .map_err(|e| format!("invalid pseudo-root path: {}", e))?;
-    children_of(stage, &pseudo_root, time)
+    children_of(stage, &pseudo_root, time, false)
 }
 
 /// Tessellation cache owned by the stage-owner thread: (prim path, time as

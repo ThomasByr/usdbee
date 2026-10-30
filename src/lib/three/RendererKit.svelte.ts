@@ -25,7 +25,10 @@ export class RendererKit {
   stats: any = null;
 
   loadedGroup = $state.raw<THREE.Group | null>(null);
-  mixer: THREE.AnimationMixer | null = $state.raw(null);
+  // Task 6: playback driver hook. When the host assigns this (rust
+  // backend), each animation-frame tick advances the playhead with the
+  // frame delta in seconds; null = nothing animates (legacy backend).
+  onAdvanceTime: ((deltaSeconds: number) => void) | null = null;
   clock: THREE.Clock;
   usdCameras = $state<THREE.Camera[]>([]);
   activeCameraIndex = $state<number>(-1);
@@ -153,7 +156,7 @@ export class RendererKit {
     if (this.showExportModal) {
       this.lastFrameTime = time;
       this.lastNavTime = performance.now();
-      if (this.mixer) this.clock.getDelta(); // Drain accumulated time so animation doesn't jump
+      this.clock.getDelta(); // Drain accumulated time so playback doesn't jump
       return;
     }
 
@@ -167,17 +170,10 @@ export class RendererKit {
       this.lastFrameTime = time;
     }
 
-    if (this.mixer && !this.isDraggingAnim) {
+    if (this.onAdvanceTime && !this.isDraggingAnim) {
       const delta = this.clock.getDelta();
-      if (this.isPlayingAnim) {
-        this.mixer.update(delta);
-
-        this.animationProgress += delta;
-        if (this.animationProgress > this.animationDuration) {
-          this.animationProgress %= this.animationDuration;
-        }
-      }
-    } else if (this.mixer) {
+      if (this.isPlayingAnim) this.onAdvanceTime(delta);
+    } else {
       this.clock.getDelta();
     }
 

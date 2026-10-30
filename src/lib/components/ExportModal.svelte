@@ -9,7 +9,9 @@
   export let hasAnimation: boolean = false;
   export let animationDuration: number = 0;
   export let animationProgress: number = 0;
-  export let mixer: THREE.AnimationMixer | null = null;
+  // Task 6: steps the stage playhead (USD time codes) to `t` and waits for
+  // the animated refresh before rendering a preview frame.
+  export let previewAt: ((t: number) => Promise<void>) | null = null;
   export let isExporting: boolean = false;
   export let exportProgress: number = 0;
   export let exportStage: string = "Exporting...";
@@ -45,7 +47,7 @@
     dispatch("close");
   }
 
-  function updatePreview() {
+  async function updatePreview() {
     if (!renderer || !scene || !camera) {
       console.log("updatePreview: missing renderer/scene/camera");
       return;
@@ -69,10 +71,10 @@
         renderer.setClearColor(0x333333, 1);
       }
 
-      if (hasAnimation && mixer) {
+      if (hasAnimation && previewAt) {
         let pTime =
           format === "mp4" ? (previewTarget === "start" ? exportStartTime : exportEndTime) : exportTime;
-        mixer.setTime(pTime);
+        await previewAt(pTime);
       }
 
       // render to preview
@@ -96,8 +98,8 @@
       renderer.setClearColor(originalClearColor, originalClearAlpha);
       scene.background = originalSceneBackground;
 
-      if (hasAnimation && mixer) {
-        mixer.setTime(animationProgress);
+      if (hasAnimation && previewAt) {
+        await previewAt(animationProgress);
       }
     } catch (err) {
       console.error("updatePreview error:", err);
@@ -197,7 +199,7 @@
               <div class="setting-group">
                 <label class="range-label" for="time_slider">
                   <span>Timestamp</span>
-                  <span>{exportTime.toFixed(2)}s</span>
+                  <span>{exportTime.toFixed(2)}</span>
                 </label>
                 <input
                   id="time_slider"
@@ -221,7 +223,7 @@
               <div class="setting-group">
                 <label class="range-label" for="time_slider_png">
                   <span>Timestamp</span>
-                  <span>{exportTime.toFixed(2)}s</span>
+                  <span>{exportTime.toFixed(2)}</span>
                 </label>
                 <input
                   id="time_slider_png"
@@ -289,8 +291,8 @@
                     <div
                       style="display: flex; justify-content: space-between; font-size: 0.8rem; color: #aaa;"
                     >
-                      <span>Start: {exportStartTime.toFixed(2)}s</span>
-                      <span>End: {exportEndTime.toFixed(2)}s</span>
+                      <span>Start: {exportStartTime.toFixed(2)}</span>
+                      <span>End: {exportEndTime.toFixed(2)}</span>
                     </div>
                   </div>
                 {/if}

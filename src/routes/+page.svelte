@@ -24,7 +24,7 @@
     saveControlPreferences,
   } from "$lib/state/controlsState.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
-  import { renderState } from "$lib/render/renderState.svelte";
+  import { advanceStageTime, renderState } from "$lib/render/renderState.svelte";
   import { disposeScene } from "$lib/render/sceneBuilder";
   import type { StageInfo } from "$lib/stage/types";
   import { stageModalErrorLines } from "$lib/stage/modalErrors";
@@ -115,9 +115,19 @@
         renderer: viewer.renderer,
         scene: viewer.scene!,
         camera: viewer.camera,
-        mixer: viewer.mixer,
         animationDuration: viewer.animationDuration,
         animationProgress: viewer.animationProgress,
+        // Task 6: on the rust backend the exporter steps USD time codes —
+        // the rate is time_codes_per_second and each frame re-fetches
+        // animated geometry through setStageTime. Legacy has no animation.
+        playbackRate:
+          viewerSettings.renderBackend === "rust"
+            ? (stageState.stageInfo?.time_codes_per_second ?? 24)
+            : undefined,
+        onBeforeFrame:
+          viewerSettings.renderBackend === "rust"
+            ? (t: number) => renderState.setStageTime(t)
+            : undefined,
       },
       detail,
       {
@@ -611,23 +621,9 @@
             viewer.boxHelper.visible = viewer.showBoundingBox;
             viewer.scene.add(viewer.boxHelper);
 
-            // Setup Animation
-            if (group.animations && group.animations.length > 0) {
-              viewer.mixer = new THREE.AnimationMixer(group);
-              viewer.hasAnimation = true;
-              viewer.animationDuration = Math.max(
-                ...group.animations.map((a: THREE.AnimationClip) => a.duration),
-              );
-              viewer.animationProgress = 0;
-              viewer.isPlayingAnim = true;
-
-              group.animations.forEach((clip: THREE.AnimationClip) => {
-                viewer.mixer?.clipAction(clip).play();
-              });
-            } else {
-              viewer.mixer = null;
-              viewer.hasAnimation = false;
-            }
+            // Task 6: legacy USDLoader playback is gone with the mixer —
+            // the rust backend owns animation via stage time codes.
+            viewer.hasAnimation = false;
 
             viewer.sceneBox.setFromObject(group, true);
             let size = viewer.sceneBox.getSize(new THREE.Vector3()).length();
@@ -729,6 +725,28 @@
       viewer.init(canvas);
     }
 
+    // Task 6 playback driver: on the rust backend the render loop advances
+    // the stage playhead in USD time codes. The seconds -> time-code rate
+    // conversion lives ONLY here and in the exporter (spec §8) —
+    // advanceStageTime. Legacy backend: inert (scrubber only).
+    viewer.onAdvanceTime = (deltaSeconds: number) => {
+      if (viewerSettings.renderBackend !== "rust") return;
+      const info = stageState.stageInfo;
+      const start = info?.start_time_code ?? 0;
+      const end = info?.end_time_code ?? 0;
+      if (end <= start) return;
+      const tcps = info?.time_codes_per_second ?? 24;
+      const next = advanceStageTime(
+        renderState.time ?? start,
+        deltaSeconds,
+        tcps,
+        start,
+        end,
+      );
+      viewer.animationProgress = next;
+      void renderState.setStageTime(next);
+    };
+
     // Cleanup listeners
     return () => {
       window.removeEventListener("keydown", handleGlobalKeydown);
@@ -776,8 +794,11 @@
     viewer.boxHelper.visible = viewer.showBoundingBox;
     viewer.scene!.add(viewer.boxHelper);
 
-    viewer.mixer = null;
-    viewer.hasAnimation = false;
+    // Task 6: the rust timeline is driven by stage time codes.
+    viewer.hasAnimation = renderState.hasAnimated;
+    const info = stageState.stageInfo;
+    viewer.animationDuration = (info?.end_time_code ?? 0) - (info?.start_time_code ?? 0);
+    viewer.animationProgress = renderState.time ?? info?.start_time_code ?? 0;
 
     viewer.sceneBox.setFromObject(group, true);
     let size = viewer.sceneBox.getSize(new THREE.Vector3()).length();
@@ -1484,21 +1505,21 @@
           value={viewer.animationProgress}
           oninput={(e) => {
             viewer.animationProgress = parseFloat(e.currentTarget.value);
-            if (viewer.mixer) {
-              viewer.mixer.setTime(viewer.animationProgress);
-              if (viewer.showBoundingBox && viewer.loadedGroup)
-                viewer.sceneBox.setFromObject(viewer.loadedGroup, true);
-              if (viewer.selectedNode && viewer.selectionHelper) {
-                // @ts-ignore
-                viewer.selectionHelper.box.setFromObject(viewer.selectedNode, true);
-              }
+            if (viewerSettings.renderBackend === "rust") {
+              void renderState.setStageTime(viewer.animationProgress);
+            }
+            if (viewer.showBoundingBox && viewer.loadedGroup)
+              viewer.sceneBox.setFromObject(viewer.loadedGroup, true);
+            if (viewer.selectedNode && viewer.selectionHelper) {
+              // @ts-ignore
+              viewer.selectionHelper.box.setFromObject(viewer.selectedNode, true);
             }
           }}
           onmousedown={() => (viewer.isDraggingAnim = true)}
           onmouseup={() => (viewer.isDraggingAnim = false)}
         />
         <span class="timeline-time"
-          >{viewer.animationProgress.toFixed(2)}s / {viewer.animationDuration.toFixed(2)}s</span
+          >{viewer.animationProgress.toFixed(2)} / {viewer.animationDuration.toFixed(2)}</span
         >
       </div>
     {/if}
@@ -1531,7 +1552,11 @@
     hasAnimation={viewer.hasAnimation}
     animationDuration={viewer.animationDuration}
     animationProgress={viewer.animationProgress}
-    mixer={viewer.mixer}
+    previewAt={
+      viewerSettings.renderBackend === "rust"
+        ? (t: number) => renderState.setStageTime(t)
+        : null
+    }
     {isExporting}
     {exportProgress}
     {exportStage}

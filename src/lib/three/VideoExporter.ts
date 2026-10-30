@@ -8,9 +8,16 @@ export interface ExportContext {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
-  mixer: THREE.AnimationMixer | null;
   animationDuration: number;
   animationProgress: number;
+  // Task 6: playhead units advanced per real second (rust path: USD
+  // time_codes_per_second — the only seconds->time-code conversion besides
+  // viewport playback, spec §8).
+  playbackRate?: number;
+  // Steps the playhead (USD time codes on the rust path) to `t` before
+  // each rendered frame; the viewport's setStageTime re-fetches animated
+  // geometry. Absent = static export.
+  onBeforeFrame?: (t: number) => void | Promise<void>;
 }
 
 export interface ExportConfig {
@@ -34,7 +41,7 @@ export async function runExport(
   config: ExportConfig,
   callbacks: ExportCallbacks,
 ): Promise<void> {
-  const { renderer, scene, camera, mixer, animationDuration, animationProgress } = context;
+  const { renderer, scene, camera, animationDuration, animationProgress, playbackRate, onBeforeFrame } = context;
   const { format, quality, resolution, bgTransparent, loop } = config;
   const { onProgress, onComplete, onError } = callbacks;
 
@@ -67,8 +74,8 @@ export async function runExport(
 
   try {
     if (format === "jpg" || format === "png") {
-      if (config.timestamp !== undefined && mixer) {
-        mixer.setTime(config.timestamp);
+      if (config.timestamp !== undefined && onBeforeFrame) {
+        await onBeforeFrame(config.timestamp);
       }
       renderer.render(scene, camera);
 
@@ -115,7 +122,11 @@ export async function runExport(
         const startTime = config.mp4Crop ? config.mp4Crop.start : 0;
         const endTime = config.mp4Crop ? config.mp4Crop.end : animationDuration || 2;
         const fps = 30;
-        const totalFrames = Math.ceil((endTime - startTime) * fps);
+        // Without a playhead driver the crop range is plain seconds
+        // (legacy behavior); with one it is playhead units and the rate
+        // converts frames to real-time seconds.
+        const rate = onBeforeFrame && playbackRate ? playbackRate : 1;
+        const totalFrames = Math.max(1, Math.ceil(((endTime - startTime) * fps) / rate));
 
         const ffmpeg = new FFmpeg();
         ffmpeg.on("progress", ({ progress }) => {
@@ -132,8 +143,8 @@ export async function runExport(
         onProgress("Rendering Frames...", 0);
 
         for (let i = 0; i < totalFrames; i++) {
-          const t = startTime + i / fps;
-          if (mixer) mixer.setTime(t);
+          const t = startTime + (i * rate) / fps;
+          if (onBeforeFrame) await onBeforeFrame(t);
           renderer.render(scene, camera);
 
           const dataUrl = renderer.domElement.toDataURL("image/jpeg", 0.95);
@@ -216,8 +227,8 @@ export async function runExport(
     renderer.domElement.style.height = oldStyleHeight;
     renderer.domElement.style.display = oldDisplay;
 
-    if (mixer) {
-      mixer.setTime(animationProgress);
+    if (onBeforeFrame) {
+      await onBeforeFrame(animationProgress);
     }
   }
 }

@@ -21,13 +21,15 @@ export interface SceneFetchers {
 
 // USD row-major row-vector matrices and three.js column-major column-vector
 // matrices store the same 16 numbers in the same order (translation at
-// indices 12-14), so fromArray is a direct copy.
-function applyTransform(object: THREE.Object3D, matrix: number[]): void {
+// indices 12-14), so fromArray is a direct copy. Exported for renderState's
+// in-place time updates (Task 6).
+export function applyTransform(object: THREE.Object3D, matrix: number[]): void {
   const m = new THREE.Matrix4().fromArray(matrix);
   m.decompose(object.position, object.quaternion, object.scale);
 }
 
-function toBufferGeometry(buffer: ArrayBuffer): THREE.BufferGeometry {
+// Exported for renderState's in-place geometry rebuilds (Task 6).
+export function toBufferGeometry(buffer: ArrayBuffer): THREE.BufferGeometry {
   const decoded = decodeGeometry(buffer);
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(decoded.positions, 3));
