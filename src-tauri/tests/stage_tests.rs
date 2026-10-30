@@ -25,7 +25,8 @@ fn fetched_remote_reference_composes_into_the_stage() {
         let (mut stream, _) = listener.accept().expect("HTTP request should arrive");
         let mut request = [0; 1024];
         let _ = stream.read(&mut request);
-        let body = "#usda 1.0\n\ndef Xform \"Remote\"\n{\n    def Sphere \"Wheel\"\n    {\n    }\n}\n";
+        let body =
+            "#usda 1.0\n\ndef Xform \"Remote\"\n{\n    def Sphere \"Wheel\"\n    {\n    }\n}\n";
         write!(
             stream,
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -80,12 +81,9 @@ fn opens_basic_stage_with_default_time_codes_per_second() {
 fn opens_generated_usdc_and_usdz_stages() {
     let dir = tempfile::tempdir().expect("temp dir should be created");
     let source = fixture("basic.usda");
-    let layer = openusd::sdf::Layer::open(
-        source
-            .to_str()
-            .expect("fixture path should be valid UTF-8"),
-    )
-    .expect("source layer should open");
+    let layer =
+        openusd::sdf::Layer::open(source.to_str().expect("fixture path should be valid UTF-8"))
+            .expect("source layer should open");
 
     for extension in ["usdc", "usdz"] {
         let path = dir.path().join(format!("basic.{}", extension));
@@ -467,7 +465,11 @@ fn details_animated_values_differ_by_time() {
         .as_f64()
         .expect("size is a number");
     assert_eq!(start, 1.0);
-    assert!(mid > start && mid < 5.0, "interpolated size at t=10, got {}", mid);
+    assert!(
+        mid > start && mid < 5.0,
+        "interpolated size at t=10, got {}",
+        mid
+    );
 }
 
 #[test]
@@ -508,7 +510,10 @@ fn details_local_and_world_transforms_differ() {
 
 fn assert_matrix_close(expected: &[f64; 16], actual: &[f64; 16]) {
     for (i, (e, a)) in expected.iter().zip(actual).enumerate() {
-        assert!((e - a).abs() < 1e-9, "matrix element {i}: expected {e}, got {a}");
+        assert!(
+            (e - a).abs() < 1e-9,
+            "matrix element {i}: expected {e}, got {a}"
+        );
     }
 }
 
@@ -523,7 +528,9 @@ fn details_composes_euler_ops_in_authored_order() {
         .local_transform
         .expect("triplet op is evaluated");
     assert_matrix_close(
-        &[0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        &[
+            0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
         &triplet,
     );
 
@@ -533,7 +540,9 @@ fn details_composes_euler_ops_in_authored_order() {
         .local_transform
         .expect("single-axis ops are evaluated");
     assert_matrix_close(
-        &[0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        &[
+            0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
         &singles,
     );
 
@@ -555,7 +564,9 @@ fn details_reset_xform_stack_discards_prior_ops_and_inheritance() {
         .local_transform
         .expect("ops after the reset compose");
     assert_matrix_close(
-        &[0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        &[
+            0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
         &local,
     );
 
@@ -586,19 +597,20 @@ fn details_reference_prim_lists_composition_arc() {
     open_via_owner(&state, "scene_with_ref.usda");
     let details = details_via_owner(&state, "/Scene/Car", None);
 
-    assert!(details
-        .composition_arcs
-        .iter()
-        .any(|arc| arc.starts_with("references:") && arc.contains("asset.usda")),
+    assert!(
+        details
+            .composition_arcs
+            .iter()
+            .any(|arc| arc.starts_with("references:") && arc.contains("asset.usda")),
         "arcs: {:?}",
-        details.composition_arcs);
+        details.composition_arcs
+    );
 }
 
 #[test]
 fn details_request_without_open_stage_fails() {
     let state = spawn_stage_owner();
-    let error = request_stage_details(&state.sender, "/World", None)
-        .expect_err("no stage is open");
+    let error = request_stage_details(&state.sender, "/World", None).expect_err("no stage is open");
     assert!(error.contains("no stage open"), "got: {}", error);
 }
 
@@ -606,8 +618,8 @@ fn details_request_without_open_stage_fails() {
 fn details_for_missing_prim_is_a_readable_error() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "basic.usda");
-    let error = request_stage_details(&state.sender, "/World/Nope", None)
-        .expect_err("prim does not exist");
+    let error =
+        request_stage_details(&state.sender, "/World/Nope", None).expect_err("prim does not exist");
     assert!(error.contains("prim not found"), "got: {}", error);
     // The owner survives the failed lookup.
     let details = details_via_owner(&state, "/World/Ball", None);

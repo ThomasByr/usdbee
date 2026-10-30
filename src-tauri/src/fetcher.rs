@@ -51,7 +51,11 @@ pub fn fetch_and_cache_url(url: &str, cache_base_dir: &Path) -> Result<PathBuf, 
 // DefaultResolver normalizes an authored URL to a relative `scheme:/...`
 // path. A hard link at that spelling lets its cache-dir search path find the
 // downloaded layer while the hashed cache name remains the canonical entry.
-fn materialize_url_alias(url: &str, cache_base_dir: &Path, cached_path: &Path) -> Result<(), String> {
+fn materialize_url_alias(
+    url: &str,
+    cache_base_dir: &Path,
+    cached_path: &Path,
+) -> Result<(), String> {
     let (scheme, rest) = url
         .split_once("://")
         .filter(|(scheme, _)| *scheme == "http" || *scheme == "https")
@@ -70,8 +74,7 @@ fn materialize_url_alias(url: &str, cache_base_dir: &Path, cached_path: &Path) -
     let parent = alias
         .parent()
         .ok_or_else(|| format!("Remote URL has no cache parent: {}", url))?;
-    fs::create_dir_all(parent)
-        .map_err(|e| format!("Failed to create remote cache path: {}", e))?;
+    fs::create_dir_all(parent).map_err(|e| format!("Failed to create remote cache path: {}", e))?;
     fs::hard_link(cached_path, &alias)
         .map_err(|e| format!("Failed to materialize remote cache path: {}", e))
 }
