@@ -9,8 +9,10 @@
   export let hasAnimation: boolean = false;
   export let animationDuration: number = 0;
   export let animationProgress: number = 0;
-  // Task 6: steps the stage playhead (USD time codes) to `t` and waits for
-  // the animated refresh before rendering a preview frame.
+  // Task 6: steps the stage playhead to `t` — a 0-based offset from
+  // start_time_code (the modal's range inputs are offsets) — and waits for
+  // the animated refresh before rendering a preview frame. The caller
+  // (+page) converts to absolute USD time codes.
   export let previewAt: ((t: number) => Promise<void>) | null = null;
   export let isExporting: boolean = false;
   export let exportProgress: number = 0;

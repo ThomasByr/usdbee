@@ -24,7 +24,12 @@
     saveControlPreferences,
   } from "$lib/state/controlsState.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
-  import { advanceStageTime, renderState } from "$lib/render/renderState.svelte";
+  import {
+    advanceStageTime,
+    renderState,
+    toAbsoluteTime,
+    toPlayheadOffset,
+  } from "$lib/render/renderState.svelte";
   import { disposeScene } from "$lib/render/sceneBuilder";
   import type { StageInfo } from "$lib/stage/types";
   import { stageModalErrorLines } from "$lib/stage/modalErrors";
@@ -102,6 +107,15 @@
     stageModalDismissed = true;
   }
 
+  // Review fix (playhead units): the UI layer — timeline slider, progress
+  // display, ExportModal range inputs — works in 0..(end-start) offsets.
+  // These two helpers are the ONLY boundary back to the absolute USD time
+  // codes that setStageTime speaks, applied wherever the UI steps the
+  // stage (slider, playback, preview, export frames).
+  function startTimeCode(): number {
+    return stageState.stageInfo?.start_time_code ?? 0;
+  }
+
   async function handleExport(detail: any) {
     if (detail instanceof CustomEvent) detail = detail.detail;
     console.log("handleExport called with", detail);
@@ -126,7 +140,7 @@
             : undefined,
         onBeforeFrame:
           viewerSettings.renderBackend === "rust"
-            ? (t: number) => renderState.setStageTime(t)
+            ? (t: number) => renderState.setStageTime(toAbsoluteTime(t, startTimeCode()))
             : undefined,
       },
       detail,
@@ -743,7 +757,7 @@
         start,
         end,
       );
-      viewer.animationProgress = next;
+      viewer.animationProgress = toPlayheadOffset(next, start);
       void renderState.setStageTime(next);
     };
 
@@ -794,11 +808,12 @@
     viewer.boxHelper.visible = viewer.showBoundingBox;
     viewer.scene!.add(viewer.boxHelper);
 
-    // Task 6: the rust timeline is driven by stage time codes.
+    // Task 6: the rust timeline is driven by stage time codes — the slider
+    // and progress readout are 0-based offsets from start_time_code.
     viewer.hasAnimation = renderState.hasAnimated;
     const info = stageState.stageInfo;
     viewer.animationDuration = (info?.end_time_code ?? 0) - (info?.start_time_code ?? 0);
-    viewer.animationProgress = renderState.time ?? info?.start_time_code ?? 0;
+    viewer.animationProgress = toPlayheadOffset(renderState.time ?? info?.start_time_code ?? 0, info?.start_time_code ?? 0);
 
     viewer.sceneBox.setFromObject(group, true);
     let size = viewer.sceneBox.getSize(new THREE.Vector3()).length();
@@ -1506,7 +1521,7 @@
           oninput={(e) => {
             viewer.animationProgress = parseFloat(e.currentTarget.value);
             if (viewerSettings.renderBackend === "rust") {
-              void renderState.setStageTime(viewer.animationProgress);
+              void renderState.setStageTime(toAbsoluteTime(viewer.animationProgress, startTimeCode()));
             }
             if (viewer.showBoundingBox && viewer.loadedGroup)
               viewer.sceneBox.setFromObject(viewer.loadedGroup, true);
@@ -1554,7 +1569,7 @@
     animationProgress={viewer.animationProgress}
     previewAt={
       viewerSettings.renderBackend === "rust"
-        ? (t: number) => renderState.setStageTime(t)
+        ? (t: number) => renderState.setStageTime(toAbsoluteTime(t, startTimeCode()))
         : null
     }
     {isExporting}

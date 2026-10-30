@@ -59,6 +59,19 @@ export function advanceStageTime(
   return next > end ? start + ((next - start) % span) : next;
 }
 
+// Playhead-unit convention (review fix): the UI layer — timeline slider,
+// progress display, ExportModal range inputs — works in 0..(end-start)
+// OFFSETS, regardless of start_time_code. These two helpers are the only
+// boundary between offsets and the absolute USD time codes that
+// setStageTime (and everything renderState-side) speaks.
+export function toAbsoluteTime(offset: number, start: number): number {
+  return offset + start;
+}
+
+export function toPlayheadOffset(time: number, start: number): number {
+  return time - start;
+}
+
 function anyAnimated(nodes: RenderNode[]): boolean {
   return nodes.some((node) => node.animated || anyAnimated(node.children));
 }
@@ -81,11 +94,16 @@ function indexByPath(group: THREE.Group): Map<string, THREE.Object3D> {
 // BufferGeometry and assign a fresh one — counts and attribute sets may
 // change across time, and in-place attribute surgery cannot). Nodes the
 // scene does not have (topology appearing only at this time) are skipped.
+// `isStale` is checked per node — before each geometry fetch and again
+// before applying — so a superseded time step cannot land older geometry
+// over a newer step's result (scrub storms interleave the per-node awaits).
 async function updateNodes(
   nodes: RenderNode[],
   byPath: Map<string, THREE.Object3D>,
+  isStale: () => boolean,
 ): Promise<void> {
   for (const node of nodes) {
+    if (isStale()) return;
     const object = byPath.get(node.path);
     if (object) {
       const drawable = object as THREE.Mesh | THREE.Points;
@@ -95,8 +113,10 @@ async function updateNodes(
       applyTransform(wrapper, node.transform);
       wrapper.visible = node.visible;
       if (node.animated && isDrawable) {
+        if (isStale()) return;
         try {
           const geometry = toBufferGeometry(await fetchers.getGeometry(node.path));
+          if (isStale()) return;
           drawable.geometry.dispose();
           drawable.geometry = geometry;
         } catch (e) {
@@ -112,7 +132,7 @@ async function updateNodes(
         }
       }
     }
-    await updateNodes(node.children, byPath);
+    await updateNodes(node.children, byPath, isStale);
   }
 }
 
@@ -169,8 +189,7 @@ export const renderState = $state({
     try {
       const manifest = await invoke<RenderNode[]>("get_scene_manifest", { time });
       if (generation !== loadGeneration || currentGroup !== group) return;
-      await updateNodes(manifest, currentPaths);
-      if (generation !== loadGeneration || currentGroup !== group) return;
+      await updateNodes(manifest, currentPaths, () => generation !== loadGeneration || currentGroup !== group);
     } catch (e) {
       if (generation === loadGeneration) {
         // Keep the last good scene on screen; surface why.

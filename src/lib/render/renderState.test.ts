@@ -10,7 +10,13 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
-import { advanceStageTime, renderState } from "./renderState.svelte";
+import * as THREE from "three";
+import {
+  advanceStageTime,
+  renderState,
+  toAbsoluteTime,
+  toPlayheadOffset,
+} from "./renderState.svelte";
 import type { RenderNode } from "../stage/types";
 
 const mockedInvoke = vi.mocked(invoke);
@@ -73,7 +79,8 @@ describe("renderState", () => {
 // --- Task 6: time codes end-to-end ------------------------------------
 
 // A valid packed geometry payload for one triangle (layout: geometryDecoder).
-function packedGeometry(): ArrayBuffer {
+// `y` parameterizes the third vertex's height so tests can tell payloads apart.
+function packedGeometry(y = 1): ArrayBuffer {
   const buffer = new ArrayBuffer(20 + 9 * 4 + 3 * 4);
   const view = new DataView(buffer);
   view.setUint32(0, 0x55534442, true);
@@ -81,7 +88,7 @@ function packedGeometry(): ArrayBuffer {
   view.setUint32(8, 3, true);
   view.setUint32(12, 3, true);
   view.setUint32(16, 0, true);
-  new Float32Array(buffer, 20, 9).set([-1, 0, 0, 1, 0, 0, 0, 1, 0]);
+  new Float32Array(buffer, 20, 9).set([-1, 0, 0, 1, 0, 0, 0, y, 0]);
   new Uint32Array(buffer, 20 + 36, 3).set([0, 1, 2]);
   return buffer;
 }
@@ -126,6 +133,14 @@ async function loadScene(manifest: () => RenderNode[] | Promise<RenderNode[]>) {
   expect(group).toBeTruthy();
   mockedInvoke.mockClear();
   return group!;
+}
+
+function findMesh(group: THREE.Group): THREE.Mesh {
+  let mesh: THREE.Mesh | null = null;
+  group.traverse((object) => {
+    if (!mesh && (object as THREE.Mesh).isMesh) mesh = object as THREE.Mesh;
+  });
+  return mesh!;
 }
 
 describe("renderState.setStageTime", () => {
@@ -185,6 +200,33 @@ describe("renderState.setStageTime", () => {
     expect(wrapper!.position.x).toBe(6);
     expect(renderState.time).toBe(6);
   });
+
+  it("keeps the newer step's geometry when an older step's slow fetch lands late", async () => {
+    const wobble = node({ path: "/Scene/Wobble", name: "Wobble", type_name: "Mesh", has_geometry: true, animated: true });
+    const group = await loadScene(() => [wobble]);
+
+    // t=5's per-node geometry fetch hangs; t=6's resolves immediately.
+    const slow = deferred<ArrayBuffer>();
+    mockedInvoke.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === "get_scene_manifest") return [wobble];
+      if (cmd === "get_geometry_data")
+        return args.time === 5 ? slow.promise : packedGeometry(2);
+      if (cmd === "get_material_data") return { name: "Mat", surface: null };
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    const slowStep = renderState.setStageTime(5);
+    await renderState.setStageTime(6);
+    const mesh = findMesh(group);
+    expect(mesh.geometry.getAttribute("position").getY(2)).toBe(2);
+
+    // The t=5 geometry resolves after the t=6 step finished applying: the
+    // per-node staleness check must abort before it overwrites the screen.
+    slow.resolve(packedGeometry(9));
+    await slowStep;
+    expect(mesh.geometry.getAttribute("position").getY(2)).toBe(2);
+    expect(renderState.time).toBe(6);
+  });
 });
 
 describe("advanceStageTime", () => {
@@ -202,5 +244,28 @@ describe("advanceStageTime", () => {
 
   it("holds a degenerate range at the start time", () => {
     expect(advanceStageTime(3, 1, 24, 5, 5)).toBe(5);
+  });
+});
+
+// Review fix (playhead units): the UI works in 0..(end-start) offsets;
+// these helpers are the boundary to absolute USD time codes.
+describe("playhead offset conversion", () => {
+  it("maps a full-length UI crop [0, duration] to the absolute range [start, end]", () => {
+    // ExportModal dispatches crop/timestamp values in offsets; +page
+    // converts them at the setStageTime boundary. A full-length export
+    // crop with start_time_code = 10 must step stage times 10..24, not
+    // 0..14 (an mp4 crop [0, 14] would otherwise export times 0..14).
+    const start = 10;
+    const end = 24;
+    const duration = end - start;
+    expect(toAbsoluteTime(0, start)).toBe(start);
+    expect(toAbsoluteTime(duration, start)).toBe(end);
+  });
+
+  it("round-trips an absolute stage time through the offset convention", () => {
+    expect(toPlayheadOffset(17, 10)).toBe(7);
+    expect(toAbsoluteTime(toPlayheadOffset(17, 10), 10)).toBe(17);
+    // A zero-start stage is unaffected by the convention.
+    expect(toAbsoluteTime(5, 0)).toBe(5);
   });
 });
