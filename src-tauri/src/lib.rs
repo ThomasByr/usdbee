@@ -5,6 +5,7 @@ mod models;
 mod omniverse;
 pub mod parser;
 pub mod stage;
+pub mod tessellation;
 pub mod values;
 
 use tauri::Emitter;
