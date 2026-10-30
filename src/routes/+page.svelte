@@ -67,7 +67,9 @@
   let sidebarWidth = $state<number>(320);
   let isResizing = $state<boolean>(false);
   let filterText = $state<string>("");
-  let modalError = $state<string | string[] | null>(null);
+  let modalError = $state<string | null>(null);
+  let stageModalLines = $state<string[] | null>(null);
+  let stageModalDismissed = $state<boolean>(false);
   let showExportModal = $state<boolean>(false);
   let isExporting = $state<boolean>(false);
   let exportProgress = $state<number>(0);
@@ -85,12 +87,16 @@
     }
   }
 
-  function openErrorModal(msg: string | string[]) {
+  function openErrorModal(msg: string) {
     modalError = msg;
   }
 
   function closeErrorModal() {
     modalError = null;
+  }
+
+  function closeStageModal() {
+    stageModalDismissed = true;
   }
 
   async function handleExport(detail: any) {
@@ -146,16 +152,20 @@
       : [],
   );
 
-  // Stage-open failures and composition errors surface in the shared modal;
-  // rendering failures keep their own openErrorModal(string) path.
+  // Stage errors own their modal state (stageModalLines/stageModalDismissed) so
+  // they never read or overwrite modalError — rendering errors (usd-load-error,
+  // Three.js catch, export, dependency errors) keep exclusive ownership of it.
+  let prevStageLines: string[] | null = null;
   $effect(() => {
     const stageLines = stageModalErrorLines({
       status: stageState.status,
       error: stageState.error,
       compositionErrors: stageState.stageInfo?.composition_errors ?? [],
     });
-    if (stageLines) openErrorModal(stageLines);
-    else if (typeof modalError === "object") closeErrorModal();
+    const changed = JSON.stringify(prevStageLines) !== JSON.stringify(stageLines);
+    prevStageLines = stageLines;
+    stageModalLines = stageLines;
+    if (changed && stageLines) stageModalDismissed = false;
   });
 
   $effect(() => {
@@ -1355,11 +1365,9 @@
 </main>
 
 {#if modalError}
-  {#if typeof modalError === "object"}
-    <ErrorModal lines={modalError} onClose={closeErrorModal} />
-  {:else}
-    <ErrorModal error={modalError} onClose={closeErrorModal} />
-  {/if}
+  <ErrorModal error={modalError} onClose={closeErrorModal} />
+{:else if stageModalLines !== null && !stageModalDismissed}
+  <ErrorModal lines={stageModalLines} onClose={closeStageModal} />
 {/if}
 
 {#if showExportModal}
