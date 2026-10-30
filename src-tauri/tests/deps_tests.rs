@@ -80,6 +80,9 @@ fn every_fixture_scans_without_error() {
         "instanced.usda",
         "animated.usda",
         "payload.usda",
+        "xforms.usda",
+        "mesh_primvars.usda",
+        "material_scene.usda",
     ] {
         let scan = scan_dependencies(&fixture(name))
             .unwrap_or_else(|e| panic!("{} failed to scan: {}", name, e));

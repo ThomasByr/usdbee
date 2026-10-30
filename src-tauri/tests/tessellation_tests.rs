@@ -203,3 +203,30 @@ fn non_geometry_prim_tessellates_to_none() {
     let none = tessellate_prim(&world, Some(1.0)).expect("xform must not fail");
     assert!(none.is_none(), "an Xform is not geometry");
 }
+
+#[test]
+fn mesh_without_topology_is_a_readable_error() {
+    // The stage builder registers the openusd-schemas registry (Task 3),
+    // which activates schema-declared fallbacks. Mesh topology declares no
+    // fallback, so a mesh without faceVertexCounts must stay an Err instead
+    // of composing a default.
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let path = dir.path().join("topologyless.usda");
+    std::fs::write(
+        &path,
+        concat!(
+            "#usda 1.0\n\n",
+            "def Xform \"Scene\"\n{\n",
+            "    def Mesh \"Empty\"\n{\n",
+            "        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]\n",
+            "    }\n",
+            "}\n",
+        ),
+    )
+    .expect("test stage should be written");
+
+    let (stage, _info) = open_stage(&path).expect("stage should open");
+    let error = tessellate_prim(&prim(&stage, "/Scene/Empty").expect("prim resolves"), None)
+        .expect_err("missing topology is an error, not a fallback");
+    assert!(error.contains("faceVertexCounts"), "got: {}", error);
+}

@@ -13,6 +13,7 @@ use openusd::usd::{InitialLoadSet, PrimPredicate, Stage};
 use serde::{Deserialize, Serialize};
 
 use crate::fetcher::get_usdbee_cache_dir;
+use crate::materials::{material_info, MaterialInfo};
 use crate::tessellation::{pack_geometry, tessellate_prim, MeshData};
 use crate::values::{local_transform, serialize_details, PrimDetails};
 
@@ -38,11 +39,9 @@ pub enum StageRequest {
         time: Option<f64>,
         reply: mpsc::Sender<Result<Vec<u8>, String>>,
     },
-    // Stub until Task 3: the arm answers `Ok(None)` so the enum shape is
-    // already final.
     GetMaterial {
         path: String,
-        reply: mpsc::Sender<Result<Option<serde_json::Value>, String>>,
+        reply: mpsc::Sender<Result<MaterialInfo, String>>,
     },
 }
 
@@ -105,8 +104,15 @@ pub fn spawn_stage_owner() -> StageState {
                     };
                     let _ = reply.send(response);
                 }
-                StageRequest::GetMaterial { path: _, reply } => {
-                    let _ = reply.send(Ok(None));
+                StageRequest::GetMaterial { path, reply } => {
+                    let response = match current_stage {
+                        Some(ref stage) => {
+                            catch_unwind(AssertUnwindSafe(|| material_info(stage, &path)))
+                                .unwrap_or_else(panic_reply)
+                        }
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
                 }
             }
         }
@@ -140,6 +146,11 @@ pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
     let resolver =
         DefaultResolver::with_search_paths([cache_dir.clone(), cache_dir.join("extracted")]);
     let stage = Stage::builder()
+        // Registers every enabled openusd-schemas family so `is_a`/
+        // `from_prim` detection and schema-declared fallbacks resolve
+        // (Task 3; Mesh topology declares no fallback, so the
+        // missing-topology Err semantics of tessellation are unchanged).
+        .schema_registry(openusd_schemas::schema_registry())
         .resolver(resolver)
         .load(InitialLoadSet::LoadAll)
         .open(path_str)
@@ -493,17 +504,26 @@ pub fn request_geometry_data(
         .map_err(|_| "stage service unavailable".to_string())?
 }
 
-// Material binding data is a Task 3 stub: the command exists so Task 4 can
-// wire it, and always resolves `None` for now.
+// Material binding data for one prim (Task 3): the prim may be the mesh
+// (its `material:binding` is resolved inside) or the material itself.
 #[tauri::command]
 pub async fn get_material_data(
     path: String,
     state: tauri::State<'_, StageState>,
-) -> Result<Option<serde_json::Value>, String> {
+) -> Result<MaterialInfo, String> {
+    request_material_data(&state.sender, &path)
+}
+
+pub fn request_material_data(
+    sender: &mpsc::Sender<StageRequest>,
+    path: &str,
+) -> Result<MaterialInfo, String> {
     let (reply, response) = mpsc::channel();
-    state
-        .sender
-        .send(StageRequest::GetMaterial { path, reply })
+    sender
+        .send(StageRequest::GetMaterial {
+            path: path.to_string(),
+            reply,
+        })
         .map_err(|_| "stage service unavailable".to_string())?;
     response
         .recv()

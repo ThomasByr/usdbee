@@ -58,6 +58,41 @@ export interface ValuePayload {
   count?: number;
 }
 
+// Rust materials.rs::TextureInfo — a texture outside the per-input list
+// (the normal map): its file path and the primvar its UVs come from.
+export interface TextureInfo {
+  file_path: string;
+  st_primvar: string;
+}
+
+// Rust materials.rs::TextureInput — one PreviewSurface input fed by a
+// UsdUVTexture. `file_path` is frontend-fetchable when the file exists,
+// else the unresolved spelling (fetch it and fall back on failure).
+export interface TextureInput {
+  input: string;
+  file_path: string;
+  st_primvar: string;
+}
+
+// Rust materials.rs::PreviewSurface — serialized UsdPreviewSurface channels.
+// Unauthored channels are null (the converter applies three.js defaults).
+export interface PreviewSurface {
+  diffuse_color: ValuePayload | null;
+  roughness: number | null;
+  metallic: number | null;
+  opacity: number | null;
+  normal: TextureInfo | null;
+  textures: TextureInput[];
+}
+
+// Rust materials.rs::MaterialInfo — get_material_data payload. `name` is
+// the material prim name (or the prim name when unbound); `surface` is null
+// when no UsdPreviewSurface is found (unbound or unknown shader id).
+export interface MaterialInfo {
+  name: string;
+  surface: PreviewSurface | null;
+}
+
 export interface AttributeInfo {
   name: string;
   type_name: string;
