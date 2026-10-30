@@ -6,6 +6,7 @@
 import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three";
 import { buildScene } from "./sceneBuilder";
+import * as materialConverter from "./materialConverter";
 import type { RenderNode } from "../stage/types";
 
 // A valid packed geometry payload for one triangle (layout: geometryDecoder).
@@ -172,5 +173,26 @@ describe("buildScene", () => {
     const mesh = group.getObjectByName("/World/Stroke")!.children[0] as THREE.Mesh;
     expect(mesh.isMesh).toBe(true);
     expect((mesh.material as THREE.MeshPhysicalMaterial).type).toBe("MeshPhysicalMaterial");
+  });
+
+  it("disposes the fetched material and its textures that Points nodes drop", async () => {
+    const texture = new THREE.Texture();
+    const textureDispose = vi.spyOn(texture, "dispose");
+    const manifest = [node({ path: "/World/Dust", name: "Dust", type_name: "Points", has_geometry: true })];
+    const original = materialConverter.convertMaterial;
+    const convertSpy = vi
+      .spyOn(materialConverter, "convertMaterial")
+      .mockImplementation((info, fallbackColor, loadTexture) => {
+        const material = original(info, fallbackColor, loadTexture);
+        vi.spyOn(material, "dispose");
+        material.map = texture;
+        return material;
+      });
+
+    await buildScene(manifest, fetchers());
+
+    const material = convertSpy.mock.results[0].value;
+    expect(vi.mocked(material.dispose)).toHaveBeenCalledOnce();
+    expect(textureDispose).toHaveBeenCalledOnce();
   });
 });

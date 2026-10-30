@@ -80,6 +80,12 @@ async function buildNode(node: RenderNode, fetchers: SceneFetchers): Promise<THR
           }),
         );
         points.name = node.path;
+        // The fetched material is only used for its color here; Material
+        // dispose() does not cascade to textures, so drop those too.
+        for (const value of Object.values(material)) {
+          if (value instanceof THREE.Texture) value.dispose();
+        }
+        material.dispose();
         object.add(points);
       } else {
         const material = await fetchMaterial(node, fetchers);
