@@ -754,6 +754,7 @@
 // reduced to what the rust scene needs (no skinned meshes, no USD cameras,
 // no animation clips — those are Task 6 material).
   function integrateScene(group: THREE.Group) {
+    viewer.loadedGroup = group;
     let tris = 0;
     group.traverse((obj) => {
       if ((obj as any).isInstancedMesh) {
