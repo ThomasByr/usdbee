@@ -18,8 +18,9 @@ use openusd_schemas::SchemaError;
 
 /// One tessellated mesh: positions keyed per vertex, `indices` spanning
 /// triangles by vertex index, and per-vertex primvar arrays aligned with
-/// `positions` (constant interpolation is replicated per vertex; faceVarying
-/// maps each original vertex to the value of its first corner).
+/// `positions` (constant is replicated per vertex; faceVarying maps each
+/// original vertex to its first corner's value; uniform maps each vertex to
+/// its first surviving face's value).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeshData {
     pub positions: Vec<[f32; 3]>,
@@ -117,13 +118,14 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
         }
     }
 
-    // Face walk: (surviving original vertex, flat corner slot) pairs feed the
-    // primvar scatter; the corner slot aligns with flattened faceVarying
-    // arrays regardless of drops.
-    let mut corners: Vec<(u32, usize)> = Vec::new();
+    // Face walk: (surviving original vertex, flat corner slot, authored face
+    // id) triples feed the primvar scatter; the corner slot aligns with
+    // flattened faceVarying arrays and the face id with uniform arrays,
+    // regardless of drops.
+    let mut corners: Vec<(u32, usize, usize)> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     let mut cursor = 0usize;
-    for &count in &counts {
+    for (face_id, &count) in counts.iter().enumerate() {
         let count = count.max(0) as usize;
         let face = index_list.get(cursor..cursor + count).unwrap_or(&[]);
         cursor += count;
@@ -139,7 +141,7 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
             continue;
         }
         for (slot, &v) in face.iter().enumerate() {
-            corners.push((v as u32, cursor - count + slot));
+            corners.push((v as u32, cursor - count + slot, face_id));
         }
         for i in 1..count - 1 {
             for v in [face[0], face[i], face[i + 1]] {
@@ -233,7 +235,7 @@ where
 fn attribution<T: Clone>(
     scope: Scope,
     values: Vec<T>,
-    corners: &[(u32, usize)],
+    corners: &[(u32, usize, usize)],
     vertex_count: usize,
 ) -> Option<Vec<Option<T>>> {
     if values.is_empty() {
@@ -246,9 +248,22 @@ fn attribution<T: Clone>(
                 .map(|id| values.get(id).cloned())
                 .collect(),
         ),
-        Scope::Uniform | Scope::FaceVarying => {
+        // Uniform values are one per face: scatter each face's value to that
+        // face's surviving vertices (shared vertices keep the first face's
+        // value, the same first-occurrence rule as faceVarying below).
+        Scope::Uniform => {
             let mut out: Vec<Option<T>> = vec![None; vertex_count];
-            for (vertex, corner) in corners {
+            for (vertex, _corner, face) in corners {
+                let slot = values.get(*face).cloned();
+                if let Some(entry) = out.get_mut(*vertex as usize) {
+                    *entry = entry.take().or(slot);
+                }
+            }
+            Some(out)
+        }
+        Scope::FaceVarying => {
+            let mut out: Vec<Option<T>> = vec![None; vertex_count];
+            for (vertex, corner, _face) in corners {
                 let slot = values.get(*corner).cloned();
                 if let Some(entry) = out.get_mut(*vertex as usize) {
                     *entry = entry.take().or(slot);
@@ -264,7 +279,7 @@ fn attribution<T: Clone>(
 fn meshable<T: Clone>(
     scope: Scope,
     values: Vec<T>,
-    corners: &[(u32, usize)],
+    corners: &[(u32, usize, usize)],
     vertex_count: usize,
     orig_to_new: &[Option<u32>],
 ) -> Option<Vec<T>> {

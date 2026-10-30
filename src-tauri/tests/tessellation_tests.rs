@@ -82,6 +82,50 @@ fn mesh_primvars_golden_first_and_last_primvar_values() {
 }
 
 #[test]
+fn uniform_primvar_scatters_by_face_to_surviving_vertices() {
+    // Uniform values are one per face: each face's value must scatter to that
+    // face's surviving vertices (shared vertices keep the first face's
+    // value), never to a per-corner slot.
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let path = dir.path().join("uniform_colors.usda");
+    std::fs::write(
+        &path,
+        concat!(
+            "#usda 1.0\n\n",
+            "def Xform \"Scene\"\n{\n",
+            "    def Mesh \"Strip\"\n{\n",
+            "        int[] faceVertexCounts = [4, 3]\n",
+            "        int[] faceVertexIndices = [0, 1, 2, 3, 1, 2, 4]\n",
+            "        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (2, 0, 0)]\n",
+            "        color3f[] primvars:displayColor = [(1, 0, 0), (0, 0, 1)] (\n",
+            "            interpolation = \"uniform\"\n",
+            "        )\n",
+            "    }\n",
+            "}\n",
+        ),
+    )
+    .expect("test stage should be written");
+
+    let (stage, _info) = open_stage(&path).expect("stage should open");
+    let mesh = tessellate(&stage, "/Scene/Strip").expect("mesh should tessellate");
+
+    assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3, 1, 2, 4]);
+    assert_eq!(mesh.positions.len(), 5);
+    // Faces [0,1,2,3] (red) and [1,2,4] (blue): vertices 0-3 belong to the
+    // quad first, vertex 4 only to the triangle.
+    assert_eq!(
+        mesh.colors,
+        Some(vec![
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0]
+        ])
+    );
+}
+
+#[test]
 fn nan_vertex_is_dropped_with_its_index_entries() {
     // Deep validation contract: a NaN/inf position cannot be sent to the GPU,
     // so the vertex is compacted away, positions/index arrays are remapped,
