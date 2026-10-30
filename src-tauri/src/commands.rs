@@ -31,13 +31,88 @@ pub async fn trigger_open_usd_dialog(app: tauri::AppHandle) -> Result<(), String
     Ok(())
 }
 
+pub(crate) fn sanitize_entry_name(entry: &str, out_dir: &Path) -> Option<std::path::PathBuf> {
+    // Zip entry names may use windows-style separators; normalize first so
+    // drive letters and UNC prefixes are caught on every platform.
+    let normalized = entry.replace('\\', "/");
+    if normalized.is_empty() {
+        return None;
+    }
+    let path = Path::new(&normalized);
+    if path.is_absolute() {
+        return None;
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(c) => {
+                // Windows drive letter like "C:" or drive-relative "C:evil.txt"
+                let bytes = c.as_encoded_bytes();
+                if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+                    return None;
+                }
+            }
+            std::path::Component::CurDir => {}
+            _ => return None, // ParentDir, RootDir, Prefix
+        }
+    }
+    let mut out_path = out_dir.to_path_buf();
+    for component in path.components() {
+        if let std::path::Component::Normal(c) = component {
+            out_path.push(c);
+        }
+    }
+    Some(out_path)
+}
+
+fn extract_archive<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    out_dir: &Path,
+) -> Result<String, String> {
+    fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    let mut root_file: Option<String> = None;
+    let mut first_file: Option<String> = None;
+
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to read archive entry {}: {}", i, e))?;
+        let name = file.name().to_string();
+        let outpath = sanitize_entry_name(&name, out_dir)
+            .ok_or_else(|| format!("Refusing unsafe archive entry: {}", name))?;
+
+        if name.ends_with('/') {
+            fs::create_dir_all(&outpath).map_err(|e| e.to_string())?;
+            continue;
+        }
+        if let Some(parent) = outpath.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut outfile = fs::File::create(&outpath).map_err(|e| e.to_string())?;
+        std::io::copy(&mut file, &mut outfile).map_err(|e| e.to_string())?;
+
+        let abs_str = outpath
+            .to_string_lossy()
+            .replace("\\\\?\\", "")
+            .replace("//?/", "");
+        if first_file.is_none() {
+            first_file = Some(abs_str.clone());
+        }
+        if root_file.is_none()
+            && (name.ends_with(".usdc") || name.ends_with(".usda") || name.ends_with(".usd"))
+        {
+            root_file = Some(abs_str);
+        }
+    }
+
+    root_file.or(first_file).ok_or_else(|| "Empty USDZ archive".into())
+}
+
 async fn unpack_usdz(path: &str) -> Result<(String, std::path::PathBuf), String> {
     let p_str = path.to_string();
     let res = tauri::async_runtime::spawn_blocking(
         move || -> Result<(String, std::path::PathBuf), String> {
             let p = Path::new(&p_str);
             let file = fs::File::open(p).map_err(|e| e.to_string())?;
-            let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
 
             let mut hasher = DefaultHasher::new();
             p_str.hash(&mut hasher);
@@ -50,70 +125,9 @@ async fn unpack_usdz(path: &str) -> Result<(String, std::path::PathBuf), String>
             if out_dir.exists() {
                 let _ = fs::remove_dir_all(&out_dir);
             }
-            if true {
-                fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
-                for i in 0..archive.len() {
-                    let mut file = match archive.by_index(i) {
-                        Ok(f) => f,
-                        Err(_) => continue,
-                    };
-                    let filepath = match file.enclosed_name() {
-                        Some(path) => path.to_owned(),
-                        None => {
-                            let name = file.name().replace("\\", "/");
-                            std::path::PathBuf::from(name)
-                        }
-                    };
-                    let outpath = out_dir.join(filepath);
-                    if (*file.name()).ends_with("/") {
-                        let _ = fs::create_dir_all(&outpath);
-                    } else {
-                        if let Some(p) = outpath.parent() {
-                            let _ = fs::create_dir_all(&p);
-                        }
-                        if let Ok(mut outfile) = fs::File::create(&outpath) {
-                            let _ = std::io::copy(&mut file, &mut outfile);
-                        }
-                    }
-                }
-            }
 
-            if archive.len() > 0 {
-                for i in 0..archive.len() {
-                    if let Ok(file) = archive.by_index(i) {
-                        if !file.is_dir()
-                            && (file.name().ends_with(".usdc")
-                                || file.name().ends_with(".usda")
-                                || file.name().ends_with(".usd"))
-                        {
-                            let filepath = match file.enclosed_name() {
-                                Some(path) => path.to_owned(),
-                                None => std::path::PathBuf::from(file.name().replace("\\", "/")),
-                            };
-                            let root_file = out_dir.join(filepath);
-                            let abs_str = root_file
-                                .to_string_lossy()
-                                .replace("\\\\?\\", "")
-                                .replace("//?/", "");
-                            return Ok((abs_str, out_dir));
-                        }
-                    }
-                }
-                // fallback if no usd found, just use the first file
-                if let Ok(first_file) = archive.by_index(0) {
-                    let filepath = match first_file.enclosed_name() {
-                        Some(path) => path.to_owned(),
-                        None => std::path::PathBuf::from(first_file.name().replace("\\", "/")),
-                    };
-                    let root_file = out_dir.join(filepath);
-                    let abs_str = root_file
-                        .to_string_lossy()
-                        .replace("\\\\?\\", "")
-                        .replace("//?/", "");
-                    return Ok((abs_str, out_dir));
-                }
-            }
-            Err("Empty USDZ archive".into())
+            let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+            extract_archive(&mut archive, &out_dir).map(|root| (root, out_dir))
         },
     )
     .await;
@@ -289,4 +303,89 @@ pub async fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
 #[tauri::command]
 pub async fn save_file_bytes(path: String, bytes: Vec<u8>) -> Result<(), String> {
     std::fs::write(&path, bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    fn make_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, data) in entries {
+            w.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(data).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn rejects_parent_traversal() {
+        let out = Path::new("/tmp/out");
+        assert_eq!(sanitize_entry_name("../../evil.txt", out), None);
+    }
+
+    #[test]
+    fn rejects_absolute_path() {
+        let out = Path::new("/tmp/out");
+        assert_eq!(sanitize_entry_name("/etc/evil", out), None);
+    }
+
+    #[test]
+    fn rejects_windows_drive_letter() {
+        let out = Path::new("/tmp/out");
+        assert_eq!(sanitize_entry_name("C:\\evil.txt", out), None);
+    }
+
+    #[test]
+    fn accepts_nested_relative_entry() {
+        let out = Path::new("/tmp/out");
+        assert_eq!(
+            sanitize_entry_name("assets/model.usdc", out),
+            Some(out.join("assets/model.usdc"))
+        );
+    }
+
+    #[test]
+    fn accepts_dot_prefixed_entry() {
+        let out = Path::new("/tmp/out");
+        assert_eq!(
+            sanitize_entry_name("./ok.usda", out),
+            Some(out.join("ok.usda"))
+        );
+    }
+
+    #[test]
+    fn traversal_entry_aborts_extraction() {
+        let bytes = make_zip(&[
+            ("../traversal.txt", b"pwn"),
+            ("assets/model.usda", b"usd data"),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let outside_dir = tmp.path().parent().unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+        let result = extract_archive(&mut archive, tmp.path());
+
+        assert!(result.is_err(), "traversal entry must abort extraction");
+        assert!(!tmp.path().join("traversal.txt").exists());
+        assert!(!outside_dir.join("traversal.txt").exists());
+    }
+
+    #[test]
+    fn valid_archive_extracts_and_picks_root_file() {
+        let bytes = make_zip(&[
+            ("assets/model.usda", b"usd data"),
+            ("assets/texture.png", b"png data"),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+        let root = extract_archive(&mut archive, tmp.path()).unwrap();
+
+        assert_eq!(root, tmp.path().join("assets/model.usda").to_string_lossy());
+        assert!(tmp.path().join("assets/model.usda").exists());
+        assert!(tmp.path().join("assets/texture.png").exists());
+    }
 }
