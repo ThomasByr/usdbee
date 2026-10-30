@@ -1,8 +1,9 @@
 use crate::fetcher::get_usdbee_cache_dir;
-use crate::models::{ProgressEvent, UsdSceneData};
+use crate::models::{ProgressEvent, UsdDependencyNode, UsdSceneData};
 use crate::parser::extract_dependencies;
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -80,7 +81,7 @@ fn extract_archive<R: std::io::Read + std::io::Seek>(
         let outpath = sanitize_entry_name(&name, out_dir)
             .ok_or_else(|| format!("Refusing unsafe archive entry: {}", name))?;
 
-        if name.ends_with('/') {
+        if file.is_dir() {
             fs::create_dir_all(&outpath).map_err(|e| e.to_string())?;
             continue;
         }
@@ -104,7 +105,9 @@ fn extract_archive<R: std::io::Read + std::io::Seek>(
         }
     }
 
-    root_file.or(first_file).ok_or_else(|| "Empty USDZ archive".into())
+    root_file
+        .or(first_file)
+        .ok_or_else(|| "Empty USDZ archive".into())
 }
 
 async fn unpack_usdz(path: &str) -> Result<(String, std::path::PathBuf), String> {
@@ -147,7 +150,7 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
             percent: 10,
         },
     )
-    .unwrap();
+    .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
 
     let file_path = Path::new(&path).to_path_buf();
     if !file_path.exists() {
@@ -172,7 +175,7 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
                 percent: 20,
             },
         )
-        .unwrap();
+        .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
 
         let (new_path, out_d) = unpack_usdz(&path).await?;
         path = new_path;
@@ -186,21 +189,26 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
             percent: 40,
         },
     )
-    .unwrap();
+    .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
 
     let app_state = app.state::<crate::omniverse::AppState>();
-    let server_url = app_state.omniverse_server.lock().unwrap().clone();
+    let server_url = app_state
+        .omniverse_server
+        .lock()
+        .map_err(|e| format!("Failed to read omniverse server URL: {}", e))?
+        .clone();
 
     let mut dependencies = match tauri::async_runtime::spawn_blocking({
         let p_str = path.clone();
-        move || {
-            std::thread::Builder::new()
+        move || -> Result<HashMap<String, UsdDependencyNode>, String> {
+            let handle = std::thread::Builder::new()
                 .stack_size(32 * 1024 * 1024)
                 .name("usd_deps_parser".into())
                 .spawn(move || extract_dependencies(Path::new(&p_str), &server_url))
-                .unwrap()
+                .map_err(|e| format!("Failed to spawn parser thread: {}", e))?;
+            handle
                 .join()
-                .unwrap()
+                .map_err(|_| "The USD parser thread panicked".to_string())?
         }
     })
     .await
@@ -267,7 +275,7 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
             percent: 90,
         },
     )
-    .unwrap();
+    .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
 
     let scene = UsdSceneData {
         root_file: path,
@@ -281,8 +289,9 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
             percent: 100,
         },
     )
-    .unwrap();
-    app.emit("usd-scene-loaded", scene).unwrap();
+    .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
+    app.emit("usd-scene-loaded", scene)
+        .unwrap_or_else(|e| eprintln!("Failed to emit usd-scene-loaded: {}", e));
     Ok(())
 }
 
@@ -354,7 +363,10 @@ mod tests {
         let result = validate_export(path.to_string_lossy().as_ref(), b"evil".as_slice());
 
         assert!(result.is_err(), ".sh export must be rejected");
-        assert!(result.unwrap_err().contains("png"), "error must list allowed extension");
+        assert!(
+            result.unwrap_err().contains("png"),
+            "error must list allowed extension"
+        );
     }
 
     #[test]

@@ -10,24 +10,21 @@ use tauri::{
     Manager,
 };
 
-fn build_system_menu(app: &tauri::AppHandle) -> tauri::menu::Menu<tauri::Wry> {
+fn build_system_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let open_item = MenuItemBuilder::with_id("file_open", "Open USD File...")
         .accelerator("CmdOrCtrl+O")
-        .build(app)
-        .unwrap();
+        .build(app)?;
 
     let export_item = MenuItemBuilder::with_id("file_export", "Export...")
         .accelerator("CmdOrCtrl+E")
-        .build(app)
-        .unwrap();
+        .build(app)?;
 
     let file_submenu = SubmenuBuilder::new(app, "File")
         .item(&open_item)
         .item(&export_item)
-        .build()
-        .unwrap();
+        .build()?;
 
-    MenuBuilder::new(app).item(&file_submenu).build().unwrap()
+    MenuBuilder::new(app).item(&file_submenu).build()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -43,7 +40,7 @@ pub fn run() {
             });
 
             let handle = app.handle();
-            let menu = build_system_menu(handle);
+            let menu = build_system_menu(handle)?;
             app.set_menu(menu)?;
 
             app.on_menu_event(move |app_handle, event| {

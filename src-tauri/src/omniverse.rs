@@ -8,7 +8,7 @@ pub struct AppState {
 }
 
 fn get_settings_path() -> PathBuf {
-    let mut dir = dirs::data_local_dir().unwrap_or_else(|| std::env::temp_dir());
+    let mut dir = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir);
     dir.push("usdbee");
     dir.push("settings_omni.txt");
     dir
@@ -35,14 +35,23 @@ pub fn save_omniverse_url_to_disk(url: &str) {
 
 #[tauri::command]
 pub fn set_omniverse_url(url: String, state: State<'_, AppState>) {
-    let mut st = state.omniverse_server.lock().unwrap();
+    // Recover a poisoned lock instead of panicking across IPC: the currently
+    // stored URL is still valid data, and the caller can overwrite it.
+    let mut st = state
+        .omniverse_server
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     *st = url.clone();
     save_omniverse_url_to_disk(&url);
 }
 
 #[tauri::command]
 pub fn get_omniverse_url(state: State<'_, AppState>) -> String {
-    state.omniverse_server.lock().unwrap().clone()
+    state
+        .omniverse_server
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
 }
 
 pub fn resolve_omniverse_uri(uri: &str, server_url: &str) -> String {
