@@ -49,10 +49,7 @@ pub fn fetch_and_cache_url(url: &str, cache_base_dir: &Path) -> Result<PathBuf, 
 // `final_path`, so cache lookups only ever see fully-written files. Aborts
 // past MAX_DOWNLOAD_BYTES and removes the `.part` file on any failure.
 pub(crate) fn cache_stream(reader: impl Read, final_path: &Path) -> Result<PathBuf, String> {
-    let mut name = final_path
-        .file_name()
-        .unwrap_or_default()
-        .to_os_string();
+    let mut name = final_path.file_name().unwrap_or_default().to_os_string();
     name.push(".part");
     let part_path = final_path.with_file_name(name);
 
@@ -120,11 +117,43 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let final_path = dir.path().join("ok.bin");
 
-        let result =
-            cache_stream(Cursor::new(b"usd bytes".to_vec()), &final_path).unwrap();
+        let result = cache_stream(Cursor::new(b"usd bytes".to_vec()), &final_path).unwrap();
 
         assert_eq!(result, final_path);
         assert!(final_path.exists());
         assert!(!dir.path().join("ok.bin.part").exists());
+    }
+
+    #[test]
+    fn mid_stream_read_error_leaves_no_cache_files() {
+        struct FlakyReader {
+            sent: bool,
+        }
+        impl Read for FlakyReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if !self.sent {
+                    self.sent = true;
+                    buf[..3].copy_from_slice(b"abc");
+                    Ok(3)
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "connection reset mid-stream",
+                    ))
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("flaky.bin");
+
+        let result = cache_stream(FlakyReader { sent: false }, &final_path);
+
+        assert!(result.is_err(), "a reader error mid-stream must abort");
+        assert!(!final_path.exists(), "no final cache file may appear");
+        assert!(
+            !dir.path().join("flaky.bin.part").exists(),
+            "no .part file may be left behind"
+        );
     }
 }

@@ -1,5 +1,5 @@
 // Golden tests: pin the CURRENT behavior of the regex patches in usdUtils.ts.
-// If a test fails, the test is wrong, not the code.
+// Update goldens only when a patch behavior change is intentional.
 import { describe, expect, it } from "vitest";
 import { patchUsdLayerForThree } from "./usdUtils";
 
