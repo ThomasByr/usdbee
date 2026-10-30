@@ -9,7 +9,11 @@ use std::thread;
 use openusd::ar::DefaultResolver;
 use openusd::gf;
 use openusd::sdf;
-use openusd::usd::{InitialLoadSet, PrimPredicate, Stage};
+use openusd::usd::{InitialLoadSet, PrimPredicate, SchemaBase, Stage, TimeCode};
+use openusd_schemas::geom::{
+    Imageable, ImageableExt, PointInstancer, PointInstancerSchema, Purpose, Visibility,
+};
+use openusd_schemas::shade::MaterialBindingAPI;
 use serde::{Deserialize, Serialize};
 
 use crate::fetcher::get_usdbee_cache_dir;
@@ -106,10 +110,13 @@ pub fn spawn_stage_owner() -> StageState {
                 }
                 StageRequest::GetMaterial { path, reply } => {
                     let response = match current_stage {
-                        Some(ref stage) => {
-                            catch_unwind(AssertUnwindSafe(|| material_info(stage, &path)))
-                                .unwrap_or_else(panic_reply)
-                        }
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            // Synthetic prototype children resolve their
+                            // material through the real prototype prim.
+                            let resolved = resolve_render_path(stage, &path)?.to_string();
+                            material_info(stage, &resolved)
+                        }))
+                        .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
                     };
                     let _ = reply.send(response);
@@ -251,15 +258,20 @@ fn stage_err(error: openusd::Error) -> String {
     format!("failed to compose prim tree: {}", error)
 }
 
-/// One node of the render manifest (Phase 2 scaffold): the traversal mirrors
+/// One node of the render manifest (Phase 2): the traversal mirrors
 /// `serialize_tree` (abstract prims excluded, instance prims are leaves), and
 /// `transform` is the prim's local transform at `time` in the same
 /// row-major, row-vector convention as `PrimDetails::local_transform`
 /// (translation in the last row); identity when the prim authors no
-/// evaluable xformOpOrder. Task 2 populates path/name/type_name/
-/// has_geometry/transform/children; `instances` is empty, `visible` is true
-/// and `animated` is false until Tasks 4/6. `has_geometry` is `type_name ==
-/// "Mesh"` for now (Task 4 refines the walk and purpose filtering).
+/// evaluable xformOpOrder.
+///
+/// Task 4 composition rules: prims whose computed purpose (own + inherited,
+/// via the schemas `ImageableExt` walk) is `proxy` or `guide` are excluded;
+/// `visible` is the computed visibility (an `invisible` opinion on the prim
+/// or any imageable ancestor clears it, re-authoring `inherited` stops the
+/// walk); mesh nodes carry their direct `material:binding` target path;
+/// PointInstancer nodes carry one synthetic child per prototype with the
+/// per-prototype instance matrices (see `prototype_children`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RenderNode {
@@ -275,39 +287,196 @@ pub struct RenderNode {
     pub children: Vec<RenderNode>,
 }
 
+/// The synthetic prototype-child path prefix (Task 4 controller ruling):
+/// `<instancer>/__proto_<i>` addresses prototype `i`'s geometry.
+const PROTO_PREFIX: &str = "__proto_";
+
+/// Purpose/visibility state for one prim, per USD semantics (schema
+/// `ImageableExt` walks): non-imageable prims are kept visible (their
+/// children compute their own inherited state); imageable prims are
+/// excluded when the computed purpose is proxy/guide, and their computed
+/// visibility (inherited down, stoppable by re-authoring) sets `visible`.
+enum Renderable {
+    Keep { visible: bool },
+    Exclude,
+}
+
+fn renderable_state(prim: &openusd::usd::Prim, time: Option<f64>) -> Result<Renderable, String> {
+    let Some(imageable) = Imageable::from_prim(prim.clone()).map_err(stage_err)? else {
+        return Ok(Renderable::Keep { visible: true });
+    };
+    if matches!(
+        imageable.compute_purpose().map_err(stage_err)?,
+        Purpose::Proxy | Purpose::Guide
+    ) {
+        return Ok(Renderable::Exclude);
+    }
+    let visible = imageable
+        .compute_visibility(time.map(TimeCode::new))
+        .map_err(stage_err)?
+        != Visibility::Invisible;
+    Ok(Renderable::Keep { visible })
+}
+
+/// The direct `material:binding` target path, the same resolution
+/// get_material_data applies for a mesh (the manifest value is
+/// informational; the frontend passes the mesh path to get_material_data).
+fn direct_material(prim: &openusd::usd::Prim) -> Result<Option<String>, String> {
+    Ok(MaterialBindingAPI::from_prim_unchecked(prim.clone())
+        .direct_binding("")
+        .map_err(stage_err)?
+        .map(|path| path.to_string()))
+}
+
+/// One synthetic RenderNode per PointInstancer prototype, in `prototypes`
+/// order (controller ruling): the child's path is `<instancer>/__proto_<i>`,
+/// its type/geometry/material come from the prototype prim, and its
+/// `instances` hold that prototype's instance matrices at `time`. Per the
+/// UsdGeomPointInstancer contract (pinned by the schemas doc), an instance
+/// transform in the instancer's local space is the prototype root's local
+/// xform, then scale, then orientation, then position — most local first —
+/// so in the row-vector convention: proto_xform * S * R * T. The instancer
+/// node's own `transform` carries the instancer's local xform, which the
+/// frontend applies least locally.
+fn prototype_children(
+    stage: &Stage,
+    prim: &openusd::usd::Prim,
+    time: Option<f64>,
+) -> Result<Vec<RenderNode>, String> {
+    let instancer = PointInstancer::from_prim_unchecked(prim.clone());
+    let time_code = time.map(TimeCode::new);
+    let prototypes = instancer
+        .prototypes_rel()
+        .forwarded_targets()
+        .map_err(stage_err)?;
+    let proto_indices = instancer
+        .proto_indices_at(time_code)
+        .map_err(stage_err)?
+        .unwrap_or_default();
+    let positions = instancer
+        .positions_at(time_code)
+        .map_err(stage_err)?
+        .unwrap_or_default();
+    let orientations: Vec<gf::Quatf> = instancer
+        .prim()
+        .attribute("orientations")
+        // shortcut: the generated `orientations_at` decodes Vec<Quath>
+        // (half) though the schema declares quatf[], so authored quatf
+        // arrays read None through it — read the raw attribute instead
+        .get_at::<Vec<gf::Quatf>>(time_code)
+        .map_err(stage_err)?
+        .unwrap_or_default();
+    let scales = instancer
+        .scales_at(time_code)
+        .map_err(stage_err)?
+        .unwrap_or_default();
+
+    let mut children = Vec::new();
+    for (index, prototype_path) in prototypes.iter().enumerate() {
+        let prototype = stage
+            .prim(prototype_path.clone())
+            .map_err(|e| format!("invalid prototype path '{}': {}", prototype_path, e))?;
+        if !prototype.is_valid().map_err(stage_err)? {
+            continue;
+        }
+        match renderable_state(&prototype, time)? {
+            Renderable::Exclude => continue,
+            Renderable::Keep { visible } => {
+                let type_name = prototype
+                    .type_name()
+                    .map_err(stage_err)?
+                    .map(|token| token.to_string())
+                    .unwrap_or_default();
+                let proto_xform =
+                    local_transform(&prototype, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
+                let mut instances = Vec::new();
+                for (i, &proto_index) in proto_indices.iter().enumerate() {
+                    if proto_index < 0 || proto_index as usize != index {
+                        continue;
+                    }
+                    let scale = scales
+                        .get(i)
+                        .map(|s| gf::Matrix4d::scale([s.x as f64, s.y as f64, s.z as f64]))
+                        .unwrap_or(gf::Matrix4d::IDENTITY);
+                    let rotation = orientations
+                        .get(i)
+                        .map(|q| {
+                            gf::Matrix4d::from_quat([
+                                q.w as f64, q.x as f64, q.y as f64, q.z as f64,
+                            ])
+                        })
+                        .unwrap_or(gf::Matrix4d::IDENTITY);
+                    let translation = positions
+                        .get(i)
+                        .map(|p| gf::Matrix4d::translation([p.x as f64, p.y as f64, p.z as f64]))
+                        .unwrap_or(gf::Matrix4d::IDENTITY);
+                    instances.push((proto_xform * scale * rotation * translation).0);
+                }
+                children.push(RenderNode {
+                    path: format!("{}/{}{}", prim.path(), PROTO_PREFIX, index),
+                    name: format!("{}{}", PROTO_PREFIX, index),
+                    material: direct_material(&prototype)?,
+                    instances,
+                    // The instance matrices are already in instancer-local
+                    // space; the prototype's own xform is folded into them.
+                    transform: gf::Matrix4d::IDENTITY.0,
+                    visible,
+                    has_geometry: type_name == "Mesh",
+                    type_name,
+                    animated: false,
+                    children: Vec::new(),
+                });
+            }
+        }
+    }
+    Ok(children)
+}
+
 pub fn serialize_render_manifest(
     stage: &Stage,
     time: Option<f64>,
 ) -> Result<Vec<RenderNode>, String> {
     fn children_of(
+        stage: &Stage,
         prim: &openusd::usd::Prim,
         time: Option<f64>,
     ) -> Result<Vec<RenderNode>, String> {
         let mut nodes = Vec::new();
         for child in visible_children(prim)? {
+            let visible = match renderable_state(&child, time)? {
+                Renderable::Exclude => continue,
+                Renderable::Keep { visible } => visible,
+            };
             let is_instance = child.is_instance().map_err(stage_err)?;
             let type_name = child
                 .type_name()
                 .map_err(stage_err)?
                 .map(|t| t.to_string())
                 .unwrap_or_default();
+            let children = if type_name == "PointInstancer" {
+                prototype_children(stage, &child, time)?
+            } else if is_instance {
+                Vec::new()
+            } else {
+                children_of(stage, &child, time)?
+            };
             let node = RenderNode {
+                material: if type_name == "Mesh" {
+                    direct_material(&child)?
+                } else {
+                    None
+                },
                 path: child.path().to_string(),
                 name: child.path().name().unwrap_or_default().to_string(),
                 has_geometry: type_name == "Mesh",
                 type_name,
                 animated: false,
-                material: None,
                 instances: Vec::new(),
                 transform: local_transform(&child, time)?
                     .map(|matrix| matrix.0)
                     .unwrap_or(gf::Matrix4d::IDENTITY.0),
-                visible: true,
-                children: if is_instance {
-                    Vec::new()
-                } else {
-                    children_of(&child, time)?
-                },
+                visible,
+                children,
             };
             nodes.push(node);
         }
@@ -317,7 +486,7 @@ pub fn serialize_render_manifest(
     let pseudo_root = stage
         .prim(sdf::Path::abs_root())
         .map_err(|e| format!("invalid pseudo-root path: {}", e))?;
-    children_of(&pseudo_root, time)
+    children_of(stage, &pseudo_root, time)
 }
 
 /// Tessellation cache owned by the stage-owner thread: (prim path, time as
@@ -373,21 +542,85 @@ impl MeshCache {
     }
 }
 
+/// Rewrite a frontend-requested prim path to the prim the request actually
+/// reads: `<instancer>/__proto_<i>` resolves to prototype `i`'s real prim
+/// path (clamped to the prototypes array with a readable error), every
+/// other path passes through untouched. Shared by the GetGeometry and
+/// GetMaterial arms so prototype children fetch both through their
+/// synthetic paths.
+fn resolve_render_path(stage: &Stage, path: &str) -> Result<sdf::Path, String> {
+    let parsed =
+        sdf::try_into_path(path).map_err(|e| format!("invalid prim path '{}': {}", path, e))?;
+    let Some((index, parent)) = synthetic_prototype(&parsed)? else {
+        return Ok(parsed);
+    };
+    let parent_prim = stage
+        .prim(parent.clone())
+        .map_err(|e| format!("invalid prim path '{}': {}", parent, e))?;
+    if !parent_prim.is_valid().map_err(stage_err)? {
+        return Err(format!("prim not found: {}", parent));
+    }
+    let type_name = parent_prim
+        .type_name()
+        .map_err(stage_err)?
+        .map(|token| token.to_string())
+        .unwrap_or_default();
+    if type_name != "PointInstancer" {
+        return Err(format!(
+            "invalid prototype path {}: {} is not a PointInstancer",
+            path, parent
+        ));
+    }
+    let prototypes = PointInstancer::from_prim_unchecked(parent_prim)
+        .prototypes_rel()
+        .forwarded_targets()
+        .map_err(stage_err)?;
+    prototypes.get(index).cloned().ok_or_else(|| {
+        format!(
+            "prototype index {} out of range: {} has {} prototypes",
+            index,
+            parent,
+            prototypes.len()
+        )
+    })
+}
+
+/// The prototype index and instancer path when `path` is a synthetic
+/// `<instancer>/__proto_<i>` child, `Ok(None)` for every other path.
+fn synthetic_prototype(path: &sdf::Path) -> Result<Option<(usize, sdf::Path)>, String> {
+    let Some(segment) = path.name() else {
+        return Ok(None);
+    };
+    let Some(suffix) = segment.strip_prefix(PROTO_PREFIX) else {
+        return Ok(None);
+    };
+    let index: usize = suffix.parse().map_err(|_| {
+        format!(
+            "invalid prototype path {}: expected {}<index>",
+            path, PROTO_PREFIX
+        )
+    })?;
+    match path.parent() {
+        Some(parent) => Ok(Some((index, parent))),
+        None => Ok(None),
+    }
+}
+
 /// Packed geometry bytes for one prim, tessellating on demand and caching the
-/// result. Missing prims and non-Mesh prims are readable per-call errors; a
-/// failed prim never poisons the cache.
+/// result (keyed by the resolved path, so prototype children share one
+/// tessellation with the prototype prim). Missing prims and non-Mesh prims
+/// are readable per-call errors; a failed prim never poisons the cache.
 fn geometry_bytes(
     stage: &Stage,
     cache: &mut MeshCache,
     path: &str,
     time: Option<f64>,
 ) -> Result<Vec<u8>, String> {
-    let key = (path.to_string(), time);
+    let prim_path = resolve_render_path(stage, path)?;
+    let key = (prim_path.to_string(), time);
     if let Some(mesh) = cache.get(&key) {
         return Ok(pack_geometry(&mesh));
     }
-    let prim_path =
-        sdf::try_into_path(path).map_err(|e| format!("invalid prim path '{}': {}", path, e))?;
     let prim = stage
         .prim(prim_path)
         .map_err(|e| format!("invalid prim path '{}': {}", path, e))?;

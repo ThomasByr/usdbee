@@ -24,6 +24,8 @@
     saveControlPreferences,
   } from "$lib/state/controlsState.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
+  import { renderState } from "$lib/render/renderState.svelte";
+  import { disposeScene } from "$lib/render/sceneBuilder";
   import type { StageInfo } from "$lib/stage/types";
   import { stageModalErrorLines } from "$lib/stage/modalErrors";
   import * as THREE from "three";
@@ -416,13 +418,25 @@
       listen<StageInfo>("usd-stage-opened", (event) => {
         stageState.adoptOpenedStage(event.payload);
       }),
-      listen("usd-scene-loaded", async (event: any) => {
-        loadingProgress = null;
+      listen("usd-scene-loaded", (event: any) => {
+        void handleSceneLoaded(event.payload);
+      }),
+    ];
 
-        rootFile = event.payload.root_file;
-        dependencies = event.payload.dependencies;
+    // Phase 2: the viewport scene load, branched on renderBackend. "rust"
+    // composes the scene from the Rust manifest (no zip, no USDLoader);
+    // "legacy" keeps the original Three.js USDLoader path untouched.
+    async function handleSceneLoaded(payload: any) {
+      loadingProgress = null;
+      rootFile = payload.root_file;
+      dependencies = payload.dependencies;
 
-        if (rootFile && canvas) {
+      if (viewerSettings.renderBackend === "rust") {
+        await loadRustScene();
+        return;
+      }
+
+      if (rootFile && canvas) {
           try {
             if (!viewer.scene) return;
             const ext = rootFile.split(".").pop()?.toLowerCase() || "usd";
@@ -707,8 +721,9 @@
             openErrorModal("Error Rendering USD:\n\n" + errMsg);
           }
         }
-      }),
-    ];
+      }
+
+    sceneLoadedHandler = handleSceneLoaded;
 
     if (canvas) {
       viewer.init(canvas);
@@ -721,6 +736,118 @@
       unlisteners.forEach((u) => u.then((f) => f()));
       viewer.dispose();
     };
+  });
+
+  // Phase 2 rust backend: assigned inside onMount so the legacy load flow
+  // (defined there, wrapped as handleSceneLoaded) stays untouched.
+  let sceneLoadedHandler: ((payload: any) => Promise<void>) | null = null;
+
+  function removeLoadedGroup() {
+    if (viewer.loadedGroup && viewer.scene) {
+      viewer.scene.remove(viewer.loadedGroup);
+      disposeScene(viewer.loadedGroup);
+      viewer.loadedGroup = null;
+    }
+  }
+
+  // Camera fit / grid / light framing shared shape of the legacy tail,
+// reduced to what the rust scene needs (no skinned meshes, no USD cameras,
+// no animation clips — those are Task 6 material).
+  function integrateScene(group: THREE.Group) {
+    let tris = 0;
+    group.traverse((obj) => {
+      if ((obj as any).isInstancedMesh) {
+        const instanced = obj as THREE.InstancedMesh;
+        tris += instanced.count * ((instanced.geometry?.index?.count ?? 0) / 3);
+      } else if (obj instanceof THREE.Mesh && obj.geometry?.index) {
+        tris += obj.geometry.index.count / 3;
+      }
+    });
+    viewer.triangleCount = Math.floor(tris);
+    viewer.usdCameras = [];
+    viewer.activeCameraIndex = -1;
+    if (viewer.boxHelper) {
+      viewer.scene!.remove(viewer.boxHelper);
+      viewer.boxHelper.dispose();
+    }
+    viewer.sceneBox = new THREE.Box3();
+    viewer.boxHelper = new THREE.Box3Helper(viewer.sceneBox, new THREE.Color(0xffff00));
+    viewer.boxHelper.visible = viewer.showBoundingBox;
+    viewer.scene!.add(viewer.boxHelper);
+
+    viewer.mixer = null;
+    viewer.hasAnimation = false;
+
+    viewer.sceneBox.setFromObject(group, true);
+    let size = viewer.sceneBox.getSize(new THREE.Vector3()).length();
+    const center = viewer.sceneBox.getCenter(new THREE.Vector3());
+    if (size === 0 || !isFinite(size)) size = 10;
+
+    viewer.controls.reset();
+    group.position.x -= center.x;
+    group.position.y -= center.y;
+    group.position.z -= center.z;
+
+    viewer.camera.position.set(size / 2.0, size / 5.0, size);
+    viewer.camera.near = Math.max(0.01, size / 100);
+    viewer.camera.far = size * 100;
+    viewer.camera.updateProjectionMatrix();
+    viewer.controls.target.set(0, 0, 0);
+    viewer.controls.update();
+    viewer.controls.saveState();
+
+    if (viewer.gridHelper) {
+      viewer.scene!.remove(viewer.gridHelper);
+      viewer.gridHelper.dispose();
+    }
+    const gridSize = Math.max(10, Math.pow(10, Math.ceil(Math.log10(size * 2))));
+    viewer.gridHelper = new THREE.GridHelper(gridSize, 100, 0x888888, 0x444444);
+    viewer.gridHelper.visible = viewer.showGrid;
+    viewer.scene!.add(viewer.gridHelper);
+
+    viewer.sceneCenter = center;
+    viewer.sceneSize = size;
+
+    if (viewer.dirLight) {
+      const d = size * 1.2;
+      viewer.dirLight.shadow.camera.left = -d;
+      viewer.dirLight.shadow.camera.right = d;
+      viewer.dirLight.shadow.camera.top = d;
+      viewer.dirLight.shadow.camera.bottom = -d;
+      viewer.dirLight.shadow.camera.near = 0.1;
+      viewer.dirLight.shadow.camera.far = size * 4;
+      viewer.dirLight.shadow.camera.updateProjectionMatrix();
+    }
+
+    viewer.scene!.add(group);
+  }
+
+  async function loadRustScene() {
+    if (!viewer.scene) return;
+    removeLoadedGroup();
+    loadingProgress = { stage: "Composing Rust render scene...", percent: 40 };
+    try {
+      const group = await renderState.loadRenderScene();
+      if (group) {
+        integrateScene(group);
+      } else if (renderState.status === "error") {
+        openErrorModal("Error Rendering USD:\n\n" + renderState.error);
+      }
+    } finally {
+      loadingProgress = null;
+    }
+  }
+
+  // Phase 2: switching the backend reloads the open scene through the
+  // selected path (simplest correct behavior — dispose, then rebuild).
+  let lastBackend = viewerSettings.renderBackend;
+  $effect(() => {
+    const backend = viewerSettings.renderBackend;
+    if (backend === lastBackend) return;
+    lastBackend = backend;
+    if (!rootFile || !viewer.scene || !sceneLoadedHandler) return;
+    removeLoadedGroup();
+    void sceneLoadedHandler({ root_file: rootFile, dependencies });
   });
 
   async function openUsdFile() {
@@ -880,12 +1007,20 @@
     }
   }
 
-  function highlightPrimObject(name: string) {
-    if (!viewer.loadedGroup || !name || !viewer.scene) return;
+  // Rust-path objects are named by their exact prim path, so the path hits
+  // first; legacy USDLoader objects are named by prim name, so the name
+  // fallback keeps that path highlighting unchanged.
+  function highlightPrimObject(path: string, name: string) {
+    if (!viewer.loadedGroup || !viewer.scene || (!path && !name)) return;
     let found: THREE.Object3D | null = null;
     viewer.loadedGroup.traverse((o) => {
-      if (!found && o.name === name) found = o;
+      if (!found && o.name === path) found = o;
     });
+    if (!found) {
+      viewer.loadedGroup.traverse((o) => {
+        if (!found && o.name === name) found = o;
+      });
+    }
     if (found) updateSelection(found);
   }
 
@@ -1149,7 +1284,7 @@
       {#if activeTab === "scene"}
         <div class="scene-split">
           <div class="scene-tree-wrap">
-            <PrimTree onHighlight={(node) => highlightPrimObject(node.name)} />
+            <PrimTree onHighlight={(node) => highlightPrimObject(node.path, node.name)} />
           </div>
           <PropertyInspector />
         </div>
@@ -1199,6 +1334,7 @@
           bind:mouseButtonMiddle={controlsState.mouseButtonMiddle}
           bind:mouseButtonRight={controlsState.mouseButtonRight}
           bind:keybindings={controlsState.keybindings}
+          bind:renderBackend={viewerSettings.renderBackend}
           bind:backgroundColor={viewer.backgroundColor}
           bind:activeCameraIndex={viewer.activeCameraIndex}
           bind:omniverseUrl

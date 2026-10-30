@@ -10,9 +10,7 @@
 use openusd::sdf::{self, Value};
 use openusd::usd::{Prim, SchemaBase, Stage};
 use openusd_schemas::shade::nodes::{PreviewSurface as UsdPreviewSurface, UVTexture};
-use openusd_schemas::shade::{
-    Connectable, Input, Material, MaterialBindingAPI, Shader,
-};
+use openusd_schemas::shade::{Connectable, Input, Material, MaterialBindingAPI, Shader};
 use serde::{Deserialize, Serialize};
 
 use crate::values::{serialize_payload, ValuePayload};

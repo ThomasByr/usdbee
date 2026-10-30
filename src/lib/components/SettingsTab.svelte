@@ -11,6 +11,7 @@
     mouseButtonMiddle = $bindable(),
     mouseButtonRight = $bindable(),
     keybindings = $bindable(),
+    renderBackend = $bindable(),
     backgroundColor = $bindable(),
     activeCameraIndex = $bindable(),
     omniverseUrl = $bindable(),
@@ -129,6 +130,20 @@
         </button>
       </div>
     {/each}
+  </div>
+
+  <div class="settings-group">
+    <h3>Render Backend</h3>
+    <label style="display: flex; justify-content: space-between; align-items: center; font-size: 13px;">
+      <span>Scene Assembly</span>
+      <select bind:value={renderBackend} class="dropdown" style="width: auto; padding: 2px">
+        <option value="legacy">Legacy (Three.js USD loader)</option>
+        <option value="rust">Rust (composed stage)</option>
+      </select>
+    </label>
+    <p style="font-size: 11px; color: #888;">
+      Switching reloads the open scene through the selected backend.
+    </p>
   </div>
 
   <div class="settings-group">

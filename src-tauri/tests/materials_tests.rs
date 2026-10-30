@@ -29,8 +29,7 @@ fn mesh_entry_resolves_the_bound_preview_surface() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "material_scene.usda");
 
-    let info =
-        request_material_data(&state.sender, "/World/PlasticBall").expect("material data");
+    let info = request_material_data(&state.sender, "/World/PlasticBall").expect("material data");
     assert_eq!(info.name, "Plastic");
     let surface = info.surface.expect("Plastic is a UsdPreviewSurface");
     assert_eq!(surface.roughness, Some(0.35f32 as f64));
@@ -128,8 +127,8 @@ fn unbound_mesh_answers_prim_name_with_no_surface() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "material_scene.usda");
 
-    let info = request_material_data(&state.sender, "/World/Unbound")
-        .expect("unbound is not an error");
+    let info =
+        request_material_data(&state.sender, "/World/Unbound").expect("unbound is not an error");
     assert_eq!(
         info,
         MaterialInfo {
