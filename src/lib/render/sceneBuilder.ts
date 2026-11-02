@@ -85,15 +85,48 @@ async function fetchMaterial(
   return convertMaterial(materialInfo, fallbackColorFor(materialInfo, dependencies), fetchers.loadTexture);
 }
 
+// Per-instance drawing below an instanced prototype root: `instances` are
+// the synthetic prototype node's row-major matrices, `transform` the
+// accumulated subtree transform from the node holding them to the child
+// being built (instance matrix x accumulated transform per geometry child).
+interface InstanceContext {
+  instances: number[][];
+  transform: THREE.Matrix4;
+}
+
 async function buildNode(
   node: RenderNode,
   fetchers: SceneFetchers,
   dependencies: FallbackDependencies,
   time?: number | null,
+  instancing: InstanceContext | null = null,
 ): Promise<THREE.Object3D> {
   const object = new THREE.Group();
   object.name = node.path;
   applyTransform(object, node.transform);
+
+  const local = new THREE.Matrix4().fromArray(node.transform);
+  // Matrices for this node's own geometry when it draws per instance.
+  let own: THREE.Matrix4[] | null = null;
+  // The instancing context handed to children: the synthetic prototype
+  // root's transform is already folded into its instance matrices, so the
+  // subtree starts at the identity; a descendant folds its own transform
+  // into the accumulated one and sits at the origin.
+  let childContext: InstanceContext | null = null;
+  if (node.instances.length > 0) {
+    own = node.instances.map((instance) => new THREE.Matrix4().fromArray(instance));
+    childContext = { instances: node.instances, transform: new THREE.Matrix4() };
+  } else if (instancing) {
+    const context = {
+      instances: instancing.instances,
+      transform: instancing.transform.clone().multiply(local),
+    };
+    childContext = context;
+    own = context.instances.map((instance) =>
+      new THREE.Matrix4().fromArray(instance).multiply(context.transform),
+    );
+    object.matrix.identity();
+  }
   object.visible = node.visible;
 
   if (node.has_geometry) {
@@ -122,11 +155,10 @@ async function buildNode(
       } else {
         const material = await fetchMaterial(node, fetchers, dependencies);
         let mesh: THREE.Mesh | THREE.InstancedMesh;
-        if (node.instances.length > 0) {
-          const instanced = new THREE.InstancedMesh(geometry, material, node.instances.length);
-          const matrix = new THREE.Matrix4();
-          node.instances.forEach((instance, i) => {
-            instanced.setMatrixAt(i, matrix.fromArray(instance));
+        if (own) {
+          const instanced = new THREE.InstancedMesh(geometry, material, own.length);
+          own.forEach((matrix, i) => {
+            instanced.setMatrixAt(i, matrix);
           });
           instanced.instanceMatrix.needsUpdate = true;
           mesh = instanced;
@@ -142,7 +174,7 @@ async function buildNode(
   }
 
   for (const child of node.children) {
-    object.add(await buildNode(child, fetchers, dependencies, time));
+    object.add(await buildNode(child, fetchers, dependencies, time, childContext));
   }
   return object;
 }

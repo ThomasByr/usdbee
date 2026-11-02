@@ -122,6 +122,63 @@ describe("buildScene", () => {
     expect(matrix.elements[14]).toBe(7);
   });
 
+  it("renders Xform-rooted prototype children one InstancedMesh per geometry child", async () => {
+    const translate = (x: number, y: number, z: number) => [
+      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1,
+    ];
+    const manifest = [
+      node({
+        path: "/World/Instancer",
+        name: "Instancer",
+        type_name: "PointInstancer",
+        children: [
+          node({
+            path: "/World/Instancer/__proto_0",
+            name: "__proto_0",
+            type_name: "Xform",
+            instances: [translate(10, 0, 0), translate(0, 20, 0), translate(0, 0, 30)],
+            children: [
+              node({
+                path: "/World/Instancer/__proto_0/Shape",
+                name: "Shape",
+                type_name: "Mesh",
+                has_geometry: true,
+                material: "/World/Looks/Blue",
+                transform: translate(2, 3, 4),
+              }),
+            ],
+          }),
+        ],
+      }),
+    ];
+    const getGeometry = vi.fn(async () => packedGeometry());
+    const getMaterial = vi.fn(async () => ({ name: "Blue", surface: null }));
+    const group = await buildScene(manifest, { ...fetchers(), getGeometry, getMaterial });
+
+    // Geometry is fetched per real subtree path (manifest child), the
+    // child's material applies, and one InstancedMesh carries all 3
+    // instances of the child geometry — no phantom origin Mesh.
+    expect(getGeometry).toHaveBeenCalledWith("/World/Instancer/__proto_0/Shape", undefined);
+    expect(getMaterial).toHaveBeenCalledWith("/World/Instancer/__proto_0/Shape");
+    const proto = group.getObjectByName("/World/Instancer/__proto_0")!;
+    const meshes = proto.children.find((child) => child.name === "/World/Instancer/__proto_0/Shape")!
+      .children[0] as THREE.InstancedMesh;
+    expect(meshes.isInstancedMesh).toBe(true);
+    expect(meshes.count).toBe(3);
+    expect((meshes.material as THREE.Material).type).toBe("MeshPhysicalMaterial");
+    expect(
+      group.getObjectByName("/World/Instancer/__proto_0")!.children.some((child) => (child as THREE.Mesh).isMesh),
+    ).toBe(false);
+
+    // Instance matrix (row-major, folded proto xform) x child local
+    // transform: instance 0 = translate(10,0,0) x translate(2,3,4).
+    const matrix = new THREE.Matrix4();
+    meshes.getMatrixAt(0, matrix);
+    expect(matrix.elements.slice(12, 15)).toEqual([12, 3, 4]);
+    meshes.getMatrixAt(1, matrix);
+    expect(matrix.elements.slice(12, 15)).toEqual([2, 23, 4]);
+  });
+
   it("honors visible=false on the node's Object3D", async () => {
     const manifest = [node({ path: "/World/Hidden", name: "Hidden", visible: false, has_geometry: true })];
     const group = await buildScene(manifest, fetchers());

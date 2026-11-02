@@ -72,6 +72,40 @@ fn open_via_owner(state: &StageState, name: &str) {
 }
 
 #[test]
+fn manifest_descends_through_excluded_prototype_roots() {
+    // purpose_instancer.usda: the prototype root authors purpose proxy; its
+    // render-purpose Mesh child must still land under the synthetic node,
+    // with a proxy child of its own staying excluded.
+    let (stage, info) = open_stage(&fixture("purpose_instancer.usda")).expect("stage should open");
+    assert!(
+        info.composition_errors.is_empty(),
+        "composition errors: {:?}",
+        info.composition_errors
+    );
+    let nodes = serialize_render_manifest(&stage, None).expect("manifest should serialize");
+
+    // The excluded root itself must not carry drawable geometry, but the
+    // synthetic node survives with its 3 instance matrices.
+    let prototype = expect(&nodes, "/World/PurposeInstancer/__proto_0");
+    assert_eq!(prototype.type_name, "Xform");
+    assert!(
+        !prototype.has_geometry,
+        "proxy prototype root must not render itself"
+    );
+    assert_eq!(prototype.instances.len(), 3);
+
+    let shape = expect(&nodes, "/World/PurposeInstancer/__proto_0/Shape");
+    assert_eq!(shape.type_name, "Mesh");
+    assert!(shape.has_geometry);
+    assert!(shape.visible);
+
+    assert_absent(&nodes, "/World/PurposeInstancer/__proto_0/ProxyChild");
+
+    // Zero-instance prototypes of the excluded root emit nothing.
+    assert_absent(&nodes, "/World/EmptyPurposeInstancer/__proto_0");
+}
+
+#[test]
 fn manifest_excludes_proxy_and_guide_purpose_prims() {
     let nodes = manifest();
 

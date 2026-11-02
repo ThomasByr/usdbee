@@ -466,75 +466,74 @@ fn prototype_children(
         if !prototype.is_valid().map_err(stage_err)? {
             continue;
         }
-        match renderable_state(&prototype, time)? {
-            Renderable::Exclude => continue,
-            Renderable::Keep { visible } => {
-                let type_name = prototype
-                    .type_name()
-                    .map_err(stage_err)?
-                    .map(|token| token.to_string())
-                    .unwrap_or_default();
-                let proto_xform =
-                    local_transform(&prototype, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
-                // The prototype root's own xform is folded into every
-                // instance matrix, so sampled proto xformOps animate the
-                // child as much as the instancer's own arrays do.
-                let animated = instancer_moves
-                    || samples_transform(&prototype)?
-                    || (renders_geometry(&type_name) && samples_geometry(&prototype)?);
-                let mut instances = Vec::new();
-                for (i, &proto_index) in proto_indices.iter().enumerate() {
-                    if proto_index < 0
-                        || proto_index as usize != index
-                        || invisible_ids.contains(&(i as i64))
-                    {
-                        continue;
-                    }
-                    let scale = scales
-                        .get(i)
-                        .map(|s| gf::Matrix4d::scale([s.x as f64, s.y as f64, s.z as f64]))
-                        .unwrap_or(gf::Matrix4d::IDENTITY);
-                    let rotation = orientations
-                        .get(i)
-                        .map(|q| {
-                            gf::Matrix4d::from_quat([
-                                q.w as f64, q.x as f64, q.y as f64, q.z as f64,
-                            ])
-                        })
-                        .unwrap_or(gf::Matrix4d::IDENTITY);
-                    let translation = positions
-                        .get(i)
-                        .map(|p| gf::Matrix4d::translation([p.x as f64, p.y as f64, p.z as f64]))
-                        .unwrap_or(gf::Matrix4d::IDENTITY);
-                    instances.push((proto_xform * scale * rotation * translation).0);
-                }
-                if instances.is_empty() {
-                    continue;
-                }
-                let synthetic_path = format!("{}/{}{}", prim.path(), PROTO_PREFIX, index);
-                let mut prototype_children = render_children(stage, &prototype, time, animated)?;
-                rebase_render_paths(
-                    &mut prototype_children,
-                    prototype.path(),
-                    &sdf::try_into_path(synthetic_path.as_str())
-                        .map_err(|e| format!("invalid synthetic prototype path: {}", e))?,
-                )?;
-                children.push(RenderNode {
-                    path: synthetic_path,
-                    name: format!("{}{}", PROTO_PREFIX, index),
-                    material: direct_material(stage, &prototype),
-                    instances,
-                    // The instance matrices are already in instancer-local
-                    // space; the prototype's own xform is folded into them.
-                    transform: gf::Matrix4d::IDENTITY.0,
-                    visible,
-                    has_geometry: renders_geometry(&type_name),
-                    type_name,
-                    animated,
-                    children: prototype_children,
-                });
+        // An excluded prototype ROOT still emits its synthetic node (with
+        // its own geometry suppressed): descendants traverse with their own
+        // computed purpose deciding, mirroring render_children's Exclude
+        // arm for ordinary parents. The root's geometry must not draw, so
+        // has_geometry clears when the root is excluded.
+        let (excluded, visible) = match renderable_state(&prototype, time)? {
+            Renderable::Exclude => (true, true),
+            Renderable::Keep { visible } => (false, visible),
+        };
+        let type_name = prototype
+            .type_name()
+            .map_err(stage_err)?
+            .map(|token| token.to_string())
+            .unwrap_or_default();
+        let proto_xform = local_transform(&prototype, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
+        // The prototype root's own xform is folded into every
+        // instance matrix, so sampled proto xformOps animate the
+        // child as much as the instancer's own arrays do.
+        let animated = instancer_moves
+            || samples_transform(&prototype)?
+            || (renders_geometry(&type_name) && samples_geometry(&prototype)?);
+        let mut instances = Vec::new();
+        for (i, &proto_index) in proto_indices.iter().enumerate() {
+            if proto_index < 0
+                || proto_index as usize != index
+                || invisible_ids.contains(&(i as i64))
+            {
+                continue;
             }
+            let scale = scales
+                .get(i)
+                .map(|s| gf::Matrix4d::scale([s.x as f64, s.y as f64, s.z as f64]))
+                .unwrap_or(gf::Matrix4d::IDENTITY);
+            let rotation = orientations
+                .get(i)
+                .map(|q| gf::Matrix4d::from_quat([q.w as f64, q.x as f64, q.y as f64, q.z as f64]))
+                .unwrap_or(gf::Matrix4d::IDENTITY);
+            let translation = positions
+                .get(i)
+                .map(|p| gf::Matrix4d::translation([p.x as f64, p.y as f64, p.z as f64]))
+                .unwrap_or(gf::Matrix4d::IDENTITY);
+            instances.push((proto_xform * scale * rotation * translation).0);
         }
+        if instances.is_empty() {
+            continue;
+        }
+        let synthetic_path = format!("{}/{}{}", prim.path(), PROTO_PREFIX, index);
+        let mut prototype_children = render_children(stage, &prototype, time, animated)?;
+        rebase_render_paths(
+            &mut prototype_children,
+            prototype.path(),
+            &sdf::try_into_path(synthetic_path.as_str())
+                .map_err(|e| format!("invalid synthetic prototype path: {}", e))?,
+        )?;
+        children.push(RenderNode {
+            path: synthetic_path,
+            name: format!("{}{}", PROTO_PREFIX, index),
+            material: direct_material(stage, &prototype),
+            instances,
+            // The instance matrices are already in instancer-local
+            // space; the prototype's own xform is folded into them.
+            transform: gf::Matrix4d::IDENTITY.0,
+            visible,
+            has_geometry: renders_geometry(&type_name) && !excluded,
+            type_name,
+            animated,
+            children: prototype_children,
+        });
     }
     Ok(children)
 }

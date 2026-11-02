@@ -1,0 +1,45 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+# Task: a prototype root that authors purpose proxy must not drop its
+# renderable descendants — the instancer's synthetic prototype node keeps
+# the subtree, and each descendant's own computed purpose decides.
+def Xform "World"
+{
+    def PointInstancer "PurposeInstancer"
+    {
+        point3f[] positions = [(0, 0, 0), (1, 0, 0), (2, 0, 0)]
+        int[] protoIndices = [0, 0, 0]
+        rel prototypes = [</World/PurposeInstancer/ProxyProto>]
+
+        def Xform "ProxyProto"
+        {
+            uniform token purpose = "proxy"
+
+            def Mesh "Shape"
+            {
+                uniform token purpose = "default"
+                int[] faceVertexCounts = [3]
+                int[] faceVertexIndices = [0, 1, 2]
+                point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+            }
+
+            def Mesh "ProxyChild"
+            {
+                uniform token purpose = "proxy"
+                int[] faceVertexCounts = [3]
+                int[] faceVertexIndices = [0, 1, 2]
+                point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+            }
+        }
+    }
+
+    # The same excluded prototype root with no instances emits nothing.
+    def PointInstancer "EmptyPurposeInstancer"
+    {
+        int[] protoIndices = []
+        rel prototypes = [</World/PurposeInstancer/ProxyProto>]
+    }
+}
