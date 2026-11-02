@@ -76,6 +76,7 @@ fn open_via_owner(state: &StageState, name: &str) {
         .send(StageRequest::Open {
             path: fixture(name),
             is_usdz: false,
+            source_usdz: None,
             reply: reply_tx,
         })
         .expect("stage owner should accept an open request");

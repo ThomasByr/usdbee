@@ -223,9 +223,10 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
                     // Remote fetches stay off the async runtime; a failure
                     // here aborts the load (Phase 0 ruling).
                     resolve_remote_dependencies(&mut scan, &server_url)?;
-                    let stage_info = crate::stage::request_stage_open(
+                    let stage_info = crate::stage::request_stage_open_with_origin(
                         Path::new(&p_str),
                         is_usdz,
+                        is_usdz.then_some(file_path.as_path()),
                         &stage_app.state::<crate::stage::StageState>().sender,
                     )?;
                     Ok((scan, stage_info))

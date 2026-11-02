@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -36,6 +36,9 @@ pub enum StageRequest {
         // suffix cannot reveal the origin. Plain path opens pass false; the
         // Open arm still derives direct .usdz opens from the suffix.
         is_usdz: bool,
+        // Original archive for collision checks; direct opens can derive it
+        // from `path`, while the extraction flow supplies it explicitly.
+        source_usdz: Option<PathBuf>,
         reply: mpsc::Sender<Result<StageInfo, String>>,
     },
     GetTree {
@@ -184,7 +187,9 @@ struct LayerCounts {
 
 impl LayerLedger {
     fn new() -> Self {
-        LayerLedger { entries: Vec::new() }
+        LayerLedger {
+            entries: Vec::new(),
+        }
     }
 
     fn clear(&mut self) {
@@ -312,6 +317,7 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
         // path's suffix; a usdz-opened stage cannot save layers (Task 7
         // adds the Save As usdz path).
         let mut stage_is_usdz = false;
+        let mut stage_source_usdz: Option<PathBuf> = None;
         // Requested-render-path -> geometry-cache-key resolutions, shared by
         // the geometry/material arms; cleared on Open. Prototype resolution
         // measured 0.4 ms/call (Task 1 profile c): memoizing turns repeats
@@ -322,6 +328,7 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                 StageRequest::Open {
                     path,
                     is_usdz,
+                    source_usdz,
                     reply,
                 } => {
                     let response = catch_unwind(AssertUnwindSafe(|| {
@@ -337,19 +344,22 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                         Ok(info)
                     }))
                     .unwrap_or_else(panic_reply);
-                    stage_is_usdz = response.is_ok()
-                        && (is_usdz
-                            || path
-                                .extension()
-                                .and_then(|extension| extension.to_str())
-                                .is_some_and(|extension| extension.eq_ignore_ascii_case("usdz")));
-                    mesh_cache.clear();
-                    manifest_skeleton = None;
-                    resolve_memo.clear();
-                    dirty_ledger.clear();
-                    undo_journal.clear();
-                    redo_stack.clear();
-                    owner_counter.store(0, Ordering::Relaxed);
+                    if response.is_ok() {
+                        let direct_usdz = path
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("usdz"));
+                        stage_is_usdz = is_usdz || direct_usdz;
+                        stage_source_usdz =
+                            source_usdz.or_else(|| direct_usdz.then_some(path.clone()));
+                        mesh_cache.clear();
+                        manifest_skeleton = None;
+                        resolve_memo.clear();
+                        dirty_ledger.clear();
+                        undo_journal.clear();
+                        redo_stack.clear();
+                        owner_counter.store(0, Ordering::Relaxed);
+                    }
                     let _ = reply.send(response);
                 }
                 StageRequest::GetTree { reply } => {
@@ -611,10 +621,10 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                     // caches clear, no layer goes clean, and
                     // usd-stage-changed is NOT emitted.
                     let response = match current_stage {
-                        Some(ref stage) => {
-                            catch_unwind(AssertUnwindSafe(|| export_stage_as_usdz(stage, &path)))
-                                .unwrap_or_else(panic_reply)
-                        }
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            export_stage_as_usdz(stage, stage_source_usdz.as_deref(), &path)
+                        }))
+                        .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
                     };
                     let _ = reply.send(response);
@@ -657,9 +667,7 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                                 // journal does not know (an asymmetric
                                 // commit); refresh coarsely rather than
                                 // leave stale caches.
-                                eprintln!(
-                                    "usdbee: undo journal desync — emitting a root refresh"
-                                );
+                                eprintln!("usdbee: undo journal desync — emitting a root refresh");
                                 after_mutation(
                                     &sink,
                                     &mut mesh_cache,
@@ -680,9 +688,7 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                             // the entry back so it stays redoable. One entry
                             // never spans more than its single target layer,
                             // so a failed redo applies nothing (atomic).
-                            let entry = redo_stack
-                                .pop()
-                                .expect("the empty case matched above");
+                            let entry = redo_stack.pop().expect("the empty case matched above");
                             let layer = entry.layer.clone();
                             let diffs = entry.diffs.clone();
                             let result = catch_unwind(AssertUnwindSafe(|| {
@@ -724,29 +730,24 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                 }
                 StageRequest::GetUndoState { reply } => {
                     let response = match current_stage {
-                        Some(ref stage) => {
-                            catch_unwind(AssertUnwindSafe(|| {
-                                Ok(UndoState {
-                                    can_undo: stage.can_undo(),
-                                    can_redo: !redo_stack.is_empty(),
-                                })
-                            }))
-                            .unwrap_or_else(panic_reply)
-                        }
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            Ok(UndoState {
+                                can_undo: stage.can_undo(),
+                                can_redo: !redo_stack.is_empty(),
+                            })
+                        }))
+                        .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
                     };
                     let _ = reply.send(response);
                 }
-                StageRequest::ExportLayerText {
-                    identifier,
-                    reply,
-                } => {
+                StageRequest::ExportLayerText { identifier, reply } => {
                     // A pure read: no caches clear, no event fires.
                     let response = match current_stage {
-                        Some(ref stage) => {
-                            catch_unwind(AssertUnwindSafe(|| export_layer_text_impl(stage, &identifier)))
-                                .unwrap_or_else(panic_reply)
-                        }
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            export_layer_text_impl(stage, &identifier)
+                        }))
+                        .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
                     };
                     let _ = reply.send(response);
@@ -757,10 +758,10 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                     reply,
                 } => {
                     let response = match current_stage {
-                        Some(ref stage) => {
-                            catch_unwind(AssertUnwindSafe(|| import_layer_text_impl(stage, &identifier, &text)))
-                                .unwrap_or_else(panic_reply)
-                        }
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            import_layer_text_impl(stage, &identifier, &text)
+                        }))
+                        .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
                     };
                     if let Ok(imported_layer) = &response {
@@ -1360,13 +1361,12 @@ fn dirty_layers_info(stage: &Stage, dirty: &[String]) -> Result<Vec<LayerInfo>, 
 /// is_usdz_stage refusal below).
 const SAVEABLE_EXTENSIONS: &[&str] = &["usda", "usdc", "usd"];
 
-/// Every layer of the stage in stack order (session, root, sublayers),
-/// dirty or not — the text editor's layer selector. The same walk
-/// `dirty_layers_info` filters down to the unsaved ones.
+/// Every loaded composed layer (session, root stack, referenced/payload
+/// layers), dirty or not — the text and edit-target selectors.
 fn stage_layers_info(stage: &Stage) -> Result<Vec<LayerInfo>, String> {
     let session = session_identifier(stage);
     Ok(stage
-        .layer_stack()
+        .layer_identifiers()
         .into_iter()
         .map(|identifier| LayerInfo {
             is_session: Some(identifier.as_str()) == session.as_deref(),
@@ -1399,11 +1399,7 @@ fn export_layer_text_impl(stage: &Stage, identifier: &str) -> Result<String, Str
 /// recomposes the stage and feeds the undo/redo recorders. No file is ever
 /// written: the layer's identifier and its file stay untouched; the owner's
 /// dirty bookkeeping is what marks the layer unsaved.
-fn import_layer_text_impl(
-    stage: &Stage,
-    identifier: &str,
-    text: &str,
-) -> Result<String, String> {
+fn import_layer_text_impl(stage: &Stage, identifier: &str, text: &str) -> Result<String, String> {
     let canonical = stage
         .layer(identifier)
         .map(|layer| layer.identifier().to_string())
@@ -1441,9 +1437,7 @@ fn replace_layer_content(
     for path in src.spec_paths() {
         let spec_type = src
             .spec_type(&path)
-            .ok_or_else(|| sdf::DataError::MissingSpec {
-                path: path.clone(),
-            })?;
+            .ok_or_else(|| sdf::DataError::MissingSpec { path: path.clone() })?;
         dst.create_spec(path.clone(), spec_type);
         for field in src.list_fields(&path).unwrap_or_default() {
             let value = src.get_field(&path, &field)?;
@@ -1453,21 +1447,43 @@ fn replace_layer_content(
     Ok(())
 }
 
-/// Lexical same-file comparison for the session-layer refusal: both paths
-/// made absolute, then compared component-wise.
-/// shortcut: symlinked or `..`-laden aliases of one file can slip through;
-/// upgrade to canonicalize-based comparison if a collision ever matters
-/// beyond the dialog's own defaults.
-fn paths_match(a: &str, b: &str) -> bool {
-    let absolute = |path: &str| {
-        let path = Path::new(path);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir().unwrap_or_default().join(path)
-        }
+/// Normalize one file's identity for collision checks. Existing paths
+/// canonicalize through symlinks; a new destination resolves its existing
+/// parent and normalizes any `..` components before the filename is added.
+fn file_identity(path: &Path) -> Result<PathBuf, String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("failed to resolve the current directory: {}", e))?
+            .join(path)
     };
-    absolute(a) == absolute(b)
+    match absolute.canonicalize() {
+        Ok(identity) => Ok(identity),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = absolute
+                .parent()
+                .ok_or_else(|| format!("destination has no parent: {}", absolute.display()))?;
+            let name = absolute
+                .file_name()
+                .ok_or_else(|| format!("destination has no filename: {}", absolute.display()))?;
+            parent
+                .canonicalize()
+                .map(|parent| parent.join(name))
+                .map_err(|e| {
+                    format!(
+                        "failed to resolve destination parent {}: {}",
+                        parent.display(),
+                        e
+                    )
+                })
+        }
+        Err(error) => Err(format!(
+            "failed to resolve destination {}: {}",
+            absolute.display(),
+            error
+        )),
+    }
 }
 
 /// Write the requested layers to disk via `Layer::export` — a copy: the
@@ -1492,11 +1508,20 @@ fn save_requested_layers(
         return Err("no layers to save".to_string());
     }
     let session = session_identifier(stage);
-    let stack = stage.layer_stack();
+    let mut composed_files = Vec::new();
+    for identifier in stage.layer_identifiers() {
+        if let Some(path) = stage
+            .layer(&identifier)
+            .and_then(|layer| layer.resolved_path().map(str::to_string))
+        {
+            composed_files.push((identifier, file_identity(Path::new(&path))?));
+        }
+    }
     // Validate every request before writing any file: a batch with one bad
     // request must leave every file and the dirty state untouched (the
     // caller clears dirty ids only on a fully successful save).
     let mut validated = Vec::with_capacity(requests.len());
+    let mut destinations = HashSet::with_capacity(requests.len());
     for request in requests {
         let layer = stage
             .layer(&request.identifier)
@@ -1512,19 +1537,35 @@ fn save_requested_layers(
                 request.identifier, request.path
             ));
         }
-        if Some(request.identifier.as_str()) == session.as_deref() {
-            if extension != "usda" {
-                return Err(format!(
-                    "the session layer {} only saves as a new .usda file",
-                    request.identifier
-                ));
-            }
-            if let Some(colliding) = stack.iter().find(|id| paths_match(id, &request.path)) {
-                return Err(format!(
+        let is_session = Some(request.identifier.as_str()) == session.as_deref();
+        if is_session && extension != "usda" {
+            return Err(format!(
+                "the session layer {} only saves as a new .usda file",
+                request.identifier
+            ));
+        }
+        let destination = file_identity(Path::new(&request.path))?;
+        if !destinations.insert(destination.clone()) {
+            return Err(format!(
+                "multiple save requests share the destination '{}'; choose a distinct path for each layer",
+                request.path
+            ));
+        }
+        if let Some((colliding, _)) = composed_files.iter().find(|(identifier, identity)| {
+            *identity == destination
+                && (is_session || !same_layer(stage, &request.identifier, identifier))
+        }) {
+            return Err(if is_session {
+                format!(
                     "refusing to save the session layer over {}; session layers save to a new .usda path",
                     colliding
-                ));
-            }
+                )
+            } else {
+                format!(
+                    "refusing to save {} over the composed layer {}; choose a different destination",
+                    request.identifier, colliding
+                )
+            });
         }
         validated.push((layer, request));
     }
@@ -1539,13 +1580,31 @@ fn save_requested_layers(
     Ok(())
 }
 
-/// Save As usdz: repack the composed stage into a NEW `.usdz` archive at
-/// `path`. `Stage::flatten` composes every opinion (the session layer's
-/// edits included) into one anonymous layer, and `Layer::export` writes a
-/// `.usdz` as a single crate-encoded entry — so the original archive is
-/// never touched and nothing about the open stage changes. Deliberately NOT
-/// a layer save: no save_layers rules, no clean markings, no event.
-fn export_stage_as_usdz(stage: &Stage, path: &str) -> Result<(), String> {
+fn write_usdz_package(stage: &Stage, asset_path: &str, destination: &str) -> Result<(), String> {
+    let skipped = openusd::usd_utils::create_new_usdz_package(
+        stage,
+        asset_path,
+        destination,
+        Some("scene.usda"),
+    )
+    .map_err(|e| format!("failed to save the stage as '{}': {}", destination, e))?;
+    if !skipped.is_empty() {
+        eprintln!(
+            "usdbee: usdz export left unresolved layers out: {:?}",
+            skipped
+        );
+    }
+    Ok(())
+}
+
+/// Save As usdz through the crate's dependency-aware packager. The first
+/// package preserves the original stage's unsaved layers, clips and assets.
+/// A second package composes an exported in-memory session snapshot over it.
+fn export_stage_as_usdz(
+    stage: &Stage,
+    source_usdz: Option<&Path>,
+    path: &str,
+) -> Result<(), String> {
     let extension = Path::new(path)
         .extension()
         .and_then(|extension| extension.to_str())
@@ -1557,12 +1616,81 @@ fn export_stage_as_usdz(stage: &Stage, path: &str) -> Result<(), String> {
             path
         ));
     }
-    let flattened = stage
-        .flatten()
-        .map_err(|e| format!("failed to compose the stage for '{}': {}", path, e))?;
-    flattened
-        .export(path)
-        .map_err(|e| format!("failed to save the stage as '{}': {}", path, e))
+    if let Some(source) = source_usdz {
+        if file_identity(source)? == file_identity(Path::new(path))? {
+            return Err(format!(
+                "refusing to overwrite the original archive '{}'; choose a new .usdz path",
+                source.display()
+            ));
+        }
+    }
+
+    let original_root = stage.root_layer().identifier().to_string();
+    if !stage.has_session_layer() {
+        return write_usdz_package(stage, &original_root, path);
+    }
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let dir = get_usdbee_cache_dir().join("usdz-export");
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create export dir {}: {}", dir.display(), e))?;
+    let stem = format!(
+        "package-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let intermediate_path = dir.join(format!("{}-base.usdz", stem));
+    let session_path = dir.join(format!("{}-session.usda", stem));
+    let root_path = dir.join(format!("{}-root.usda", stem));
+    let intermediate = intermediate_path.to_string_lossy().to_string();
+    let session_snapshot = session_path.to_string_lossy().to_string();
+    let package_root_path = root_path.to_string_lossy().to_string();
+
+    let result = (|| {
+        write_usdz_package(stage, &original_root, &intermediate)?;
+        let session = stage
+            .session_layer()
+            .ok_or_else(|| "session layer disappeared during usdz export".to_string())?;
+        session
+            .export(&session_snapshot)
+            .map_err(|e| format!("failed to export the session layer: {}", e))?;
+        drop(session);
+
+        let mut package_root = sdf::Layer::new_anonymous("usdbee-package-root");
+        package_root
+            .edit(|layer| {
+                layer.data_mut().set_field(
+                    &sdf::Path::abs_root(),
+                    "subLayers",
+                    sdf::Value::StringVec(vec![
+                        session_snapshot.clone(),
+                        format!("{}[scene.usda]", intermediate),
+                    ]),
+                );
+                Ok(())
+            })
+            .map_err(|e| format!("failed to prepare the stage for '{}': {}", path, e))?;
+        package_root
+            .export(&package_root_path)
+            .map_err(|e| format!("failed to prepare the stage for '{}': {}", path, e))?;
+
+        let cache_dir = get_usdbee_cache_dir();
+        let resolver =
+            DefaultResolver::with_search_paths([cache_dir.clone(), cache_dir.join("extracted")]);
+        let package_stage = Stage::builder()
+            .schema_registry(openusd_schemas::schema_registry())
+            .resolver(resolver)
+            .load(InitialLoadSet::LoadAll)
+            .open(&package_root_path)
+            .map_err(|e| format!("failed to compose the stage for '{}': {}", path, e))?;
+        package_stage
+            .traverse(PrimPredicate::ALL, |_| {})
+            .map_err(|e| format!("failed to compose the stage for '{}': {}", path, e))?;
+        write_usdz_package(&package_stage, &package_root_path, path)
+    })();
+    let _ = fs::remove_file(&intermediate_path);
+    let _ = fs::remove_file(&session_path);
+    let _ = fs::remove_file(&root_path);
+    result
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2818,11 +2946,23 @@ pub fn request_stage_open(
     is_usdz: bool,
     sender: &mpsc::Sender<StageRequest>,
 ) -> Result<StageInfo, String> {
+    request_stage_open_with_origin(path, is_usdz, None, sender)
+}
+
+/// Open through the extraction flow while retaining the original archive
+/// path, so Save As usdz can never replace that source file.
+pub fn request_stage_open_with_origin(
+    path: &Path,
+    is_usdz: bool,
+    source_usdz: Option<&Path>,
+    sender: &mpsc::Sender<StageRequest>,
+) -> Result<StageInfo, String> {
     let (reply, response) = mpsc::channel();
     sender
         .send(StageRequest::Open {
             path: path.to_path_buf(),
             is_usdz,
+            source_usdz: source_usdz.map(Path::to_path_buf),
             reply,
         })
         .map_err(|_| "stage service unavailable".to_string())?;

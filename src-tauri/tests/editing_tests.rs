@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -606,6 +607,52 @@ fn set_edit_target_without_open_stage_fails() {
 }
 
 #[test]
+fn failed_open_preserves_dirty_and_undo_state_for_the_current_stage() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(2.5)),
+        None,
+    )
+    .expect("edit should succeed");
+    assert_eq!(
+        request_list_dirty_layers(&state.sender)
+            .expect("dirty layers")
+            .len(),
+        1
+    );
+    assert!(undo_state(&state).can_undo);
+
+    let missing = fixture("does-not-exist.usda");
+    request_stage_open(&missing, false, &state.sender).expect_err("open must fail");
+
+    assert_eq!(
+        request_list_dirty_layers(&state.sender)
+            .expect("dirty layers after failed open")
+            .len(),
+        1,
+        "the old stage's unsaved edit stays visible"
+    );
+    assert!(
+        undo_state(&state).can_undo,
+        "the old stage's undo journal stays coherent"
+    );
+    assert!(request_undo(&state).expect("undo still works after failed open"));
+    assert_eq!(
+        attribute(&details_via_owner(&state, "/World/Ball", None), "radius")
+            .value
+            .data,
+        serde_json::json!(1.0)
+    );
+    assert!(request_list_dirty_layers(&state.sender)
+        .expect("dirty layers after undo")
+        .is_empty());
+}
+
+#[test]
 fn save_layers_writes_the_authored_opinion_and_clears_the_layer() {
     let (state, _events) = owner_with_events();
     let info = open_path_via_owner(&state, &fixture("basic.usda"));
@@ -731,6 +778,181 @@ fn save_layers_rejects_session_over_existing_layer_paths() {
         dirty.is_empty(),
         "the session layer is clean after save: {:?}",
         dirty
+    );
+}
+
+#[test]
+fn save_layers_rejects_session_over_referenced_and_payload_layers() {
+    for root_name in ["scene_with_ref.usda", "payload.usda"] {
+        let (state, _events) = owner_with_events();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join(root_name);
+        let asset = dir.path().join("asset.usda");
+        std::fs::copy(fixture(root_name), &root).expect("copy root fixture");
+        std::fs::copy(fixture("asset.usda"), &asset).expect("copy referenced fixture");
+        open_path_via_owner(&state, &root);
+        let prim = if root_name == "scene_with_ref.usda" {
+            "/Scene/Car/Wheel"
+        } else {
+            "/Scene/Heavy/Wheel"
+        };
+        request_set_value(
+            &state,
+            prim,
+            "radius",
+            payload("double", serde_json::json!(2.0)),
+            None,
+        )
+        .expect("session edit should succeed");
+        let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers");
+        let session = dirty
+            .iter()
+            .find(|layer| layer.is_session)
+            .expect("session layer");
+        let before = std::fs::read(&asset).expect("referenced layer bytes");
+
+        let error = request_save_layers(
+            &state.sender,
+            &[LayerSaveRequest {
+                identifier: session.identifier.clone(),
+                path: asset.to_string_lossy().to_string(),
+            }],
+        )
+        .expect_err("a composed referenced/payload layer must be protected");
+
+        assert!(error.contains("asset.usda"), "got: {error}");
+        assert_eq!(
+            std::fs::read(&asset).expect("referenced layer re-read"),
+            before
+        );
+    }
+}
+
+#[test]
+fn save_layers_rejects_normalized_aliases_of_composed_layers() {
+    let (state, _events) = owner_with_events();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().join("basic.usda");
+    std::fs::copy(fixture("basic.usda"), &root).expect("copy root fixture");
+    std::fs::create_dir(dir.path().join("nested")).expect("alias directory");
+    open_path_via_owner(&state, &root);
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(2.5)),
+        None,
+    )
+    .expect("session edit should succeed");
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers");
+    let session = dirty
+        .iter()
+        .find(|layer| layer.is_session)
+        .expect("session layer");
+    let alias = dir.path().join("nested").join("..").join("basic.usda");
+    let before = std::fs::read(&root).expect("root bytes");
+
+    let error = request_save_layers(
+        &state.sender,
+        &[LayerSaveRequest {
+            identifier: session.identifier.clone(),
+            path: alias.to_string_lossy().to_string(),
+        }],
+    )
+    .expect_err("dot-dot aliases must not bypass source protection");
+
+    assert!(error.contains("basic.usda"), "got: {error}");
+    assert_eq!(std::fs::read(&root).expect("root re-read"), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn save_layers_rejects_symlink_aliases_of_composed_layers() {
+    let (state, _events) = owner_with_events();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().join("basic.usda");
+    let alias = dir.path().join("alias.usda");
+    std::fs::copy(fixture("basic.usda"), &root).expect("copy root fixture");
+    std::os::unix::fs::symlink(&root, &alias).expect("symlink");
+    open_path_via_owner(&state, &root);
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(2.5)),
+        None,
+    )
+    .expect("session edit should succeed");
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers");
+    let session = dirty
+        .iter()
+        .find(|layer| layer.is_session)
+        .expect("session layer");
+    let before = std::fs::read(&root).expect("root bytes");
+
+    request_save_layers(
+        &state.sender,
+        &[LayerSaveRequest {
+            identifier: session.identifier.clone(),
+            path: alias.to_string_lossy().to_string(),
+        }],
+    )
+    .expect_err("symlink aliases must not bypass source protection");
+
+    assert_eq!(std::fs::read(&root).expect("root re-read"), before);
+}
+
+#[test]
+fn save_layers_rejects_duplicate_destinations_before_writing() {
+    let (state, _events) = owner_with_events();
+    let info = open_path_via_owner(&state, &fixture("basic.usda"));
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(1.5)),
+        None,
+    )
+    .expect("session edit should succeed");
+    request_set_edit_target(&state.sender, Some(&info.root_layer)).expect("switch to root");
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(2.5)),
+        None,
+    )
+    .expect("root edit should succeed");
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers");
+    let session = dirty
+        .iter()
+        .find(|layer| layer.is_session)
+        .expect("session layer");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let destination = dir.path().join("shared.usda");
+
+    let error = request_save_layers(
+        &state.sender,
+        &[
+            LayerSaveRequest {
+                identifier: info.root_layer.clone(),
+                path: destination.to_string_lossy().to_string(),
+            },
+            LayerSaveRequest {
+                identifier: session.identifier.clone(),
+                path: destination.to_string_lossy().to_string(),
+            },
+        ],
+    )
+    .expect_err("two layers must not overwrite one destination");
+
+    assert!(error.contains("destination"), "got: {error}");
+    assert!(!destination.exists(), "validation runs before any write");
+    assert_eq!(
+        request_list_dirty_layers(&state.sender)
+            .expect("dirty layers")
+            .len(),
+        2
     );
 }
 
@@ -985,11 +1207,8 @@ fn save_stage_as_usdz_repacks_session_edits_into_a_new_archive() {
 
     let before = std::fs::read(&usdz).expect("original archive reads");
     let out = dir.path().join("repacked.usdz");
-    usdbee_lib::stage::request_save_stage_as_usdz(
-        &state.sender,
-        out.to_string_lossy().as_ref(),
-    )
-    .expect("save as usdz should succeed");
+    usdbee_lib::stage::request_save_stage_as_usdz(&state.sender, out.to_string_lossy().as_ref())
+        .expect("save as usdz should succeed");
 
     // The original archive is never mutated.
     assert_eq!(
@@ -1010,8 +1229,8 @@ fn save_stage_as_usdz_repacks_session_edits_into_a_new_archive() {
     assert_eq!(dirty.len(), 1, "the session layer stays dirty: {dirty:?}");
 
     // Reopening the new archive shows the session edit composed in.
-    let reopened = openusd::usd::Stage::open(out.to_string_lossy().as_ref())
-        .expect("the repacked usdz opens");
+    let reopened =
+        openusd::usd::Stage::open(out.to_string_lossy().as_ref()).expect("the repacked usdz opens");
     let value = reopened
         .attribute("/World/Ball.radius")
         .expect("radius attribute")
@@ -1022,6 +1241,142 @@ fn save_stage_as_usdz_repacks_session_edits_into_a_new_archive() {
         Some(openusd::sdf::Value::Float(9.5)),
         "the session edit must compose into the repacked archive"
     );
+}
+
+#[test]
+fn save_stage_as_usdz_packages_textures_and_session_edits() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "textured.usda");
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "size",
+        payload("double", serde_json::json!(3.5)),
+        None,
+    )
+    .expect("session edit should succeed");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = dir.path().join("textured.usdz");
+
+    usdbee_lib::stage::request_save_stage_as_usdz(&state.sender, out.to_string_lossy().as_ref())
+        .expect("dependency-aware usdz export should succeed");
+
+    fn packaged_texture(bytes: &[u8]) -> Option<Vec<u8>> {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).ok()?;
+            let name = entry.name().to_string();
+            let mut contents = Vec::new();
+            entry.read_to_end(&mut contents).ok()?;
+            if name.ends_with("checker.png") {
+                return Some(contents);
+            }
+            if name.ends_with(".usdz") {
+                if let Some(texture) = packaged_texture(&contents) {
+                    return Some(texture);
+                }
+            }
+        }
+        None
+    }
+    assert_eq!(
+        packaged_texture(&std::fs::read(&out).expect("package bytes")).as_deref(),
+        Some(
+            std::fs::read(fixture("checker.png"))
+                .expect("source texture")
+                .as_slice()
+        ),
+        "the external texture is packaged byte-for-byte, including nested packages"
+    );
+
+    let reopened =
+        openusd::usd::Stage::open(out.to_string_lossy().as_ref()).expect("packaged stage reopens");
+    let size = reopened
+        .attribute("/World/Ball.size")
+        .expect("size attribute")
+        .get_at::<f64>(openusd::usd::TimeCode::new(0.0))
+        .expect("size reads");
+    assert_eq!(size, Some(3.5), "the session opinion survives packaging");
+    let texture = reopened
+        .attribute("/World/Looks/Textured/Albedo.inputs:file")
+        .expect("texture attribute")
+        .get_at::<openusd::sdf::Value>(openusd::usd::TimeCode::new(0.0))
+        .expect("texture value reads");
+    let Some(openusd::sdf::Value::AssetPath(texture)) = texture else {
+        panic!("expected an asset path, got {texture:?}");
+    };
+    assert!(
+        texture
+            .resolved_path()
+            .is_some_and(|path| path.contains("textured.usdz[")),
+        "the reopened texture resolves inside the package: {texture:?}"
+    );
+}
+
+#[test]
+fn save_stage_as_usdz_preserves_value_clips() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "clips_root.usda");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let out = dir.path().join("clipped.usdz");
+
+    usdbee_lib::stage::request_save_stage_as_usdz(&state.sender, out.to_string_lossy().as_ref())
+        .expect("clip-preserving usdz export should succeed");
+
+    let reopened =
+        openusd::usd::Stage::open(out.to_string_lossy().as_ref()).expect("packaged stage reopens");
+    let size = reopened
+        .attribute("/Model.size")
+        .expect("clip-driven attribute")
+        .get_at::<f64>(openusd::usd::TimeCode::new(0.0))
+        .expect("clip-driven value reads");
+    assert_eq!(size, Some(42.0), "the clip schedule and clip layer survive");
+}
+
+#[test]
+fn save_stage_as_usdz_rejects_the_original_archive() {
+    let (state, _events) = owner_with_events();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let original = open_usdz_via_owner(&state, dir.path());
+    let before = std::fs::read(&original).expect("original bytes");
+
+    let error = usdbee_lib::stage::request_save_stage_as_usdz(
+        &state.sender,
+        original.to_string_lossy().as_ref(),
+    )
+    .expect_err("the original archive must not be overwritten");
+
+    assert!(error.contains("original"), "got: {error}");
+    assert_eq!(std::fs::read(&original).expect("original re-read"), before);
+}
+
+#[test]
+fn save_stage_as_usdz_rejects_extraction_flow_original_archive() {
+    let (state, _events) = owner_with_events();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let original = dir.path().join("original.usdz");
+    openusd::sdf::Layer::open(fixture("basic.usda").to_string_lossy().as_ref())
+        .expect("basic layer")
+        .export(original.to_string_lossy().as_ref())
+        .expect("original archive");
+    let extracted = dir.path().join("extracted.usda");
+    std::fs::copy(fixture("basic.usda"), &extracted).expect("extracted root");
+    usdbee_lib::stage::request_stage_open_with_origin(
+        &extracted,
+        true,
+        Some(&original),
+        &state.sender,
+    )
+    .expect("extracted stage opens");
+    let before = std::fs::read(&original).expect("original bytes");
+
+    usdbee_lib::stage::request_save_stage_as_usdz(
+        &state.sender,
+        original.to_string_lossy().as_ref(),
+    )
+    .expect_err("the extraction-flow original is protected too");
+
+    assert_eq!(std::fs::read(&original).expect("original re-read"), before);
 }
 
 #[test]
@@ -1039,7 +1394,9 @@ fn save_stage_as_usdz_rejects_non_usdz_extensions() {
         .expect_err("an extension-less destination is refused");
     assert!(error.contains("usdz"), "got: {}", error);
     assert_eq!(
-        std::fs::read_dir(dir.path()).expect("temp dir lists").count(),
+        std::fs::read_dir(dir.path())
+            .expect("temp dir lists")
+            .count(),
         1,
         "only the packed.usdz fixture exists — no partial writes"
     );
@@ -1397,12 +1754,19 @@ fn undo_reverts_an_authored_value_and_drains() {
     // the same path again.
     assert!(request_redo(&state).expect("redo should succeed"));
     let details = details_via_owner(&state, "/World/Ball", None);
-    assert_eq!(attribute(&details, "radius").value.data, serde_json::json!(2.5));
+    assert_eq!(
+        attribute(&details, "radius").value.data,
+        serde_json::json!(2.5)
+    );
     let undo = undo_state(&state);
     assert!(undo.can_undo, "the redone edit is undoable again");
     assert!(!undo.can_redo, "the redo stack drained");
     let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
-    assert_eq!(dirty.len(), 1, "the redone edit re-dirties the session layer");
+    assert_eq!(
+        dirty.len(),
+        1,
+        "the redone edit re-dirties the session layer"
+    );
     assert!(dirty[0].is_session);
     let paths = events
         .recv_timeout(std::time::Duration::from_secs(5))
@@ -1521,7 +1885,10 @@ fn a_new_mutation_clears_the_redo_stack() {
     assert!(!undo.can_redo, "the new edit invalidated the redo stack");
     assert!(!request_redo(&state).expect("redo reports nothing to redo"));
     let details = details_via_owner(&state, "/World/Ball", None);
-    assert_eq!(attribute(&details, "radius").value.data, serde_json::json!(3.5));
+    assert_eq!(
+        attribute(&details, "radius").value.data,
+        serde_json::json!(3.5)
+    );
 }
 
 // Dirty bookkeeping survives saves coherently: after saving, an undo back
@@ -1617,7 +1984,8 @@ fn uniform_attribute_edits_author_the_default_not_a_time_sample() {
         let purpose = attribute(&details, "purpose");
         assert!(purpose.authored);
         assert_eq!(
-            purpose.value.data, serde_json::json!("render"),
+            purpose.value.data,
+            serde_json::json!("render"),
             "the uniform edit reads identically at time {:?}",
             time
         );
@@ -1652,10 +2020,7 @@ fn uniform_attribute_edits_author_the_default_not_a_time_sample() {
 
 // --- Task 6: text layer editor ---
 
-fn request_export_layer_text(
-    state: &StageState,
-    identifier: &str,
-) -> Result<String, String> {
+fn request_export_layer_text(state: &StageState, identifier: &str) -> Result<String, String> {
     usdbee_lib::stage::request_export_layer_text(&state.sender, identifier)
 }
 
@@ -1667,7 +2032,9 @@ fn request_import_layer_text(
     usdbee_lib::stage::request_import_layer_text(&state.sender, identifier, text)
 }
 
-fn request_list_stage_layers(state: &StageState) -> Result<Vec<usdbee_lib::stage::LayerInfo>, String> {
+fn request_list_stage_layers(
+    state: &StageState,
+) -> Result<Vec<usdbee_lib::stage::LayerInfo>, String> {
     usdbee_lib::stage::request_list_stage_layers(&state.sender)
 }
 
@@ -1676,15 +2043,28 @@ fn export_layer_text_serializes_the_root_layer_content() {
     let (state, _events) = owner_with_events();
     let info = open_path_via_owner(&state, &fixture("basic.usda"));
 
-    let text = request_export_layer_text(&state, &info.root_layer).expect("export should serialize");
-    assert!(text.starts_with("#usda"), "usda text starts with the header:\n{}", text);
-    assert!(text.contains("def Mesh \"Ball\""), "the prim is in:\n{}", text);
+    let text =
+        request_export_layer_text(&state, &info.root_layer).expect("export should serialize");
+    assert!(
+        text.starts_with("#usda"),
+        "usda text starts with the header:\n{}",
+        text
+    );
+    assert!(
+        text.contains("def Mesh \"Ball\""),
+        "the prim is in:\n{}",
+        text
+    );
     assert!(
         text.contains("points = [(-1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]"),
         "the authored points are in:\n{}",
         text
     );
-    assert!(text.contains("radius = 1.0"), "the authored radius is in:\n{}", text);
+    assert!(
+        text.contains("radius = 1.0"),
+        "the authored radius is in:\n{}",
+        text
+    );
 }
 
 #[test]
@@ -1693,18 +2073,29 @@ fn import_layer_text_updates_composed_values_and_marks_the_layer_dirty() {
     let info = open_path_via_owner(&state, &fixture("basic.usda"));
 
     let text = request_export_layer_text(&state, &info.root_layer).expect("export works");
-    assert!(text.contains("radius = 1.0"), "the exported text has the value to edit");
+    assert!(
+        text.contains("radius = 1.0"),
+        "the exported text has the value to edit"
+    );
     let edited = text.replace("radius = 1.0", "radius = 9.5");
     request_import_layer_text(&state, &info.root_layer, &edited)
         .expect("importing valid text should succeed");
 
     // The composed details reflect the edited text.
     let details = details_via_owner(&state, "/World/Ball", None);
-    assert_eq!(attribute(&details, "radius").value.data, serde_json::json!(9.5));
+    assert_eq!(
+        attribute(&details, "radius").value.data,
+        serde_json::json!(9.5)
+    );
 
     // The imported layer is dirty, listed with its own identity.
     let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
-    assert_eq!(dirty.len(), 1, "only the imported layer is dirty: {:?}", dirty);
+    assert_eq!(
+        dirty.len(),
+        1,
+        "only the imported layer is dirty: {:?}",
+        dirty
+    );
     assert!(!dirty[0].is_session);
     assert_eq!(dirty[0].identifier, info.root_layer);
 
@@ -1716,7 +2107,11 @@ fn import_layer_text_updates_composed_values_and_marks_the_layer_dirty() {
 
     // The imported content round-trips through a fresh export.
     let re_exported = request_export_layer_text(&state, &info.root_layer).expect("re-export works");
-    assert!(re_exported.contains("radius = 9.5"), "the edit persisted: {}", re_exported);
+    assert!(
+        re_exported.contains("radius = 9.5"),
+        "the edit persisted: {}",
+        re_exported
+    );
 }
 
 #[test]
@@ -1752,7 +2147,11 @@ fn import_malformed_text_is_a_readable_error_and_leaves_the_stage_untouched() {
 
     // No dirty layer: a refused import mutated nothing.
     let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
-    assert!(dirty.is_empty(), "a refused import leaves nothing dirty: {:?}", dirty);
+    assert!(
+        dirty.is_empty(),
+        "a refused import leaves nothing dirty: {:?}",
+        dirty
+    );
 }
 
 #[test]
@@ -1770,7 +2169,10 @@ fn import_into_the_session_layer_composes() {
         .expect("importing into the session layer should succeed");
 
     let details = details_via_owner(&state, "/World/Ball", None);
-    assert_eq!(attribute(&details, "radius").value.data, serde_json::json!(7.5));
+    assert_eq!(
+        attribute(&details, "radius").value.data,
+        serde_json::json!(7.5)
+    );
 
     let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
     assert_eq!(dirty.len(), 1, "only the session layer is dirty");
@@ -1791,11 +2193,17 @@ fn import_never_writes_the_layer_file() {
 
     // The composed value changed, proving the in-memory layer took the edit...
     let details = details_via_owner(&state, "/World/Ball", None);
-    assert_eq!(attribute(&details, "radius").value.data, serde_json::json!(9.5));
+    assert_eq!(
+        attribute(&details, "radius").value.data,
+        serde_json::json!(9.5)
+    );
 
     // ...while the file on disk stayed byte-for-byte identical.
     let file_after = std::fs::read(&fixture("basic.usda")).expect("fixture reads");
-    assert_eq!(file_before, file_after, "the layer file must never be written");
+    assert_eq!(
+        file_before, file_after,
+        "the layer file must never be written"
+    );
 }
 
 #[test]
@@ -1805,17 +2213,41 @@ fn list_stage_layers_lists_all_layers_dirty_or_not() {
 
     let layers = request_list_stage_layers(&state).expect("layer list");
     assert_eq!(layers.len(), 2, "session + root: {:?}", layers);
-    assert!(layers.iter().any(|l| l.is_session), "the session layer is listed");
+    assert!(
+        layers.iter().any(|l| l.is_session),
+        "the session layer is listed"
+    );
     let root = layers.iter().find(|l| !l.is_session).expect("root entry");
     assert_eq!(root.identifier, info.root_layer);
-    assert_eq!(root.original_path.as_deref(), Some(info.root_layer.as_str()));
+    assert_eq!(
+        root.original_path.as_deref(),
+        Some(info.root_layer.as_str())
+    );
 
     // A sublayer stage lists the sublayer too, still with nothing dirty.
     open_via_owner(&state, "sublayer_root.usda");
     let layers = request_list_stage_layers(&state).expect("layer list");
     assert_eq!(layers.len(), 3, "session + root + sublayer: {:?}", layers);
-    assert!(layers.iter().any(|l| l.identifier.ends_with("sublayer_sub.usda")));
-    assert!(request_list_dirty_layers(&state.sender).expect("dirty list").is_empty());
+    assert!(layers
+        .iter()
+        .any(|l| l.identifier.ends_with("sublayer_sub.usda")));
+    assert!(request_list_dirty_layers(&state.sender)
+        .expect("dirty list")
+        .is_empty());
+}
+
+#[test]
+fn list_stage_layers_includes_referenced_layers_for_edit_target_selection() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "scene_with_ref.usda");
+
+    let layers = request_list_stage_layers(&state).expect("layer list");
+    assert!(
+        layers
+            .iter()
+            .any(|layer| layer.identifier.ends_with("asset.usda")),
+        "referenced layers are selectable edit targets: {layers:?}"
+    );
 }
 
 #[test]
@@ -1825,11 +2257,16 @@ fn import_is_undoable_and_redoable() {
 
     let text = request_export_layer_text(&state, &info.root_layer).expect("export works");
     let edited = text.replace("radius = 1.0", "radius = 9.5");
-    request_import_layer_text(&state, &info.root_layer, &edited)
-        .expect("import should succeed");
+    request_import_layer_text(&state, &info.root_layer, &edited).expect("import should succeed");
     let details = details_via_owner(&state, "/World/Ball", None);
-    assert_eq!(attribute(&details, "radius").value.data, serde_json::json!(9.5));
-    assert!(undo_state(&state).can_undo, "the import joined the undo stack");
+    assert_eq!(
+        attribute(&details, "radius").value.data,
+        serde_json::json!(9.5)
+    );
+    assert!(
+        undo_state(&state).can_undo,
+        "the import joined the undo stack"
+    );
 
     // Undo restores the whole pre-import layer content.
     assert!(request_undo(&state).expect("undo of the import"));
@@ -1843,7 +2280,10 @@ fn import_is_undoable_and_redoable() {
     // Redo re-applies the imported content and re-dirties the layer.
     assert!(request_redo(&state).expect("redo of the import"));
     let details = details_via_owner(&state, "/World/Ball", None);
-    assert_eq!(attribute(&details, "radius").value.data, serde_json::json!(9.5));
+    assert_eq!(
+        attribute(&details, "radius").value.data,
+        serde_json::json!(9.5)
+    );
     let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
     assert_eq!(dirty.len(), 1, "the redone import re-dirties the layer");
     assert_eq!(dirty[0].identifier, info.root_layer);
@@ -1866,8 +2306,8 @@ fn text_editor_failures_are_readable_and_fail_closed() {
     let bare = spawn_stage_owner_with_sink(None);
     let error = request_export_layer_text(&bare, "x.usda").expect_err("no stage is open");
     assert!(error.contains("no stage open"), "got: {}", error);
-    let error = request_import_layer_text(&bare, "x.usda", "#usda 1.0\n")
-        .expect_err("no stage is open");
+    let error =
+        request_import_layer_text(&bare, "x.usda", "#usda 1.0\n").expect_err("no stage is open");
     assert!(error.contains("no stage open"), "got: {}", error);
     let error = request_list_stage_layers(&bare).expect_err("no stage is open");
     assert!(error.contains("no stage open"), "got: {}", error);
