@@ -322,7 +322,13 @@ export const renderState = $state({
         if (!sceneLoading) {
           const pendingTime = queuedTime;
           queuedTime = null;
-          if (pendingTime !== null) await this.setStageTime(pendingTime);
+          // Detached: awaiting this would extend the caller's promise chain
+          // past our own refresh — with a sustained playback driver that
+          // chain never ends and loads hung forever. The next step runs on
+          // its own; the load's single in-line drain (loadWork) stays
+          // awaited so a queued-completion caller still resolves after the
+          // load's refresh applied.
+          if (pendingTime !== null) void this.setStageTime(pendingTime);
         }
       }
     })();

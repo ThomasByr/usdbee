@@ -414,6 +414,56 @@ describe("renderState.setStageTime", () => {
     expect(wrapper.visible).toBe(true);
   });
 
+  it("resolves loadRenderScene while a playback driver keeps queueing time steps", async () => {
+    // ~60fps playback: requests stream in while a load and its drain are in
+    // flight and never stop. With the chained recursive drain, every
+    // completed step's finally re-awaits the latest queued request, so the
+    // load's awaited first drained step never resolves — the app stays on
+    // "Composing..." forever. The driver here paces setStageTime at one
+    // call per macrotask over manifest responses that also take a
+    // macrotask, so the drain chain cannot outrun it between ticks.
+    const wobble = node({ path: "/Scene/Wobble", name: "Wobble" });
+    const first = deferred<RenderNode[]>();
+    let calls = 0;
+    mockIpc(() => {
+      calls += 1;
+      // Two macrotasks per step manifest: the driver (one setStageTime per
+      // macrotask) can never be outrun by the drain chain between ticks.
+      if (calls === 1) return first.promise;
+      return new Promise<RenderNode[]>((resolve) =>
+        setTimeout(() => setTimeout(() => resolve([wobble]), 0), 0),
+      );
+    });
+
+    const loading = renderState.loadRenderScene();
+    let running = true;
+    try {
+      const driver = (async () => {
+        for (let i = 0; running; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          if (!running) break;
+          void renderState.setStageTime(i);
+        }
+      })();
+      // Let the driver tick while the load is in flight so queued requests
+      // exist by the time the load drains.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      first.resolve([wobble]);
+
+      // Bounded wait so a hang FAILS the test instead of stalling the suite.
+      const outcome = await Promise.race([
+        loading.then(() => "loaded" as const),
+        new Promise<string>((resolve) => setTimeout(() => resolve("timeout"), 250)),
+      ]);
+      expect(outcome).toBe("loaded");
+      expect(renderState.status).toBe("ready");
+      running = false;
+      await driver;
+    } finally {
+      running = false;
+    }
+  });
+
   it("does not double-apply a static prototype descendant's transform on update", async () => {
     const scene = () => [
       node({
