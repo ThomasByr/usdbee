@@ -158,8 +158,10 @@ async function buildNode(
         const material = await fetchMaterial(node, fetchers, dependencies);
         // displayColor primvars arrive as a per-vertex "color" attribute;
         // three.js reads them only when the material opts in. A bound
-        // diffuse map wins over displayColor, which stays off there.
-        if (geometry.getAttribute("color") != null && material.map === null) {
+        // material wins over displayColor, which stays off there (a bound
+        // diffuse map would be untinted anyway, and a constant diffuse
+        // color would multiply with the vertex colors).
+        if (node.material === null && geometry.getAttribute("color") != null) {
           material.vertexColors = true;
         }
         let mesh: THREE.Mesh | THREE.InstancedMesh;

@@ -36,9 +36,7 @@ function packedColoredGeometry(): ArrayBuffer {
   view.setUint32(12, 3, true); // index_count
   view.setUint32(16, 0b100, true); // has_colors
   new Float32Array(buffer, 20, 9).set([-1, 0, 0, 1, 0, 0, 0, 1, 0]);
-  new Float32Array(buffer, 20 + 36, 9).set(
-    [0.25, 0.5, 0.75, 0.25, 0.5, 0.75, 0.25, 0.5, 0.75],
-  );
+  new Float32Array(buffer, 20 + 36, 9).set([0.25, 0.5, 0.75, 0.25, 0.5, 0.75, 0.25, 0.5, 0.75]);
   new Uint32Array(buffer, 20 + 72, 3).set([0, 1, 2]);
   return buffer;
 }
@@ -141,9 +139,7 @@ describe("buildScene", () => {
   });
 
   it("renders Xform-rooted prototype children one InstancedMesh per geometry child", async () => {
-    const translate = (x: number, y: number, z: number) => [
-      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1,
-    ];
+    const translate = (x: number, y: number, z: number) => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1];
     const manifest = [
       node({
         path: "/World/Instancer",
@@ -185,7 +181,9 @@ describe("buildScene", () => {
     expect(meshes.count).toBe(3);
     expect((meshes.material as THREE.Material).type).toBe("MeshPhysicalMaterial");
     expect(
-      group.getObjectByName("/World/Instancer/__proto_0")!.children.some((child) => (child as THREE.Mesh).isMesh),
+      group
+        .getObjectByName("/World/Instancer/__proto_0")!
+        .children.some((child) => (child as THREE.Mesh).isMesh),
     ).toBe(false);
 
     // Instance matrix (row-major, folded proto xform) x child local
@@ -223,7 +221,15 @@ describe("buildScene", () => {
   it("keeps a bound diffuse texture over per-vertex colors", async () => {
     // A bound material wins over displayColor: a diffuse map must not be
     // tinted by the mesh's vertex colors.
-    const manifest = [node({ path: "/World/Floor", name: "Floor", type_name: "Mesh", has_geometry: true })];
+    const manifest = [
+      node({
+        path: "/World/Floor",
+        name: "Floor",
+        type_name: "Mesh",
+        has_geometry: true,
+        material: "/World/Looks/Floor",
+      }),
+    ];
     const group = await buildScene(
       manifest,
       fetchers({
@@ -245,6 +251,44 @@ describe("buildScene", () => {
 
     const mesh = group.getObjectByName("/World/Floor")!.children[0] as THREE.Mesh;
     expect((mesh.material as THREE.MeshPhysicalMaterial).vertexColors).toBe(false);
+  });
+
+  it("keeps a bound untextured material's diffuse color over per-vertex colors", async () => {
+    // A bound material wins even without a diffuse map: a constant
+    // diffuse_color must not be multiplied by the mesh's vertex colors
+    // (green x red would render black).
+    const manifest = [
+      node({
+        path: "/World/Panel",
+        name: "Panel",
+        type_name: "Mesh",
+        has_geometry: true,
+        material: "/World/Looks/Green",
+      }),
+    ];
+    const group = await buildScene(
+      manifest,
+      fetchers({
+        getGeometry: vi.fn(async () => packedColoredGeometry()),
+        getMaterial: vi.fn(async () => ({
+          name: "Green",
+          surface: {
+            diffuse_color: { type: "color3f", data: [0, 1, 0] },
+            roughness: null,
+            metallic: null,
+            opacity: null,
+            normal: null,
+            textures: [],
+          },
+        })),
+      }),
+    );
+
+    const mesh = group.getObjectByName("/World/Panel")!.children[0] as THREE.Mesh;
+    const material = mesh.material as THREE.MeshPhysicalMaterial;
+    expect(material.vertexColors).toBe(false);
+    expect(material.color.getHex()).toBe(new THREE.Color(0, 1, 0).getHex());
+    material.dispose();
   });
 
   it("honors visible=false on the node's Object3D", async () => {
