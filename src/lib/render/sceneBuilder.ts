@@ -156,6 +156,12 @@ async function buildNode(
         object.add(points);
       } else {
         const material = await fetchMaterial(node, fetchers, dependencies);
+        // displayColor primvars arrive as a per-vertex "color" attribute;
+        // three.js reads them only when the material opts in. A bound
+        // diffuse map wins over displayColor, which stays off there.
+        if (geometry.getAttribute("color") != null && material.map === null) {
+          material.vertexColors = true;
+        }
         let mesh: THREE.Mesh | THREE.InstancedMesh;
         if (own) {
           const instanced = new THREE.InstancedMesh(geometry, material, own.length);

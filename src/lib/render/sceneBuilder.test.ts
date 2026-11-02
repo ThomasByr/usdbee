@@ -25,6 +25,24 @@ function packedGeometry(): ArrayBuffer {
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
+// One triangle carrying per-vertex colors (constant displayColor replicated
+// by tessellation): flag bit2 set, colors section between positions and indices.
+function packedColoredGeometry(): ArrayBuffer {
+  const buffer = new ArrayBuffer(20 + 9 * 4 + 9 * 4 + 3 * 4);
+  const view = new DataView(buffer);
+  view.setUint32(0, 0x55534442, true); // magic
+  view.setUint32(4, 1, true); // version
+  view.setUint32(8, 3, true); // vertex_count
+  view.setUint32(12, 3, true); // index_count
+  view.setUint32(16, 0b100, true); // has_colors
+  new Float32Array(buffer, 20, 9).set([-1, 0, 0, 1, 0, 0, 0, 1, 0]);
+  new Float32Array(buffer, 20 + 36, 9).set(
+    [0.25, 0.5, 0.75, 0.25, 0.5, 0.75, 0.25, 0.5, 0.75],
+  );
+  new Uint32Array(buffer, 20 + 72, 3).set([0, 1, 2]);
+  return buffer;
+}
+
 function node(overrides: Partial<RenderNode>): RenderNode {
   return {
     path: "/World",
@@ -177,6 +195,56 @@ describe("buildScene", () => {
     expect(matrix.elements.slice(12, 15)).toEqual([12, 3, 4]);
     meshes.getMatrixAt(1, matrix);
     expect(matrix.elements.slice(12, 15)).toEqual([2, 23, 4]);
+  });
+
+  it("renders constant displayColor on unbound meshes as vertex colors", async () => {
+    // Kitchen_set shape: no bound material, displayColor arrives as a
+    // per-vertex "color" attribute; the material must opt into it or
+    // three.js ignores the attribute and the mesh renders default gray.
+    const manifest = [node({ path: "/World/Panel", name: "Panel", type_name: "Mesh", has_geometry: true })];
+    const group = await buildScene(
+      manifest,
+      fetchers({ getGeometry: vi.fn(async () => packedColoredGeometry()) }),
+    );
+
+    const mesh = group.getObjectByName("/World/Panel")!.children[0] as THREE.Mesh;
+    expect((mesh.geometry.getAttribute("color") as THREE.BufferAttribute).array).toEqual(
+      new Float32Array([0.25, 0.5, 0.75, 0.25, 0.5, 0.75, 0.25, 0.5, 0.75]),
+    );
+    const material = mesh.material as THREE.MeshPhysicalMaterial;
+    expect(material.vertexColors).toBe(true);
+    // No bound surface: the diffuse color stays neutral so the vertex
+    // colors show unmultiplied.
+    expect(material.color.getHex()).toBe(0xffffff);
+    // Instanced meshes share the same material path per prototype child.
+    material.dispose();
+  });
+
+  it("keeps a bound diffuse texture over per-vertex colors", async () => {
+    // A bound material wins over displayColor: a diffuse map must not be
+    // tinted by the mesh's vertex colors.
+    const manifest = [node({ path: "/World/Floor", name: "Floor", type_name: "Mesh", has_geometry: true })];
+    const group = await buildScene(
+      manifest,
+      fetchers({
+        getGeometry: vi.fn(async () => packedColoredGeometry()),
+        getMaterial: vi.fn(async () => ({
+          name: "Floor",
+          surface: {
+            diffuse_color: null,
+            roughness: null,
+            metallic: null,
+            opacity: null,
+            normal: null,
+            textures: [{ input: "diffuseColor", file_path: "/cache/checker.png", st_primvar: "st" }],
+          },
+        })),
+        loadTexture: vi.fn(() => new THREE.Texture()),
+      }),
+    );
+
+    const mesh = group.getObjectByName("/World/Floor")!.children[0] as THREE.Mesh;
+    expect((mesh.material as THREE.MeshPhysicalMaterial).vertexColors).toBe(false);
   });
 
   it("honors visible=false on the node's Object3D", async () => {
