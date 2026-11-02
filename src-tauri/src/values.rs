@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use openusd::gf;
-use openusd::sdf::{self, ListOp, Value, ValueTypeName};
+use openusd::sdf::{self, AssetPath, ListOp, Value, ValueTypeName};
 use openusd::usd::{Attribute, Prim, Stage, TimeCode};
 use serde::{Deserialize, Serialize};
 
@@ -347,6 +347,56 @@ pub fn serialize_payload(declared: Option<&ValueTypeName>, value: &Value) -> Val
             count: None,
         },
     }
+}
+
+/// The authored spelling a `token` payload converts to when the target
+/// metadata wants a string-typed value (kind accepts both).
+fn payload_number(payload: &ValuePayload) -> Result<f64, String> {
+    payload
+        .data
+        .as_f64()
+        .ok_or_else(|| format!("{} value is not a number", payload.r#type))
+}
+
+fn payload_string(payload: &ValuePayload) -> Result<String, String> {
+    payload
+        .data
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{} value is not a string", payload.r#type))
+}
+
+fn as_bool(payload: &ValuePayload) -> Result<bool, String> {
+    payload
+        .data
+        .as_bool()
+        .ok_or_else(|| format!("{} value is not a boolean", payload.r#type))
+}
+
+/// Reverse of `serialize_payload`: a ValuePayload back into an `sdf::Value`.
+/// Only the scalar families the inspector can edit convert — bool, the
+/// integer and floating scalars (incl. half and timecode), string, token,
+/// assetpath. Every other family (arrays, vectors, matrices, dicts, path
+/// arrays) is a readable "not editable yet" error: better a clear refusal
+/// than a silent wrong-kind authoring.
+pub fn value_payload_to_sdf(payload: &ValuePayload) -> Result<Value, String> {
+    let not_editable = || format!("type not editable yet: {}", payload.r#type);
+    Ok(match payload.r#type.as_str() {
+        "bool" => Value::Bool(as_bool(payload)?),
+        "uchar" => Value::Uchar(payload_number(payload)? as u8),
+        "int" => Value::Int(payload_number(payload)? as i32),
+        "uint" => Value::Uint(payload_number(payload)? as u32),
+        "int64" => Value::Int64(payload_number(payload)? as i64),
+        "uint64" => Value::Uint64(payload_number(payload)? as u64),
+        "half" => Value::Half(gf::f16::from_f32(payload_number(payload)? as f32)),
+        "float" => Value::Float(payload_number(payload)? as f32),
+        "double" => Value::Double(payload_number(payload)?),
+        "timecode" => Value::TimeCode(sdf::TimeCode(payload_number(payload)?)),
+        "string" => Value::String(payload_string(payload)?),
+        "token" => Value::Token(payload_string(payload)?.into()),
+        "assetpath" => Value::AssetPath(AssetPath::new(payload_string(payload)?)),
+        _ => return Err(not_editable()),
+    })
 }
 
 fn string_repr(value: &Value) -> String {
@@ -1000,8 +1050,10 @@ mod tests {
             op_transform(&time_orient, "xformOp:orient", None).unwrap(),
             OpOutcome::NoValue
         ));
-        assert!(xform_warning("xformOp:orient", "/World/TimeOrient", &OpOutcome::NoValue)
-            .contains("no value at the requested time"));
+        assert!(
+            xform_warning("xformOp:orient", "/World/TimeOrient", &OpOutcome::NoValue)
+                .contains("no value at the requested time")
+        );
 
         let unsupported = stage
             .prim("/World/Unsupported")
@@ -1010,8 +1062,12 @@ mod tests {
             op_transform(&unsupported, "xformOp:flip", None).unwrap(),
             OpOutcome::Unrecognized
         ));
-        assert!(xform_warning("xformOp:flip", "/World/Unsupported", &OpOutcome::Unrecognized)
-            .contains("not supported"));
+        assert!(xform_warning(
+            "xformOp:flip",
+            "/World/Unsupported",
+            &OpOutcome::Unrecognized
+        )
+        .contains("not supported"));
     }
 
     #[test]
@@ -1039,12 +1095,14 @@ mod tests {
         let prim = stage
             .prim("/World/FloatRotate")
             .unwrap_or_else(|e| panic!("/World/FloatRotate resolvable: {e}"));
-        let matrix = op_transform(&prim, "xformOp:rotateY", None)
-            .unwrap();
+        let matrix = op_transform(&prim, "xformOp:rotateY", None).unwrap();
         let OpOutcome::Matrix(matrix) = matrix else {
             panic!("float rotateY evaluates: {matrix:?}")
         };
-        assert_close(&gf::Matrix4d::rotation_y(90.0_f64.to_radians()).0, &matrix.0);
+        assert_close(
+            &gf::Matrix4d::rotation_y(90.0_f64.to_radians()).0,
+            &matrix.0,
+        );
     }
 
     fn xforms_stage() -> Stage {
@@ -1054,10 +1112,7 @@ mod tests {
 
     fn assert_close(expected: &[f64; 16], actual: &[f64; 16]) {
         for (i, (e, a)) in expected.iter().zip(actual).enumerate() {
-            assert!(
-                (e - a).abs() < 1e-6,
-                "element {i}: expected {e}, got {a}"
-            );
+            assert!((e - a).abs() < 1e-6, "element {i}: expected {e}, got {a}");
         }
     }
 
@@ -1066,5 +1121,71 @@ mod tests {
         assert_eq!(payload(None, &Value::ValueBlock).r#type, "unauthored");
         assert_eq!(payload(None, &Value::None).r#type, "unauthored");
         assert_eq!(payload(None, &Value::ValueBlock).data, json!(null));
+    }
+
+    #[test]
+    fn payload_to_sdf_round_trips_the_editable_scalars() {
+        let cases = [
+            ("bool", json!(true), Value::Bool(true)),
+            ("uchar", json!(9), Value::Uchar(9)),
+            ("int", json!(-3), Value::Int(-3)),
+            ("uint", json!(3), Value::Uint(3)),
+            ("int64", json!(-4), Value::Int64(-4)),
+            ("uint64", json!(4), Value::Uint64(4)),
+            ("half", json!(0.5), Value::Half(gf::f16::from_f32(0.5))),
+            ("float", json!(1.5), Value::Float(1.5)),
+            ("double", json!(2.5), Value::Double(2.5)),
+            (
+                "timecode",
+                json!(10.0),
+                Value::TimeCode(sdf::TimeCode(10.0)),
+            ),
+            ("string", json!("hi"), Value::String("hi".into())),
+            ("token", json!("up"), Value::Token("up".into())),
+            (
+                "assetpath",
+                json!("./asset.usda"),
+                Value::AssetPath(AssetPath::new("./asset.usda")),
+            ),
+        ];
+        for (r#type, data, expected) in cases {
+            let converted = value_payload_to_sdf(&ValuePayload {
+                r#type: r#type.to_string(),
+                data,
+                truncated: None,
+                count: None,
+            })
+            .unwrap_or_else(|e| panic!("{} should convert: {}", r#type, e));
+            assert_eq!(converted, expected, "{}", r#type);
+        }
+    }
+
+    #[test]
+    fn payload_to_sdf_refuses_non_scalars_and_bad_data() {
+        for r#type in [
+            "int_array",
+            "float_array",
+            "vec3f",
+            "matrix4d",
+            "dict",
+            "unauthored",
+        ] {
+            let error = value_payload_to_sdf(&ValuePayload {
+                r#type: r#type.to_string(),
+                data: json!(null),
+                truncated: None,
+                count: None,
+            })
+            .expect_err("non-scalar families must refuse");
+            assert!(error.contains(r#type), "{}", error);
+        }
+        let error = value_payload_to_sdf(&ValuePayload {
+            r#type: "float".to_string(),
+            data: json!("abc"),
+            truncated: None,
+            count: None,
+        })
+        .expect_err("a non-number where a float belongs must refuse");
+        assert!(error.contains("float"), "{}", error);
     }
 }

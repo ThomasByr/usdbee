@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { PrimDetails, PrimNode, StageInfo } from "./types";
+import type { PrimDetails, PrimNode, StageInfo, ValuePayload } from "./types";
 import { renderState } from "../render/renderState.svelte";
 
 let loadGeneration = 0;
@@ -76,5 +76,39 @@ export const stageState = $state({
 
   async refreshSelectedDetails(): Promise<void> {
     if (this.selectedPath) await this.selectPrim(this.selectedPath);
+  },
+
+  // Author an attribute value on the selected prim (session layer); returns
+  // the backend error string, or null on success. Time is the viewer's
+  // current USD time code so sampled edits land where the user is looking.
+  async setAttributeValue(name: string, value: ValuePayload): Promise<string | null> {
+    if (!this.selectedPath) return "no prim selected";
+    try {
+      await invoke("set_attribute_value", {
+        path: this.selectedPath,
+        name,
+        value,
+        time: renderState.time,
+      });
+      await this.selectPrim(this.selectedPath);
+      return null;
+    } catch (e) {
+      return typeof e === "string" ? e : String(e);
+    }
+  },
+
+  // Author a metadata field on the selected prim; metadata can change the
+  // tree (e.g. active), so the tree refetches on success.
+  async setPrimMetadata(key: string, value: ValuePayload): Promise<string | null> {
+    if (!this.selectedPath) return "no prim selected";
+    try {
+      await invoke("set_prim_metadata", { path: this.selectedPath, key, value });
+      const tree = await invoke<PrimNode[]>("get_stage_tree");
+      this.tree = tree;
+      await this.selectPrim(this.selectedPath);
+      return null;
+    } catch (e) {
+      return typeof e === "string" ? e : String(e);
+    }
   },
 });

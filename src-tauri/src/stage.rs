@@ -1,16 +1,17 @@
 use std::any::Any;
 use std::collections::HashMap;
+use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use openusd::ar::DefaultResolver;
 use openusd::gf;
-use openusd::sdf;
-use openusd::usd::{InitialLoadSet, PrimPredicate, SchemaBase, Stage, TimeCode};
+use openusd::sdf::{self, ValueTypeName};
+use openusd::usd::{InitialLoadSet, PrimPredicate, SchemaBase, Stage, TimeCode, UndoStage};
 use openusd_schemas::geom::{
     Imageable, ImageableExt, PointInstancer, PointInstancerSchema, Purpose, Visibility,
 };
@@ -20,7 +21,9 @@ use serde::{Deserialize, Serialize};
 use crate::fetcher::get_usdbee_cache_dir;
 use crate::materials::{material_info, MaterialInfo};
 use crate::tessellation::{pack_geometry, tessellate_prim, MeshData};
-use crate::values::{local_transform, serialize_details, PrimDetails};
+use crate::values::{
+    local_transform, serialize_details, value_payload_to_sdf, PrimDetails, ValuePayload,
+};
 
 pub enum StageRequest {
     Open {
@@ -56,6 +59,20 @@ pub enum StageRequest {
         path: String,
         reply: mpsc::Sender<Result<MaterialInfo, String>>,
     },
+    SetValue {
+        path: String,
+        name: String,
+        value: ValuePayload,
+        // USD time code (frames), never seconds; None = the default value.
+        time: Option<f64>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    SetMetadata {
+        path: String,
+        key: String,
+        value: ValuePayload,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
 }
 
 pub struct StageState {
@@ -64,20 +81,41 @@ pub struct StageState {
     // handle so tests (and any introspection) can count real tessellation
     // work without reaching into the owner thread; used by the dedup pin.
     tessellations: Arc<AtomicUsize>,
+    // The edit-target layer identifier of the last successful mutation
+    // (owner-side dirty bookkeeping; Task 2 grows this into a layer list).
+    dirty_layer: Arc<Mutex<Option<String>>>,
 }
 
 impl StageState {
     pub fn mesh_tessellations(&self) -> usize {
         self.tessellations.load(Ordering::Relaxed)
     }
+
+    pub fn dirty_layer(&self) -> Option<String> {
+        self.dirty_layer.lock().ok().and_then(|slot| slot.clone())
+    }
 }
 
+/// Actor-side `usd-stage-changed` emitter: called with the edited prim
+/// paths after each successful mutation. lib.rs bridges it to the Tauri
+/// event (payload `{ "paths": [...] }`); tests capture it in a channel.
+pub type StageChangeSink = Box<dyn Fn(&[String]) + Send>;
+
 pub fn spawn_stage_owner() -> StageState {
+    spawn_stage_owner_with_sink(None)
+}
+
+pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState {
     let (sender, receiver) = mpsc::channel();
     let tessellations = Arc::new(AtomicUsize::new(0));
+    let dirty_layer = Arc::new(Mutex::new(None));
     let owner_counter = tessellations.clone();
+    let dirty_slot = dirty_layer.clone();
     thread::spawn(move || {
-        let mut current_stage = None;
+        // The stage lives wrapped in openusd's UndoStage (Task 5 wires the
+        // undo commands; recording starts now). Every read goes through its
+        // `Deref<Target = Stage>`.
+        let mut current_stage: Option<UndoStage> = None;
         let mut mesh_cache = MeshCache::with_counter(owner_counter.clone());
         // The time-independent manifest skeleton, built by the first manifest
         // call after an open; cleared on Open (like the geometry MeshCache).
@@ -92,7 +130,7 @@ pub fn spawn_stage_owner() -> StageState {
                 StageRequest::Open { path, reply } => {
                     let response = catch_unwind(AssertUnwindSafe(|| {
                         let (stage, info) = open_stage(&path)?;
-                        current_stage = Some(stage);
+                        current_stage = Some(UndoStage::from(stage));
                         Ok(info)
                     }))
                     .unwrap_or_else(panic_reply);
@@ -146,13 +184,7 @@ pub fn spawn_stage_owner() -> StageState {
                 StageRequest::GetGeometry { path, time, reply } => {
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
-                            geometry_bytes(
-                                stage,
-                                &mut mesh_cache,
-                                &mut resolve_memo,
-                                &path,
-                                time,
-                            )
+                            geometry_bytes(stage, &mut mesh_cache, &mut resolve_memo, &path, time)
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -197,10 +229,85 @@ pub fn spawn_stage_owner() -> StageState {
                     };
                     let _ = reply.send(response);
                 }
+                StageRequest::SetValue {
+                    path,
+                    name,
+                    value,
+                    time,
+                    reply,
+                } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            author_attribute_value(stage, &path, &name, &value, time)
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    if response.is_ok() {
+                        if let Some(ref stage) = current_stage {
+                            // shortcut: coarse clear — any edit invalidates
+                            // every cached tessellation; per-path eviction
+                            // when edits grow edit-target awareness
+                            mesh_cache.clear();
+                            // shortcut: coarse clear — any edit can change
+                            // composed types/purpose/bindings, so the whole
+                            // manifest skeleton rebuilds; fine until edits
+                            // become frequent
+                            manifest_skeleton = None;
+                            resolve_memo.clear();
+                            if let Ok(mut dirty) = dirty_slot.lock() {
+                                *dirty = Some(stage.edit_target().layer_identifier().to_string());
+                            }
+                            if let Some(sink) = &sink {
+                                sink(std::slice::from_ref(&path));
+                            }
+                        }
+                    }
+                    let _ = reply.send(response);
+                }
+                StageRequest::SetMetadata {
+                    path,
+                    key,
+                    value,
+                    reply,
+                } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            author_prim_metadata(stage, &path, &key, &value)
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    if response.is_ok() {
+                        if let Some(ref stage) = current_stage {
+                            // shortcut: coarse clear — any edit invalidates
+                            // every cached tessellation; per-path eviction
+                            // when edits grow edit-target awareness
+                            mesh_cache.clear();
+                            // shortcut: coarse clear — any edit can change
+                            // composed types/purpose/bindings, so the whole
+                            // manifest skeleton rebuilds; fine until edits
+                            // become frequent
+                            manifest_skeleton = None;
+                            resolve_memo.clear();
+                            if let Ok(mut dirty) = dirty_slot.lock() {
+                                *dirty = Some(stage.edit_target().layer_identifier().to_string());
+                            }
+                            if let Some(sink) = &sink {
+                                sink(std::slice::from_ref(&path));
+                            }
+                        }
+                    }
+                    let _ = reply.send(response);
+                }
             }
         }
     });
-    StageState { sender, tessellations }
+    StageState {
+        sender,
+        tessellations,
+        dirty_layer,
+    }
 }
 
 fn panic_reply<T>(payload: Box<dyn Any + Send>) -> Result<T, String> {
@@ -261,6 +368,28 @@ fn stage_up_axis(stage: &Stage) -> String {
     }
 }
 
+/// A fresh, empty session layer file for one stage open. The builder's
+/// `session_layer` takes a path the resolver reads, so the default edit
+/// target is a real (private, never saved) layer on disk; each open gets
+/// its own so previous edits never leak into a reopened stage.
+fn session_layer_file() -> Result<PathBuf, String> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let dir = get_usdbee_cache_dir().join("sessions");
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create session dir {}: {}", dir.display(), e))?;
+    let path = dir.join(format!(
+        "session-{}-{}.usda",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    // shortcut: one tiny session file per open accumulates in the cache dir
+    // until the OS temp sweep; session edits are never saved, so a delete-on-
+    // stage-close is the only cleanup ever needed
+    fs::write(&path, "#usda 1.0\n")
+        .map_err(|e| format!("failed to write session layer {}: {}", path.display(), e))?;
+    Ok(path)
+}
+
 pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
     let path_str = path
         .to_str()
@@ -268,19 +397,42 @@ pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
     let cache_dir = get_usdbee_cache_dir();
     let resolver =
         DefaultResolver::with_search_paths([cache_dir.clone(), cache_dir.join("extracted")]);
-    let stage = Stage::builder()
+    let mut builder = Stage::builder()
         // Registers every enabled openusd-schemas family so `is_a`/
         // `from_prim` detection and schema-declared fallbacks resolve
         // (Task 3; Mesh topology declares no fallback, so the
         // missing-topology Err semantics of tessellation are unchanged).
         .schema_registry(openusd_schemas::schema_registry())
         .resolver(resolver)
-        .load(InitialLoadSet::LoadAll)
+        .load(InitialLoadSet::LoadAll);
+    // The stage must open WITH a session layer (the default edit target);
+    // when creation fails the stage still opens read-only and mutations
+    // return a readable error instead of silently authoring into the root.
+    if let Ok(session) = session_layer_file() {
+        if let Some(session) = session.to_str() {
+            builder = builder.session_layer(session);
+        }
+    }
+    let stage = builder
         .open(path_str)
         .map_err(|e| format!("Failed to open USD stage '{}': {}", path.display(), e))?;
     stage
         .traverse(PrimPredicate::ALL, |_| {})
         .map_err(|e| format!("Failed to compose USD stage '{}': {}", path.display(), e))?;
+    if let Some(target) = stage.edit_target_session() {
+        if let Err(e) = stage.set_edit_target(target) {
+            eprintln!(
+                "usdbee: could not select the session edit target ({}); edits stay on {}",
+                e,
+                stage.edit_target().layer_identifier()
+            );
+        }
+    } else {
+        eprintln!(
+            "usdbee: {} opened without a session layer; edits are disabled",
+            path.display()
+        );
+    }
 
     let info = StageInfo {
         root_layer: stage.root_layer().identifier().to_owned(),
@@ -296,6 +448,147 @@ pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
     };
 
     Ok((stage, info))
+}
+
+/// The guards every mutation shares: the prim must exist, must not be an
+/// instance (or live inside one), must be active, and the stage must have
+/// its session edit layer. Failures are readable and carry the prim path.
+fn editable_prim(stage: &Stage, path: &str) -> Result<openusd::usd::Prim, String> {
+    let prim_path =
+        sdf::try_into_path(path).map_err(|e| format!("invalid prim path '{}': {}", path, e))?;
+    let prim = stage
+        .prim(prim_path)
+        .map_err(|e| format!("invalid prim path '{}': {}", path, e))?;
+    if !prim.is_valid().map_err(stage_err)? {
+        return Err(format!("prim not found: {}", path));
+    }
+    if prim.is_instance().map_err(stage_err)? {
+        let prototype = prim
+            .prototype()
+            .map_err(stage_err)?
+            .map(|prototype| prototype.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        return Err(format!(
+            "edits on instances affect all instances — edit the prototype at {}",
+            prototype
+        ));
+    }
+    if prim.is_instance_proxy().map_err(stage_err)? {
+        let prototype = prim
+            .prim_in_prototype()
+            .map_err(stage_err)?
+            .map(|prototype| prototype.path().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        return Err(format!(
+            "edits inside an instance affect all instances — edit the prototype at {}",
+            prototype
+        ));
+    }
+    if !prim.is_active().map_err(stage_err)? {
+        return Err(format!(
+            "prim {} is inactive; reactivate it before editing",
+            path
+        ));
+    }
+    if !stage.has_session_layer() {
+        return Err(format!("no session layer available for edits on {}", path));
+    }
+    Ok(prim)
+}
+
+/// The ValueTypeName spelling for a payload type: identical to the payload
+/// family except the value-type registry calls asset paths "asset".
+fn payload_type_name(payload: &ValuePayload) -> Result<ValueTypeName, String> {
+    let spelling = match payload.r#type.as_str() {
+        "assetpath" => "asset",
+        other => other,
+    };
+    ValueTypeName::find(spelling)
+        .ok_or_else(|| format!("cannot create an attribute of type {}", payload.r#type))
+}
+
+/// Author an attribute value on the current edit target (the session layer
+/// — see `open_stage`). `time` is a USD time code (frames); `None` authors
+/// the default. An attribute nothing declares is created via
+/// `Stage::create_attribute` with the payload's type.
+fn author_attribute_value(
+    stage: &Stage,
+    path: &str,
+    name: &str,
+    payload: &ValuePayload,
+    time: Option<f64>,
+) -> Result<(), String> {
+    let prim = editable_prim(stage, path)?;
+    let value = value_payload_to_sdf(payload)?;
+    let time = time.map(TimeCode::new);
+    let authored = prim
+        .attributes()
+        .map_err(stage_err)?
+        .into_iter()
+        .find(|attribute| attribute.name() == name);
+    match authored {
+        // set_at stamps the edit-target spec from the composed declaration
+        // when the attribute is declared but unauthored.
+        Some(attribute) => {
+            attribute
+                .set_at(value, time)
+                .map_err(|e| format!("failed to set {} on {}: {}", name, path, e))?;
+        }
+        None => {
+            let attribute_path = prim
+                .path()
+                .append_property(name)
+                .map_err(|e| format!("invalid attribute path {}.{}: {}", path, name, e))?;
+            let attribute = stage
+                .create_attribute(attribute_path, payload_type_name(payload)?)
+                .map_err(|e| format!("failed to create {} on {}: {}", name, path, e))?;
+            attribute
+                .set_at(value, time)
+                .map_err(|e| format!("failed to set {} on {}: {}", name, path, e))?;
+        }
+    }
+    Ok(())
+}
+
+/// Author a prim metadata field on the current edit target. Only the keys
+/// the inspector can edit land (active, kind, customData); anything else is
+/// a readable refusal. `Prim::set_metadata` takes `&'static str` keys, so
+/// the dispatch is a fixed match, not a passthrough of the request key.
+fn author_prim_metadata(
+    stage: &Stage,
+    path: &str,
+    key: &str,
+    payload: &ValuePayload,
+) -> Result<(), String> {
+    let prim = editable_prim(stage, path)?;
+    let value = value_payload_to_sdf(payload)?;
+    match key {
+        "active" => {
+            let active = match value {
+                sdf::Value::Bool(active) => active,
+                _ => return Err(format!("active metadata needs a bool value on {}", path)),
+            };
+            prim.set_active(active)
+                .map_err(|e| format!("failed to set active on {}: {}", path, e))?;
+        }
+        "kind" => {
+            let kind = match value {
+                sdf::Value::Token(token) => token.as_str().to_owned(),
+                sdf::Value::String(text) => text,
+                _ => return Err(format!("kind metadata needs a token value on {}", path)),
+            };
+            prim.set_kind(kind)
+                .map_err(|e| format!("failed to set kind on {}: {}", path, e))?;
+        }
+        "customData" => {
+            prim.set_metadata("customData", value)
+                .map_err(|e| format!("failed to set customData on {}: {}", path, e))?;
+        }
+        other => {
+            return Err(format!("metadata key not editable yet: {}", other));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -574,7 +867,11 @@ fn build_facts(
             imageable,
             self_moves,
             self_deforms,
-            material: if renders { direct_material(stage, prim) } else { None },
+            material: if renders {
+                direct_material(stage, prim)
+            } else {
+                None
+            },
             children: children.clone(),
             kind,
         },
@@ -788,8 +1085,13 @@ fn prototype_children(
             continue;
         }
         let synthetic_path = format!("{}/{}{}", prim.path(), PROTO_PREFIX, index);
-        let mut prototype_children =
-            render_children(skeleton, &prototype.children, time, animated, prototype_memo)?;
+        let mut prototype_children = render_children(
+            skeleton,
+            &prototype.children,
+            time,
+            animated,
+            prototype_memo,
+        )?;
         rebase_render_paths(
             &mut prototype_children,
             prototype_path,
@@ -903,9 +1205,13 @@ fn render_node_children(
             ancestor_moves,
             prototype_memo,
         ),
-        SkeletonKind::Plain => {
-            render_children(skeleton, &facts.children, time, ancestor_moves, prototype_memo)
-        }
+        SkeletonKind::Plain => render_children(
+            skeleton,
+            &facts.children,
+            time,
+            ancestor_moves,
+            prototype_memo,
+        ),
     }
 }
 
@@ -1186,8 +1492,7 @@ fn resolved_render_path(
             .map_err(|e| format!("invalid memoized path '{}': {}", resolved, e)),
         None => {
             let resolved = resolve_render_path(stage, path)?;
-            memo.by_path
-                .insert(path.to_owned(), resolved.to_string());
+            memo.by_path.insert(path.to_owned(), resolved.to_string());
             Ok(resolved)
         }
     }
@@ -1414,6 +1719,73 @@ pub fn request_material_data(
     sender
         .send(StageRequest::GetMaterial {
             path: path.to_string(),
+            reply,
+        })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn set_attribute_value(
+    path: String,
+    name: String,
+    value: ValuePayload,
+    time: Option<f64>,
+    state: tauri::State<'_, StageState>,
+) -> Result<(), String> {
+    request_set_attribute_value(&state.sender, &path, &name, &value, time)
+}
+
+pub fn request_set_attribute_value(
+    sender: &mpsc::Sender<StageRequest>,
+    path: &str,
+    name: &str,
+    value: &ValuePayload,
+    time: Option<f64>,
+) -> Result<(), String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::SetValue {
+            path: path.to_string(),
+            name: name.to_string(),
+            value: value.clone(),
+            time,
+            reply,
+        })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn set_prim_metadata(
+    path: String,
+    key: String,
+    value: ValuePayload,
+    state: tauri::State<'_, StageState>,
+) -> Result<(), String> {
+    request_set_prim_metadata(&state.sender, &path, &key, &value)
+}
+
+pub fn request_set_prim_metadata(
+    sender: &mpsc::Sender<StageRequest>,
+    path: &str,
+    key: &str,
+    value: &ValuePayload,
+) -> Result<(), String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::SetMetadata {
+            path: path.to_string(),
+            key: key.to_string(),
+            value: value.clone(),
             reply,
         })
         .map_err(|_| "stage service unavailable".to_string())?;

@@ -39,7 +39,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            app.manage(stage::spawn_stage_owner());
+            let handle = app.handle().clone();
+            app.manage(stage::spawn_stage_owner_with_sink(Some(Box::new(
+                move |paths: &[String]| {
+                    if let Err(e) =
+                        handle.emit("usd-stage-changed", serde_json::json!({ "paths": paths }))
+                    {
+                        eprintln!("usdbee: failed to emit usd-stage-changed: {}", e);
+                    }
+                },
+            ))));
             let initial_url = omniverse::load_omniverse_url_from_disk();
             app.manage(omniverse::AppState {
                 omniverse_server: std::sync::Mutex::new(initial_url),
@@ -78,6 +87,8 @@ pub fn run() {
             stage::get_geometry_data,
             stage::get_geometry_batch,
             stage::get_material_data,
+            stage::set_attribute_value,
+            stage::set_prim_metadata,
             omniverse::set_omniverse_url,
             omniverse::get_omniverse_url
         ])

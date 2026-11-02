@@ -1,7 +1,7 @@
 <script lang="ts">
   import { stageState } from "$lib/stage/stageState.svelte";
   import { formatValue } from "$lib/stage/valueFormat";
-  import ValueView from "./ValueView.svelte";
+  import AttributeEditor from "./AttributeEditor.svelte";
 
   let open = $state(true);
 
@@ -74,7 +74,10 @@
                   <span class="attr-name" class:fallback={!attr.authored}>{attr.name}</span>
                   <span class="attr-type">{attr.type_name}&thinsp;·&thinsp;{attr.variability}</span>
                   <span class="attr-value" class:fallback={!attr.authored}>
-                    <ValueView value={attr.value} />
+                    <AttributeEditor
+                      value={attr.value}
+                      oncommit={(value) => stageState.setAttributeValue(attr.name, value)}
+                    />
                   </span>
                 </div>
               {/each}
@@ -87,7 +90,9 @@
               {#each details.metadata as [field, value] (field)}
                 <div class="attr-row">
                   <span class="attr-name">{field}</span>
-                  <span class="attr-value"><ValueView {value} /></span>
+                  <span class="attr-value">
+                    <AttributeEditor {value} oncommit={(v) => stageState.setPrimMetadata(field, v)} />
+                  </span>
                 </div>
               {/each}
             </div>
