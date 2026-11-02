@@ -416,7 +416,8 @@ fn renders_geometry(type_name: &str) -> bool {
 /// prim's primvars can never animate rendered vertices, so its primvar
 /// names skip the (composed, pricey) time-sample query.
 /// Geometry deformation covers points/normals/widths and primvars
-/// (Task 6 ruling 1a); transform motion covers xformOps and, for a
+/// (Task 6 ruling 1a) plus the topology attrs tessellation reads at the
+/// requested time (faceVertexCounts/faceVertexIndices/curveVertexCounts); transform motion covers xformOps and, for a
 /// PointInstancer, its per-instance arrays. Attributes outside either
 /// family skip the time-sample query.
 fn samples_scene_motion(
@@ -442,17 +443,20 @@ fn samples_scene_motion(
                     "positions" | "orientations" | "scales" | "protoIndices" | "invisibleIds"
                 ));
         let deforms_geometry = renders_geometry
-            && (matches!(name, "points" | "normals" | "widths" | "radius")
-                || name.starts_with("primvars:"));
+            && (matches!(
+                name,
+                "points"
+                    | "normals"
+                    | "widths"
+                    | "radius"
+                    | "faceVertexCounts"
+                    | "faceVertexIndices"
+                    | "curveVertexCounts"
+            ) || name.starts_with("primvars:"));
         if !moves_transform && !deforms_geometry {
             continue;
         }
-        if prim
-            .attribute(name)
-            .num_time_samples()
-            .map_err(stage_err)?
-            == 0
-        {
+        if prim.attribute(name).num_time_samples().map_err(stage_err)? == 0 {
             continue;
         }
         if moves_transform {

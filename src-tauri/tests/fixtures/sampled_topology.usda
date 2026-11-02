@@ -1,0 +1,32 @@
+#usda 1.0
+(
+    defaultPrim = "Scene"
+    startTimeCode = 0
+    endTimeCode = 10
+    timeCodesPerSecond = 24
+)
+
+def Xform "Scene"
+{
+    def Xform "Metamorph"
+    {
+        double3 xformOp:translate.timeSamples = {
+            0: (0, 0, 0),
+            10: (5, 0, 0),
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Mesh "Topo"
+        {
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)]
+            int[] faceVertexCounts.timeSamples = {
+                0: [1, 1],
+                10: [3],
+            }
+            int[] faceVertexIndices.timeSamples = {
+                0: [0, 1],
+                10: [0, 1, 3],
+            }
+        }
+    }
+}

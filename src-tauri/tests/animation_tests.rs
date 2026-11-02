@@ -18,7 +18,11 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn manifest_at(time: Option<f64>) -> Vec<RenderNode> {
-    let (stage, info) = open_stage(&fixture("animated.usda")).expect("stage should open");
+    manifest_from("animated.usda", time)
+}
+
+fn manifest_from(name: &str, time: Option<f64>) -> Vec<RenderNode> {
+    let (stage, info) = open_stage(&fixture(name)).expect("stage should open");
     assert!(
         info.composition_errors.is_empty(),
         "composition errors: {:?}",
@@ -130,6 +134,21 @@ fn manifest_separates_geometry_deformation_from_transform_motion() {
     let still = expect(&nodes, "/Scene/Still");
     assert!(!still.animated);
     assert!(!still.geometry_animated);
+}
+
+#[test]
+fn manifest_flags_sampled_topology_under_transform_motion() {
+    let nodes = manifest_from("sampled_topology.usda", Some(0.0));
+
+    // Static points, time-sampled face indices/counts, under a sampled
+    // ancestor Xform: tessellation reads the topology at the requested
+    // time, so the playback step must refetch this mesh.
+    let topo = expect(&nodes, "/Scene/Metamorph/Topo");
+    assert!(topo.animated, "ancestor transform motion flags the prim");
+    assert!(
+        topo.geometry_animated,
+        "time-sampled topology is geometry-defining"
+    );
 }
 
 #[test]
