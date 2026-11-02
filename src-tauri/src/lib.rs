@@ -106,6 +106,9 @@ pub fn run() {
             stage::undo_stage_edit,
             stage::redo_stage_edit,
             stage::get_undo_state,
+            stage::export_layer_text,
+            stage::import_layer_text,
+            stage::list_stage_layers,
             omniverse::set_omniverse_url,
             omniverse::get_omniverse_url
         ])

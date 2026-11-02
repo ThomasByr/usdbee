@@ -13,7 +13,7 @@ use openusd::gf;
 use openusd::sdf::{self, ValueTypeName};
 use openusd::usd::{
     ApplyMode, Diff, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, ReplayStage,
-    SchemaBase, Stage, TimeCode, UndoStage,
+    SchemaBase, Stage, StageAuthoringError, TimeCode, UndoStage,
 };
 use openusd_schemas::geom::{
     Imageable, ImageableExt, PointInstancer, PointInstancerSchema, Purpose, Visibility,
@@ -113,6 +113,22 @@ pub enum StageRequest {
     },
     GetUndoState {
         reply: mpsc::Sender<Result<UndoState, String>>,
+    },
+    // The Task 6 text layer editor: the usda text of one stage layer, the
+    // import that replaces a layer's in-memory content (parse first, replace
+    // only on success, never touch any file), and the list of every stage
+    // layer for the editor's selector.
+    ExportLayerText {
+        identifier: String,
+        reply: mpsc::Sender<Result<String, String>>,
+    },
+    ImportLayerText {
+        identifier: String,
+        text: String,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    ListStageLayers {
+        reply: mpsc::Sender<Result<Vec<LayerInfo>, String>>,
     },
 }
 
@@ -435,11 +451,11 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                             (&current_stage, &current_replay)
                         {
                             record_user_mutation(
-                                stage,
                                 replay,
                                 &mut undo_journal,
                                 &mut redo_stack,
                                 &mut dirty_ledger,
+                                stage.edit_target().layer_identifier(),
                                 &path,
                             );
                             after_mutation(
@@ -471,11 +487,11 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                             (&current_stage, &current_replay)
                         {
                             record_user_mutation(
-                                stage,
                                 replay,
                                 &mut undo_journal,
                                 &mut redo_stack,
                                 &mut dirty_ledger,
+                                stage.edit_target().layer_identifier(),
                                 &path,
                             );
                             after_mutation(
@@ -512,11 +528,11 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                             (&current_stage, &current_replay)
                         {
                             record_user_mutation(
-                                stage,
                                 replay,
                                 &mut undo_journal,
                                 &mut redo_stack,
                                 &mut dirty_ledger,
+                                stage.edit_target().layer_identifier(),
                                 &path,
                             );
                             after_mutation(
@@ -693,6 +709,72 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                                 })
                             }))
                             .unwrap_or_else(panic_reply)
+                        }
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::ExportLayerText {
+                    identifier,
+                    reply,
+                } => {
+                    // A pure read: no caches clear, no event fires.
+                    let response = match current_stage {
+                        Some(ref stage) => {
+                            catch_unwind(AssertUnwindSafe(|| export_layer_text_impl(stage, &identifier)))
+                                .unwrap_or_else(panic_reply)
+                        }
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::ImportLayerText {
+                    identifier,
+                    text,
+                    reply,
+                } => {
+                    let response = match current_stage {
+                        Some(ref stage) => {
+                            catch_unwind(AssertUnwindSafe(|| import_layer_text_impl(stage, &identifier, &text)))
+                                .unwrap_or_else(panic_reply)
+                        }
+                        None => Err("no stage open".to_string()),
+                    };
+                    if let Ok(imported_layer) = &response {
+                        if let Some(ref replay) = &current_replay {
+                            // The same post-mutation bookkeeping as the other
+                            // arms, with the layer the import named (an import
+                            // is not necessarily the edit target) and the root
+                            // path (a layer-content replacement can reshape
+                            // the whole composed tree).
+                            record_user_mutation(
+                                replay,
+                                &mut undo_journal,
+                                &mut redo_stack,
+                                &mut dirty_ledger,
+                                imported_layer,
+                                "/",
+                            );
+                            after_mutation(
+                                &sink,
+                                &mut mesh_cache,
+                                &mut manifest_skeleton,
+                                &mut resolve_memo,
+                                "/",
+                            );
+                        }
+                    }
+                    // The command's contract is Result<(), String>: the
+                    // canonical layer id the bookkeeping needed stays here.
+                    let response = response.map(|_| ());
+                    let _ = reply.send(response);
+                }
+                StageRequest::ListStageLayers { reply } => {
+                    // A pure read: no caches clear, no event fires.
+                    let response = match current_stage {
+                        Some(ref stage) => {
+                            catch_unwind(AssertUnwindSafe(|| stage_layers_info(stage)))
+                                .unwrap_or_else(panic_reply)
                         }
                         None => Err("no stage open".to_string()),
                     };
@@ -1034,31 +1116,32 @@ fn after_mutation(
 
 /// Post-commit bookkeeping for one successful user mutation: the forward
 /// diffs the ReplayStage recorded become one bounded journal entry (the
-/// redo source once undone), the edit target's layer gains one unsaved
-/// change in the dirty ledger, and the redo stack dies (a new mutation
-/// invalidates it). An edit that produced no diff ops authored nothing, so
-/// it left no UndoStage entry either — nothing joins the journal (the
-/// ledger still counts it, matching the pre-undo behavior of marking the
-/// edit target dirty on every successful arm).
+/// redo source once undone), the layer the mutation landed on gains one
+/// unsaved change in the dirty ledger, and the redo stack dies (a new
+/// mutation invalidates it). The layer is explicit because it is not always
+/// the edit target — a text import names its own layer. An edit that
+/// produced no diff ops authored nothing, so it left no UndoStage entry
+/// either — nothing joins the journal (the ledger still counts it, matching
+/// the pre-undo behavior of marking the edit target dirty on every
+/// successful arm).
 fn record_user_mutation(
-    stage: &Stage,
     replay: &ReplayStage,
     journal: &mut VecDeque<MutationEntry>,
     redo: &mut Vec<MutationEntry>,
     ledger: &mut LayerLedger,
+    layer: &str,
     path: &str,
 ) {
     let diffs = replay.diff();
     replay.clear();
-    let layer = stage.edit_target().layer_identifier().to_string();
-    ledger.record_mutation(&layer);
+    ledger.record_mutation(layer);
     if diffs.is_empty() {
         return;
     }
     push_bounded(
         journal,
         MutationEntry {
-            layer,
+            layer: layer.to_owned(),
             diffs,
             path: path.to_owned(),
         },
@@ -1253,6 +1336,99 @@ fn dirty_layers_info(stage: &Stage, dirty: &[String]) -> Result<Vec<LayerInfo>, 
 /// picks the writer by extension; usdz is deliberately absent — see the
 /// is_usdz_stage refusal below).
 const SAVEABLE_EXTENSIONS: &[&str] = &["usda", "usdc", "usd"];
+
+/// Every layer of the stage in stack order (session, root, sublayers),
+/// dirty or not — the text editor's layer selector. The same walk
+/// `dirty_layers_info` filters down to the unsaved ones.
+fn stage_layers_info(stage: &Stage) -> Result<Vec<LayerInfo>, String> {
+    let session = session_identifier(stage);
+    Ok(stage
+        .layer_stack()
+        .into_iter()
+        .map(|identifier| LayerInfo {
+            is_session: Some(identifier.as_str()) == session.as_deref(),
+            original_path: stage
+                .layer(&identifier)
+                .and_then(|layer| layer.resolved_path().map(str::to_string)),
+            identifier,
+        })
+        .collect())
+}
+
+/// The usda text of one stage layer. `export_to_string` always writes usda
+/// text regardless of the layer's file format, and never touches the layer's
+/// file.
+fn export_layer_text_impl(stage: &Stage, identifier: &str) -> Result<String, String> {
+    let layer = stage
+        .layer(identifier)
+        .ok_or_else(|| format!("layer not found in the stage: {}", identifier))?;
+    layer
+        .export_to_string()
+        .map_err(|e| format!("failed to export {}: {}", identifier, e))
+}
+
+/// Replace one stage layer's in-memory content with parsed usda text and
+/// return the layer's canonical identifier (the request spelling may be a
+/// real-path alias, but the dirty/undo bookkeeping needs the canonical id).
+/// The text parses FIRST into a throwaway anonymous layer — a malformed text
+/// fails before anything in the stage moves — then the parsed content swaps
+/// into the target layer as one atomic `batch_edit` transaction, which also
+/// recomposes the stage and feeds the undo/redo recorders. No file is ever
+/// written: the layer's identifier and its file stay untouched; the owner's
+/// dirty bookkeeping is what marks the layer unsaved.
+fn import_layer_text_impl(
+    stage: &Stage,
+    identifier: &str,
+    text: &str,
+) -> Result<String, String> {
+    let canonical = stage
+        .layer(identifier)
+        .map(|layer| layer.identifier().to_string())
+        .ok_or_else(|| format!("layer not found in the stage: {}", identifier))?;
+    let parsed = sdf::Layer::from_bytes("usdbee-import", text.as_bytes().to_vec())
+        .map_err(|e| format!("failed to import into {}: {}", canonical, e))?;
+    stage
+        .batch_edit(&[canonical.as_str()], |edits| {
+            replace_layer_content(edits[0].data_mut(), parsed.data())
+                .map_err(StageAuthoringError::Layer)
+        })
+        .map_err(|e| format!("failed to import into {}: {}", canonical, e))?;
+    Ok(canonical)
+}
+
+/// Make `dst` an exact copy of `src` at the raw spec level: erase every
+/// spec the destination holds (the pseudo-root keeps its spec, its fields
+/// go), then recreate every spec and field the parsed source reports. The
+/// end state mirrors the parsed layer — namespace lists and layer metadata
+/// included — so no per-spec merge logic is needed.
+fn replace_layer_content(
+    dst: &mut dyn sdf::AbstractData,
+    src: &dyn sdf::AbstractData,
+) -> Result<(), sdf::AuthoringError> {
+    let root = sdf::Path::abs_root();
+    for path in dst.spec_paths() {
+        if path == root {
+            for field in dst.list_fields(&path).unwrap_or_default() {
+                dst.erase_field(&path, &field);
+            }
+        } else {
+            dst.erase_spec(&path);
+        }
+    }
+    for path in src.spec_paths() {
+        let spec_type = src
+            .spec_type(&path)
+            .ok_or_else(|| sdf::DataError::MissingSpec {
+                path: path.clone(),
+            })?;
+        dst.create_spec(path.clone(), spec_type);
+        for field in src.list_fields(&path).unwrap_or_default() {
+            let value = src.get_field(&path, &field)?;
+            dst.set_field(&path, &field, value.into_owned());
+        }
+    }
+    Ok(())
+}
 
 /// Lexical same-file comparison for the session-layer refusal: both paths
 /// made absolute, then compared component-wise.
@@ -2746,6 +2922,87 @@ pub fn request_undo_state(sender: &mpsc::Sender<StageRequest>) -> Result<UndoSta
     let (reply, response) = mpsc::channel();
     sender
         .send(StageRequest::GetUndoState { reply })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn export_layer_text(
+    identifier: String,
+    state: tauri::State<'_, StageState>,
+) -> Result<String, String> {
+    request_export_layer_text(&state.sender, &identifier)
+}
+
+/// The usda text of one stage layer (a pure read — never a file write).
+pub fn request_export_layer_text(
+    sender: &mpsc::Sender<StageRequest>,
+    identifier: &str,
+) -> Result<String, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::ExportLayerText {
+            identifier: identifier.to_string(),
+            reply,
+        })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn import_layer_text(
+    identifier: String,
+    text: String,
+    state: tauri::State<'_, StageState>,
+) -> Result<(), String> {
+    request_import_layer_text(&state.sender, &identifier, &text)
+}
+
+/// Replace a stage layer's in-memory content with parsed usda text. A
+/// malformed text leaves the stage untouched; a valid one never writes the
+/// layer's file (saving stays the only disk-writing flow).
+pub fn request_import_layer_text(
+    sender: &mpsc::Sender<StageRequest>,
+    identifier: &str,
+    text: &str,
+) -> Result<(), String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::ImportLayerText {
+            identifier: identifier.to_string(),
+            text: text.to_string(),
+            reply,
+        })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn list_stage_layers(
+    state: tauri::State<'_, StageState>,
+) -> Result<Vec<LayerInfo>, String> {
+    request_list_stage_layers(&state.sender)
+}
+
+/// Every layer of the stage (session, root, sublayers), dirty or not.
+pub fn request_list_stage_layers(
+    sender: &mpsc::Sender<StageRequest>,
+) -> Result<Vec<LayerInfo>, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::ListStageLayers { reply })
         .map_err(|_| "stage service unavailable".to_string())?;
     response
         .recv()

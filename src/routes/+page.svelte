@@ -11,6 +11,7 @@
   import PropertyInspector from "$lib/components/stage/PropertyInspector.svelte";
   import RenderingTab from "$lib/components/RenderingTab.svelte";
   import SettingsTab from "$lib/components/SettingsTab.svelte";
+  import LayerTextEditor from "$lib/components/LayerTextEditor.svelte";
   import ExportModal from "$lib/components/ExportModal.svelte";
   import SaveDialog from "$lib/components/SaveDialog.svelte";
   import { runExport } from "$lib/three/VideoExporter";
@@ -59,7 +60,7 @@
   let canvas: HTMLCanvasElement;
 
   let viewer = new RendererKit();
-  let activeTab = $state<"files" | "scene" | "rendering" | "settings">("files");
+  let activeTab = $state<"files" | "scene" | "rendering" | "settings" | "layers">("files");
 
   // Rendering Controls
   let hasShownWindow = false;
@@ -1189,6 +1190,9 @@
         class:active={activeTab === "rendering"}
         onclick={() => (activeTab = "rendering")}>Rendering</button
       >
+      <button class="tab-btn" class:active={activeTab === "layers"} onclick={() => (activeTab = "layers")}
+        >Layer Text</button
+      >
       <button class="tab-btn" class:active={activeTab === "settings"} onclick={() => (activeTab = "settings")}
         >Settings</button
       >
@@ -1253,6 +1257,9 @@
           bind:lightAzimuth
           bind:lightElevation
         />
+      {/if}
+      {#if activeTab === "layers"}
+        <LayerTextEditor />
       {/if}
       {#if activeTab === "settings"}
         <SettingsTab
