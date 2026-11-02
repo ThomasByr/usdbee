@@ -329,8 +329,9 @@ export const renderState = $state({
     return activeTimeStep;
   },
 
-  // Animated content refresh: a full re-load at the current stage time.
+  // Animated content refresh: a full re-load at the current stage time,
+  // keeping the last load's fallback colors (the {} default would wipe them).
   refreshAnimated(): Promise<THREE.Group | null> {
-    return this.loadRenderScene(this.time !== null ? this.time : 0);
+    return this.loadRenderScene(this.time !== null ? this.time : 0, currentFallbacks);
   },
 });

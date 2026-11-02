@@ -505,6 +505,28 @@ describe("renderState.setStageTime", () => {
     expect(renderState.time).toBe(6);
   });
 
+  it("keeps the last load's fallback colors when refreshing animated content", async () => {
+    const shape = node({
+      path: "/Scene/Shape",
+      name: "Shape",
+      type_name: "Mesh",
+      has_geometry: true,
+    });
+    mockIpc(() => [shape]);
+    await renderState.loadRenderScene(0, {
+      "/Textures/Bark.png": { fallback_color: "#00ff00" },
+    });
+    await renderState.setStageTime(5);
+    mockedInvoke.mockClear();
+
+    mockIpc(() => [shape]);
+    const group = await renderState.refreshAnimated();
+
+    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { time: 5 });
+    const material = findMesh(group!).material as THREE.MeshPhysicalMaterial;
+    expect(material.color.getHex()).toBe(new THREE.Color("#00ff00").getHex());
+  });
+
   it("refreshes animated content at the current stage time", async () => {
     await loadScene(() => []);
     await renderState.setStageTime(5);
