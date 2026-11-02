@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { decodeGeometry, GEOMETRY_MAGIC, GEOMETRY_VERSION } from "./geometryDecoder";
+import {
+  decodeGeometry,
+  decodeGeometryBatch,
+  GEOMETRY_MAGIC,
+  GEOMETRY_VERSION,
+} from "./geometryDecoder";
 
 // Hand-build the binary layout the Rust side emits (little-endian):
 // magic u32, version u32, vertex_count u32, index_count u32, flags u32
@@ -138,5 +143,65 @@ describe("decodeGeometry", () => {
       indices: [0, 1, 2],
     });
     expect(() => decodeGeometry(buffer.slice(0, 30))).toThrow(/truncated|short/i);
+  });
+});
+
+describe("decodeGeometryBatch", () => {
+  // Mirrors Rust stage.rs::frame_batch: magic "USBG", version 1, slot
+  // count, then per slot status (0 ok / 1 err) + length + bytes.
+  function buildBatch(slots: (ArrayBuffer | string)[]): ArrayBuffer {
+    const body = slots.map((slot) => {
+      if (slot instanceof ArrayBuffer) {
+        return { status: 0, bytes: slot };
+      }
+      return { status: 1, bytes: new TextEncoder().encode(slot) };
+    });
+    const size =
+      12 + body.reduce((sum, slot) => sum + 8 + slot.bytes.byteLength, 0);
+    const buffer = new ArrayBuffer(size);
+    const view = new DataView(buffer);
+    view.setUint32(0, 0x55534247, true);
+    view.setUint32(4, 1, true);
+    view.setUint32(8, slots.length, true);
+    let offset = 12;
+    for (const slot of body) {
+      view.setUint32(offset, slot.status, true);
+      view.setUint32(offset + 4, slot.bytes.byteLength, true);
+      new Uint8Array(buffer, offset + 8).set(new Uint8Array(slot.bytes));
+      offset += 8 + slot.bytes.byteLength;
+    }
+    return buffer;
+  }
+
+  it("slices ok slots decode identically to per-path payloads", () => {
+    const frame = buildPayload({
+      flags: 0,
+      positions: [
+        [0, 0, 0],
+        [1, 0, 0],
+        [0, 1, 0],
+      ],
+      indices: [0, 1, 2],
+    });
+    const slots = decodeGeometryBatch(buildBatch([frame, "no geometry at /World"]));
+
+    expect(slots).toHaveLength(2);
+    expect(slots[0]).toBeTruthy();
+    expect(slots[1]).toBe(null);
+    const decoded = decodeGeometry(slots[0]!);
+    expect(Array.from(decoded.positions)).toEqual(Array.from(decodeGeometry(frame).positions));
+    expect(Array.from(decoded.indices)).toEqual([0, 1, 2]);
+  });
+
+  it("throws on bad magic and on trailing bytes", () => {
+    const frame = buildPayload({ flags: 0, positions: [[0, 0, 0]], indices: [0] });
+    const batch = buildBatch([frame]);
+    const view = new DataView(batch);
+    view.setUint32(0, 0x12345678, true);
+    expect(() => decodeGeometryBatch(batch)).toThrow(/magic/i);
+
+    const tooLong = new ArrayBuffer(64);
+    new Uint8Array(tooLong).set(new Uint8Array(buildBatch([frame])));
+    expect(() => decodeGeometryBatch(tooLong)).toThrow(/trailing/i);
   });
 });

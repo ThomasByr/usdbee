@@ -12,6 +12,7 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import * as THREE from "three";
 import type { MaterialInfo, RenderNode } from "../stage/types";
+import { decodeGeometryBatch } from "./geometryDecoder";
 import {
   applyTransform,
   buildScene,
@@ -44,6 +45,12 @@ const textureLoader = new THREE.TextureLoader();
 const fetchers: SceneFetchers = {
   getGeometry: (path: string, time = renderState.time) =>
     invoke<ArrayBuffer>("get_geometry_data", { path, time }),
+  // Load-time batch prefill: one invoke per slice of GEOMETRY_BATCH_SIZE
+  // paths, slots decoded here so sceneBuilder only sees per-path results.
+  getGeometryBatch: async (paths: string[], time = renderState.time) =>
+    decodeGeometryBatch(
+      await invoke<ArrayBuffer>("get_geometry_batch", { paths, time }),
+    ),
   getMaterial: (path: string) => invoke<MaterialInfo>("get_material_data", { path }).catch(() => null),
   loadTexture: (filePath: string, onError: () => void) => {
     try {

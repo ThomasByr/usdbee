@@ -76,6 +76,7 @@ pub fn run() {
             stage::get_prim_details,
             stage::get_scene_manifest,
             stage::get_geometry_data,
+            stage::get_geometry_batch,
             stage::get_material_data,
             omniverse::set_omniverse_url,
             omniverse::get_omniverse_url

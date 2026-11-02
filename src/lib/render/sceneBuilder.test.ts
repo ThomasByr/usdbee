@@ -5,7 +5,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three";
-import { buildScene, disposeScene } from "./sceneBuilder";
+import { buildScene, disposeScene, toBufferGeometry } from "./sceneBuilder";
 import * as materialConverter from "./materialConverter";
 import type { RenderNode } from "../stage/types";
 
@@ -355,6 +355,94 @@ describe("buildScene", () => {
     const mesh = group.getObjectByName("/World/Stroke")!.children[0] as THREE.Mesh;
     expect(mesh.isMesh).toBe(true);
     expect((mesh.material as THREE.MeshPhysicalMaterial).type).toBe("MeshPhysicalMaterial");
+  });
+
+  it("prefetches geometry in bounded sequential batches and decodes per path identically", async () => {
+    const paths = Array.from({ length: 70 }, (_, i) => `/World/M${i}`);
+    const manifest = [
+      node({
+        path: "/World",
+        children: paths.map((path) =>
+          node({ path, name: path.slice("/World/".length), type_name: "Mesh", has_geometry: true }),
+        ),
+      }),
+    ];
+    const getGeometry = vi.fn(async () => packedGeometry());
+    const getGeometryBatch = vi.fn(async (slice: string[], time?: number | null) => {
+      expect(time).toBe(5);
+      return slice.map(() => packedGeometry());
+    });
+    const group = await buildScene(
+      manifest,
+      { ...fetchers(), getGeometry, getGeometryBatch },
+      {},
+      5,
+    );
+
+    // ceil(70 / 32) invokes — the batching pin.
+    expect(getGeometryBatch).toHaveBeenCalledTimes(3);
+    expect(getGeometry).not.toHaveBeenCalled();
+    const calledPaths = getGeometryBatch.mock.calls.flatMap((call) => call[0]);
+    expect(calledPaths).toEqual(paths);
+
+    // Per-path decode parity: a batch slot builds the same geometry as the
+    // frame fetch path does.
+    const mesh = group.getObjectByName("/World/M0")!.children[0] as THREE.Mesh;
+    const perPath = toBufferGeometry(packedGeometry());
+    expect(mesh.geometry.getAttribute("position").count).toBe(
+      (perPath.getAttribute("position") as THREE.BufferAttribute).count,
+    );
+    expect(Array.from((mesh.geometry.getAttribute("position") as THREE.BufferAttribute).array)).toEqual(
+      Array.from((perPath.getAttribute("position") as THREE.BufferAttribute).array),
+    );
+  });
+
+  it("serves a failed batch slot fail-soft: node kept, no per-path retry", async () => {
+    const manifest = [
+      node({
+        path: "/World",
+        children: [
+          node({ path: "/World/Ok", name: "Ok", type_name: "Mesh", has_geometry: true }),
+          node({ path: "/World/Bad", name: "Bad", type_name: "Mesh", has_geometry: true }),
+        ],
+      }),
+    ];
+    const getGeometry = vi.fn(async (path: string) => packedGeometry());
+    const getGeometryBatch = vi.fn(async (slice: string[]) =>
+      slice.map((path) => (path === "/World/Ok" ? packedGeometry() : null)),
+    );
+    const group = await buildScene(manifest, { ...fetchers(), getGeometry, getGeometryBatch });
+
+    expect(group.getObjectByName("/World/Ok")!.children[0]).toBeTruthy();
+    const bad = group.getObjectByName("/World/Bad")!;
+    expect(bad).toBeTruthy();
+    expect(bad.children.filter((child) => (child as THREE.Mesh).isMesh)).toHaveLength(0);
+    expect(getGeometry, "failed slots stay failed — no per-path retry").not.toHaveBeenCalled();
+  });
+
+  it("falls back to per-path fetches when the whole batch command fails", async () => {
+    const manifest = [
+      node({
+        path: "/World",
+        children: [
+          node({ path: "/World/A", name: "A", type_name: "Mesh", has_geometry: true }),
+          node({ path: "/World/B", name: "B", type_name: "Mesh", has_geometry: true }),
+        ],
+      }),
+    ];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const getGeometry = vi.fn(async () => packedGeometry());
+    const getGeometryBatch = vi.fn(async () => {
+      throw new Error("no stage open");
+    });
+    const group = await buildScene(manifest, { ...fetchers(), getGeometry, getGeometryBatch });
+
+    expect(getGeometry).toHaveBeenCalledTimes(2);
+    expect(getGeometry).toHaveBeenCalledWith("/World/A", undefined);
+    expect(group.getObjectByName("/World/A")!.children[0]).toBeTruthy();
+    expect(group.getObjectByName("/World/B")!.children[0]).toBeTruthy();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("applies saved dependency fallback colors while building materials", async () => {

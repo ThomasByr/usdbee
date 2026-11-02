@@ -2,6 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -43,6 +44,14 @@ pub enum StageRequest {
         time: Option<f64>,
         reply: mpsc::Sender<Result<Vec<u8>, String>>,
     },
+    // One channel round trip for many geometry fetches (Phase 2.5 Task 3):
+    // per-slot fail-soft (a bad path becomes an error slot), framed by
+    // `frame_batch` so the whole batch either arrives complete or errors.
+    GetGeometryBatch {
+        paths: Vec<String>,
+        time: Option<f64>,
+        reply: mpsc::Sender<Result<Vec<u8>, String>>,
+    },
     GetMaterial {
         path: String,
         reply: mpsc::Sender<Result<MaterialInfo, String>>,
@@ -51,16 +60,33 @@ pub enum StageRequest {
 
 pub struct StageState {
     pub sender: mpsc::Sender<StageRequest>,
+    // Tessellations the owner's MeshCache filled since the last Open. Shared
+    // handle so tests (and any introspection) can count real tessellation
+    // work without reaching into the owner thread; used by the dedup pin.
+    tessellations: Arc<AtomicUsize>,
+}
+
+impl StageState {
+    pub fn mesh_tessellations(&self) -> usize {
+        self.tessellations.load(Ordering::Relaxed)
+    }
 }
 
 pub fn spawn_stage_owner() -> StageState {
     let (sender, receiver) = mpsc::channel();
+    let tessellations = Arc::new(AtomicUsize::new(0));
+    let owner_counter = tessellations.clone();
     thread::spawn(move || {
         let mut current_stage = None;
-        let mut mesh_cache = MeshCache::new();
+        let mut mesh_cache = MeshCache::with_counter(owner_counter.clone());
         // The time-independent manifest skeleton, built by the first manifest
         // call after an open; cleared on Open (like the geometry MeshCache).
         let mut manifest_skeleton: Option<ManifestSkeleton> = None;
+        // Requested-render-path -> geometry-cache-key resolutions, shared by
+        // the geometry/material arms; cleared on Open. Prototype resolution
+        // measured 0.4 ms/call (Task 1 profile c): memoizing turns repeats
+        // and batch dups into map lookups.
+        let mut resolve_memo = ResolveMemo::new();
         while let Ok(request) = receiver.recv() {
             match request {
                 StageRequest::Open { path, reply } => {
@@ -72,6 +98,8 @@ pub fn spawn_stage_owner() -> StageState {
                     .unwrap_or_else(panic_reply);
                     mesh_cache.clear();
                     manifest_skeleton = None;
+                    resolve_memo.clear();
+                    owner_counter.store(0, Ordering::Relaxed);
                     let _ = reply.send(response);
                 }
                 StageRequest::GetTree { reply } => {
@@ -118,7 +146,35 @@ pub fn spawn_stage_owner() -> StageState {
                 StageRequest::GetGeometry { path, time, reply } => {
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
-                            geometry_bytes(stage, &mut mesh_cache, &path, time)
+                            geometry_bytes(
+                                stage,
+                                &mut mesh_cache,
+                                &mut resolve_memo,
+                                &path,
+                                time,
+                            )
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::GetGeometryBatch { paths, time, reply } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            let slots = paths
+                                .iter()
+                                .map(|path| {
+                                    geometry_bytes(
+                                        stage,
+                                        &mut mesh_cache,
+                                        &mut resolve_memo,
+                                        path,
+                                        time,
+                                    )
+                                })
+                                .collect();
+                            Ok(frame_batch(slots))
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -129,8 +185,11 @@ pub fn spawn_stage_owner() -> StageState {
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
                             // Synthetic prototype children resolve their
-                            // material through the real prototype prim.
-                            let resolved = resolve_render_path(stage, &path)?.to_string();
+                            // material through the real prototype prim
+                            // (memoized per stage-open like the geometry
+                            // arms).
+                            let resolved =
+                                resolved_render_path(stage, &mut resolve_memo, &path)?.to_string();
                             material_info(stage, &resolved)
                         }))
                         .unwrap_or_else(panic_reply),
@@ -141,7 +200,7 @@ pub fn spawn_stage_owner() -> StageState {
             }
         }
     });
-    StageState { sender }
+    StageState { sender, tessellations }
 }
 
 fn panic_reply<T>(payload: Box<dyn Any + Send>) -> Result<T, String> {
@@ -945,6 +1004,9 @@ pub fn serialize_render_manifest(
 /// queried) -> mesh. `None` and `Some(t)` are distinct keys.
 pub struct MeshCache {
     entries: HashMap<(String, Option<u64>), Arc<MeshData>>,
+    // Shared with StageState so tessellation-filling work can be counted
+    // from outside the owner thread.
+    tessellations: Arc<AtomicUsize>,
 }
 
 impl Default for MeshCache {
@@ -960,11 +1022,19 @@ fn cache_key(key: (String, Option<f64>)) -> (String, Option<u64>) {
 }
 
 impl MeshCache {
-    const CAP: usize = 256;
+    // Kitchen_set_instanced tessellates 1,462 unique prototype meshes per
+    // load (pack bytes measured 14.7 MB total); 256 full-cleared twice per
+    // pass defeats the warm hit. The cap must hold a full scene.
+    const CAP: usize = 2048;
 
     pub fn new() -> Self {
+        Self::with_counter(Arc::new(AtomicUsize::new(0)))
+    }
+
+    pub fn with_counter(counter: Arc<AtomicUsize>) -> Self {
         Self {
             entries: HashMap::new(),
+            tessellations: counter,
         }
     }
 
@@ -973,11 +1043,13 @@ impl MeshCache {
     }
 
     pub fn insert(&mut self, key: (String, Option<f64>), mesh: Arc<MeshData>) {
-        // shortcut: primitive eviction — a full clear at the cap; measure real
-        // scenes before anything cleverer
+        // shortcut: primitive eviction — a full clear at the cap; measured rule: cap
+        // 2048 holds both benchmark heaps (kitchen 1,462 keys / 14.7 MB packed),
+        // raise further only if a scene exceeds it
         if !self.entries.contains_key(&cache_key(key.clone())) && self.entries.len() >= Self::CAP {
             self.entries.clear();
         }
+        self.tessellations.fetch_add(1, Ordering::Relaxed);
         self.entries.insert(cache_key(key), mesh);
     }
 
@@ -1082,6 +1154,74 @@ fn synthetic_prototype(path: &sdf::Path) -> Result<Option<(usize, sdf::Path)>, S
     }
 }
 
+/// Requested-path -> resolved geometry/material key, owner-thread state so
+/// identical prototype rebases across copies, batches and playback steps are
+/// map lookups instead of recomposed prim walks (0.4 ms measured each); Ok
+/// results only — a failed request keeps its readable error every time.
+struct ResolveMemo {
+    by_path: HashMap<String, String>,
+}
+
+impl ResolveMemo {
+    fn new() -> Self {
+        Self {
+            by_path: HashMap::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.by_path.clear();
+    }
+}
+
+/// Resolve a frontend-requested prim path for the geometry/material arms,
+/// through the per-stage-open memo.
+fn resolved_render_path(
+    stage: &Stage,
+    memo: &mut ResolveMemo,
+    path: &str,
+) -> Result<sdf::Path, String> {
+    match memo.by_path.get(path) {
+        Some(resolved) => sdf::try_into_path(resolved.as_str())
+            .map_err(|e| format!("invalid memoized path '{}': {}", resolved, e)),
+        None => {
+            let resolved = resolve_render_path(stage, path)?;
+            memo.by_path
+                .insert(path.to_owned(), resolved.to_string());
+            Ok(resolved)
+        }
+    }
+}
+
+/// Framed multi-slot geometry response (Phase 2.5 Task 3): little-endian
+/// u32 batch magic "USBG" (0x5553_4247), version 1, slot count, then per
+/// slot a status (0 ok / 1 err) + byte length + bytes (a USDB frame, or a
+/// UTF-8 error message). Mirrored by src/lib/render/geometryDecoder.ts.
+const BATCH_MAGIC: u32 = 0x5553_4247;
+const BATCH_VERSION: u32 = 1;
+
+fn frame_batch(slots: Vec<Result<Vec<u8>, String>>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + slots.len() * 4);
+    out.extend(BATCH_MAGIC.to_le_bytes());
+    out.extend(BATCH_VERSION.to_le_bytes());
+    out.extend((slots.len() as u32).to_le_bytes());
+    for slot in slots {
+        match slot {
+            Ok(bytes) => {
+                out.extend(0u32.to_le_bytes());
+                out.extend((bytes.len() as u32).to_le_bytes());
+                out.extend(bytes);
+            }
+            Err(error) => {
+                out.extend(1u32.to_le_bytes());
+                out.extend((error.len() as u32).to_le_bytes());
+                out.extend(error.into_bytes());
+            }
+        }
+    }
+    out
+}
+
 /// Packed geometry bytes for one prim, tessellating on demand and caching the
 /// result (keyed by the resolved path, so prototype children share one
 /// tessellation with the prototype prim). Missing prims and non-geometry
@@ -1090,10 +1230,11 @@ fn synthetic_prototype(path: &sdf::Path) -> Result<Option<(usize, sdf::Path)>, S
 fn geometry_bytes(
     stage: &Stage,
     cache: &mut MeshCache,
+    memo: &mut ResolveMemo,
     path: &str,
     time: Option<f64>,
 ) -> Result<Vec<u8>, String> {
-    let prim_path = resolve_render_path(stage, path)?;
+    let prim_path = resolved_render_path(stage, memo, path)?;
     let key = (prim_path.to_string(), time);
     if let Some(mesh) = cache.get(&key) {
         return Ok(pack_geometry(&mesh));
@@ -1205,6 +1346,38 @@ pub fn request_geometry_data(
     sender
         .send(StageRequest::GetGeometry {
             path: path.to_string(),
+            time,
+            reply,
+        })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Batched geometry (Phase 2.5 Task 3): one channel round trip for many
+// paths (the batch itself is bounded by the caller, at 32-64 in the
+// frontend); per-slot fail-soft, response framed by `frame_batch` over the
+// raw `tauri::ipc::Response` like the per-path bytes. The per-path command
+// is retained for step refetches/previews.
+#[tauri::command]
+pub async fn get_geometry_batch(
+    paths: Vec<String>,
+    time: Option<f64>,
+    state: tauri::State<'_, StageState>,
+) -> Result<tauri::ipc::Response, String> {
+    request_geometry_batch(&state.sender, &paths, time).map(tauri::ipc::Response::new)
+}
+
+pub fn request_geometry_batch(
+    sender: &mpsc::Sender<StageRequest>,
+    paths: &[String],
+    time: Option<f64>,
+) -> Result<Vec<u8>, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::GetGeometryBatch {
+            paths: paths.to_vec(),
             time,
             reply,
         })

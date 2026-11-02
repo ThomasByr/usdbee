@@ -498,3 +498,26 @@ fn cached_manifest_calls_do_not_freeze_time_dependent_structure() {
         .expect("manifest back at t=1 should serialize");
     assert_manifest_json_equal(&at_one, &back_to_one);
 }
+
+#[test]
+fn warm_manifest_resamples_sampled_visibility_per_time() {
+    // Owner-routed pin (Task 2 review follow-up): a prim's overall
+    // `visibility` field with time samples flips the manifest's `visible`
+    // flag per queried time. A skeleton cache that hoisted visibility
+    // (the one per-time imageable query Task 1 ruled must stay per-call)
+    // breaks the false -> true -> false sequence below.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "sampled_visibility.usda");
+
+    let at_one = request_scene_manifest(&state.sender, Some(1.0))
+        .expect("manifest at t=1 should serialize");
+    assert!(!expect(&at_one, "/Scene/Toggle").visible, "invisible at t=1");
+
+    let at_two = request_scene_manifest(&state.sender, Some(2.0))
+        .expect("manifest at t=2 should serialize");
+    assert!(expect(&at_two, "/Scene/Toggle").visible, "visible at t=2");
+
+    let back_to_one = request_scene_manifest(&state.sender, Some(1.0))
+        .expect("manifest back at t=1 should serialize");
+    assert!(!expect(&back_to_one, "/Scene/Toggle").visible, "re-samples at t=1");
+}

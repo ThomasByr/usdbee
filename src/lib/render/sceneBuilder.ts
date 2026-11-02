@@ -20,10 +20,28 @@ export type FallbackDependencies = Record<string, FallbackDependency>;
 
 export interface SceneFetchers {
   getGeometry: (path: string, time?: number | null) => Promise<ArrayBuffer>;
+  // Optional load-time prefill (Phase 2.5 Task 3): one batched backend call
+  // per slice of GEOMETRY_BATCH_SIZE paths; a slot value is the geometry
+  // frame bytes, null when that slot failed (fail-soft per path). Throws
+  // when the whole batch command fails; the builder then falls back to the
+  // per-path fetches, which stay the step-refetch path either way.
+  getGeometryBatch?: (
+    paths: string[],
+    time?: number | null,
+  ) => Promise<(ArrayBuffer | Uint8Array | null)[]>;
   // null = fetch failed; the builder falls back to a plain material.
   getMaterial: (path: string) => Promise<MaterialInfo | null>;
   loadTexture: MaterialTextureLoader;
 }
+
+// Bounded batch size: sequential batches keep the actor fed and memory flat
+// (the brief's ruling), and 32 keeps one response comfortably inside the
+// ~1 MB ipc::soft threshold per slot average.
+export const GEOMETRY_BATCH_SIZE = 32;
+
+// Managed "path -> fetch outcome" the builder allocates from load time:
+// geometry frame bytes (a batch slot) or null (that slot failed).
+type PrefetchedGeometry = Map<string, ArrayBuffer | Uint8Array | null>;
 
 // USD row-major row-vector matrices and three.js column-major column-vector
 // matrices store the same 16 numbers in the same order (translation at
@@ -51,13 +69,67 @@ async function fetchGeometry(
   node: RenderNode,
   fetchers: SceneFetchers,
   time?: number | null,
+  prefetched: PrefetchedGeometry = new Map(),
 ): Promise<THREE.BufferGeometry | null> {
+  const prefill = prefetched.get(node.path);
+  if (prefill !== undefined) {
+    prefetched.delete(node.path);
+    if (prefill === null) return null; // failed batch slot; already warn-free
+    try {
+      return toBufferGeometry(prefill);
+    } catch (e) {
+      console.warn(`usdbee: skipping geometry at ${node.path}:`, e);
+      return null;
+    }
+  }
   try {
     return toBufferGeometry(await fetchers.getGeometry(node.path, time));
   } catch (e) {
     console.warn(`usdbee: skipping geometry at ${node.path}:`, e);
     return null;
   }
+}
+
+// Collects the walk order of every geometry path so the builder can
+// prefetch them in bounded sequential batches before building nodes.
+function geometryPaths(manifest: RenderNode[]): string[] {
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  const walk = (nodes: RenderNode[]) => {
+    for (const node of nodes) {
+      if (node.has_geometry) {
+        seen.add(node.path);
+        paths.push(node.path);
+      }
+      walk(node.children);
+    }
+  };
+  walk(manifest);
+  return paths;
+}
+
+async function preloadGeometry(
+  manifest: RenderNode[],
+  fetchers: SceneFetchers,
+  time?: number | null,
+): Promise<PrefetchedGeometry> {
+  const prefetched: PrefetchedGeometry = new Map();
+  const paths = geometryPaths(manifest);
+  const getGeometryBatch = fetchers.getGeometryBatch;
+  if (!getGeometryBatch) return prefetched;
+  for (let start = 0; start < paths.length; start += GEOMETRY_BATCH_SIZE) {
+    const slice = paths.slice(start, start + GEOMETRY_BATCH_SIZE);
+    try {
+      const slots = await getGeometryBatch(slice, time);
+      slice.forEach((path, slot) => prefetched.set(path, slots[slot] ?? null));
+    } catch (e) {
+      // Whole batch failed: leave unfetched so the per-path fetches still
+      // run fail-soft inside buildNode.
+      console.warn("usdbee: geometry batch failed; fetching per path:", e);
+      break;
+    }
+  }
+  return prefetched;
 }
 
 function fallbackColorFor(info: MaterialInfo, dependencies: FallbackDependencies): string | null {
@@ -102,6 +174,7 @@ async function buildNode(
   dependencies: FallbackDependencies,
   time?: number | null,
   instancing: InstanceContext | null = null,
+  prefetched: PrefetchedGeometry = new Map(),
 ): Promise<THREE.Object3D> {
   const object = new THREE.Group();
   object.name = node.path;
@@ -132,7 +205,7 @@ async function buildNode(
   object.visible = node.visible;
 
   if (node.has_geometry) {
-    const geometry = await fetchGeometry(node, fetchers, time);
+    const geometry = await fetchGeometry(node, fetchers, time, prefetched);
     if (geometry) {
       if (node.type_name === "Points") {
         // Point clouds: a size-based PointsMaterial colored by the vertex
@@ -184,7 +257,7 @@ async function buildNode(
   }
 
   for (const child of node.children) {
-    object.add(await buildNode(child, fetchers, dependencies, time, childContext));
+    object.add(await buildNode(child, fetchers, dependencies, time, childContext, prefetched));
   }
   return object;
 }
@@ -195,9 +268,10 @@ export async function buildScene(
   dependencies: FallbackDependencies = {},
   time?: number | null,
 ): Promise<THREE.Group> {
+  const prefetched = await preloadGeometry(manifest, fetchers, time);
   const root = new THREE.Group();
   for (const node of manifest) {
-    root.add(await buildNode(node, fetchers, dependencies, time));
+    root.add(await buildNode(node, fetchers, dependencies, time, null, prefetched));
   }
   return root;
 }

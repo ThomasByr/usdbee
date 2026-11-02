@@ -1,0 +1,20 @@
+#usda 1.0
+(
+    defaultPrim = "Scene"
+    startTimeCode = 0
+    endTimeCode = 2
+)
+
+def Xform "Scene"
+{
+    def Sphere "Toggle"
+    {
+        # Overall visibility authored over time: the warm manifest walk
+        # must re-sample this per call, never hoist it into the static
+        # skeleton cache.
+        token visibility.timeSamples = {
+            1: "invisible",
+            2: "inherited",
+        }
+    }
+}

@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use usdbee_lib::stage::{
-    request_geometry_data, request_scene_manifest, spawn_stage_owner, MeshCache, RenderNode,
-    StageState,
+    request_geometry_batch, request_geometry_data, request_scene_manifest, spawn_stage_owner,
+    MeshCache, RenderNode, StageState,
 };
 use usdbee_lib::tessellation::{pack_geometry, MeshData};
 
@@ -185,6 +185,136 @@ fn geometry_without_open_stage_fails() {
 }
 
 #[test]
+fn batch_round_trip_frames_slots_fail_soft_per_path() {
+    // One channel round trip: a good USDB frame, a missing prim and a
+    // non-geometry prim each land as error slots without aborting the batch.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "basic.usda");
+
+    let bytes = request_geometry_batch(
+        &state.sender,
+        &[
+            "/World/Ball".to_string(),
+            "/World/Nope".to_string(),
+            "/World".to_string(),
+        ],
+        None,
+    )
+    .expect("batch should frame");
+
+    assert_eq!(u32_le(&bytes, 0), 0x5553_4247, "batch magic 'USBG'");
+    assert_eq!(u32_le(&bytes, 4), 1, "batch version 1");
+    assert_eq!(u32_le(&bytes, 8), 3, "slot count");
+    let mut offset: usize = 12;
+    let slot = |bytes: &[u8], offset: &mut usize| -> (u32, Vec<u8>) {
+        let status = u32_le(bytes, *offset);
+        let len = u32_le(bytes, *offset + 4) as usize;
+        let payload = bytes[*offset + 8..*offset + 8 + len].to_vec();
+        *offset += 8 + len;
+        (status, payload)
+    };
+
+    let (status, payload) = slot(&bytes, &mut offset);
+    assert_eq!(status, 0, "first slot: ok");
+    assert_eq!(u32_le(&payload, 0), 0x5553_4442, "slot bytes are a USDB frame");
+    assert_eq!(u32_le(&payload, 8), 3, "Ball vertex count");
+
+    let (status, payload) = slot(&bytes, &mut offset);
+    assert_eq!(status, 1, "missing prim: error slot");
+    let error = String::from_utf8_lossy(&payload);
+    assert!(
+        error.contains("/World/Nope"),
+        "error names the path: {}",
+        error
+    );
+
+    let (status, payload) = slot(&bytes, &mut offset);
+    assert_eq!(status, 1, "non-geometry prim: error slot");
+    let error = String::from_utf8_lossy(&payload);
+    assert!(
+        error.contains("no geometry at /World"),
+        "error says no geometry: {}",
+        error
+    );
+    assert_eq!(offset, bytes.len(), "no trailing bytes");
+}
+
+#[test]
+fn empty_batch_frames_zero_slots() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "basic.usda");
+
+    let bytes = request_geometry_batch(&state.sender, &[], None).expect("empty batch");
+
+    assert_eq!(u32_le(&bytes, 0), 0x5553_4247);
+    assert_eq!(u32_le(&bytes, 8), 0, "no slots");
+    assert_eq!(bytes.len(), 12);
+}
+
+#[test]
+fn batch_without_open_stage_fails() {
+    let state = spawn_stage_owner();
+    let error = request_geometry_batch(&state.sender, &["/World/Ball".to_string()], None)
+        .expect_err("no stage open must fail");
+    assert_eq!(error, "no stage open");
+}
+
+#[test]
+fn two_instance_copies_of_one_prototype_tessellate_once_and_serve_warm() {
+    // The dedup pin: two instance-proxy request paths of one prototype
+    // resolve to the shared prototype prim, so one batch serves both slots
+    // from a single tessellation, byte-equal — and a repeat batch serves
+    // both from the MeshCache without any new tessellation.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "instanced.usda");
+    assert_eq!(state.mesh_tessellations(), 0);
+
+    let batch_paths = vec![
+        "/Scene/WheelA/WheelMesh".to_string(),
+        "/Scene/WheelB/WheelMesh".to_string(),
+    ];
+    let bytes =
+        request_geometry_batch(&state.sender, &batch_paths, None).expect("batch should frame");
+
+    let slot_bytes = |bytes: &[u8], offset: &mut usize| -> (u32, Vec<u8>) {
+        let status = u32_le(bytes, *offset);
+        let len = u32_le(bytes, *offset + 4) as usize;
+        let payload = bytes[*offset + 8..*offset + 8 + len].to_vec();
+        *offset += 8 + len;
+        (status, payload)
+    };
+    let mut offset = 12;
+    let (first_status, first) = slot_bytes(&bytes, &mut offset);
+    let (second_status, second) = slot_bytes(&bytes, &mut offset);
+    assert_eq!(first_status, 0, "WheelA copy: ok");
+    assert_eq!(second_status, 0, "WheelB copy: ok");
+    assert_eq!(
+        first, second,
+        "both copies resolve to one prototype mesh: byte-identical"
+    );
+    assert_eq!(
+        state.mesh_tessellations(),
+        1,
+        "one shared tessellation served both copies"
+    );
+
+    let repeat =
+        request_geometry_batch(&state.sender, &batch_paths, None).expect("repeat batch");
+    assert_eq!(repeat, bytes, "repeat batch serves warm from the MeshCache");
+    assert_eq!(
+        state.mesh_tessellations(),
+        1,
+        "warm hits: no fresh tessellation"
+    );
+
+    // A single-path request of the same copy also hits the warm cache.
+    let warm = request_geometry_data(&state.sender, "/Scene/WheelA/WheelMesh", None)
+        .expect("per-path refetch stays warm");
+    assert_eq!(u32_le(&warm, 0), 0x5553_4442);
+    assert_eq!(state.mesh_tessellations(), 1);
+}
+
+#[test]
 fn manifest_matches_authored_hierarchy_transforms_and_flags() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "basic.usda");
@@ -223,21 +353,20 @@ fn manifest_matches_authored_hierarchy_transforms_and_flags() {
 }
 
 #[test]
-fn mesh_cache_caps_at_256_by_clearing() {
+fn mesh_cache_caps_at_2048_by_clearing() {
     let mut cache = MeshCache::new();
-    for i in 0..256 {
+    for i in 0..2048 {
         cache.insert((format!("/M{}", i), None), stub_mesh());
     }
-    assert_eq!(cache.len(), 256);
+    assert_eq!(cache.len(), 2048);
     assert!(cache.get(&("/M0".into(), None)).is_some());
 
-    // shortcut: 257th distinct insert clears everything, keeps just the new entry
-    cache.insert(("/M256".into(), None), stub_mesh());
+    // shortcut: 2049th distinct insert clears everything, keeps just the new entry
+    cache.insert(("/M2048".into(), None), stub_mesh());
     assert_eq!(cache.len(), 1);
-    assert!(cache.get(&("/M256".into(), None)).is_some());
+    assert!(cache.get(&("/M2048".into(), None)).is_some());
     assert!(cache.get(&("/M0".into(), None)).is_none());
 }
-
 #[test]
 fn mesh_cache_distinguishes_none_and_some_time_keys() {
     let mut cache = MeshCache::new();
