@@ -140,16 +140,32 @@ function node(overrides: Partial<RenderNode>): RenderNode {
   };
 }
 
-// Dispatches the three IPC commands sceneBuilder drives; `manifest`
+// Dispatches the IPC commands sceneBuilder drives; `manifest`
 // supplies the answer for get_scene_manifest.
 function mockIpc(manifest: () => RenderNode[] | Promise<RenderNode[]>) {
   const dispatcher = async (cmd: string) => {
     if (cmd === "get_scene_manifest") return manifest();
     if (cmd === "get_geometry_data") return packedGeometry();
+    if (cmd === "get_geometry_batch") return packedBatchGeometry();
     if (cmd === "get_material_data") return { name: "Mat", surface: null };
     throw new Error(`unexpected command: ${cmd}`);
   };
   mockedInvoke.mockImplementation(dispatcher as any);
+}
+
+// One ok slot carrying the default triangle frame (geometryDecoder layout:
+// batch magic, version, count, then status/length/padded bytes per slot).
+function packedBatchGeometry(): ArrayBuffer {
+  const frame = new Uint8Array(packedGeometry());
+  const buffer = new ArrayBuffer(12 + 8 + ((frame.byteLength + 3) & ~3));
+  const view = new DataView(buffer);
+  view.setUint32(0, 0x55534247, true);
+  view.setUint32(4, 1, true);
+  view.setUint32(8, 1, true);
+  view.setUint32(12, 0, true);
+  view.setUint32(16, frame.byteLength, true);
+  new Uint8Array(buffer, 20, frame.byteLength).set(frame);
+  return buffer;
 }
 
 async function loadScene(manifest: () => RenderNode[] | Promise<RenderNode[]>) {
@@ -647,6 +663,74 @@ describe("renderState.setStageTime", () => {
       .map(([, args]) => (args as any).time);
     expect(geometryTimes).toEqual([5, 6]);
     expect(renderState.time).toBe(6);
+  });
+});
+
+describe("renderState.refreshAfterEdit", () => {
+  it("patches an edited prim in place through the batched geometry fetch", async () => {
+    const shape = node({
+      path: "/Scene/Shape",
+      name: "Shape",
+      type_name: "Mesh",
+      has_geometry: true,
+      transform: translate(1),
+    });
+    const group = await loadScene(() => [shape]);
+    const mesh = findMesh(group);
+    expect(mesh.geometry.getAttribute("position").getY(2)).toBe(1);
+
+    mockIpc(() => [node({ ...shape, transform: translate(5) })]);
+    const rebuild = await renderState.refreshAfterEdit(["/Scene/Shape"]);
+
+    // In-place: no rebuild, the transform moved, and the geometry came
+    // from the BATCH command (a 1-element batch for a single path).
+    expect(rebuild).toBe(false);
+    expect(mockedInvoke).toHaveBeenCalledWith("get_geometry_batch", {
+      paths: ["/Scene/Shape"],
+      time: 0,
+    });
+    expect(mockedInvoke).not.toHaveBeenCalledWith("get_geometry_data", expect.anything());
+    const wrapper = group.children.find((child) => child.name === "/Scene/Shape");
+    expect(wrapper!.matrix.elements[12]).toBe(5);
+    expect(mesh.geometry.getAttribute("position").getY(2)).toBe(1);
+  });
+
+  it("reports a needed rebuild when an affected prim gains a child", async () => {
+    const holder = node({ path: "/Scene/Holder", name: "Holder", type_name: "Xform" });
+    await loadScene(() => [holder]);
+
+    mockIpc(() => [
+      node({
+        path: "/Scene/Holder",
+        name: "Holder",
+        type_name: "Xform",
+        children: [node({ path: "/Scene/Holder/New", name: "New", type_name: "Mesh", has_geometry: true })],
+      }),
+    ]);
+    const rebuild = await renderState.refreshAfterEdit(["/Scene/Holder"]);
+    expect(rebuild).toBe(true);
+  });
+
+  it("coalesces behind an active step and conservatively reports a rebuild", async () => {
+    const shape = node({ path: "/Scene/Shape", name: "Shape", type_name: "Mesh", has_geometry: true });
+    await loadScene(() => [shape]);
+    const active = deferred<RenderNode[]>();
+    let calls = 0;
+    mockIpc(() => {
+      calls += 1;
+      return calls === 1 ? active.promise : [shape];
+    });
+
+    const step = renderState.setStageTime(5);
+    const rebuild = renderState.refreshAfterEdit(["/Scene/Shape"]);
+    expect(await rebuild).toBe(true);
+    active.resolve([shape]);
+    await step;
+    await Promise.resolve();
+
+    // The queued refresh ran behind the active step (same slot, same
+    // generation guards) — two manifest fetches total.
+    expect(calls).toBe(2);
   });
 });
 

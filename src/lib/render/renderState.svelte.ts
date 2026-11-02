@@ -17,6 +17,7 @@ import {
   applyTransform,
   buildScene,
   disposeScene,
+  GEOMETRY_BATCH_SIZE,
   toBufferGeometry,
   type FallbackDependencies,
   type InstanceContext,
@@ -26,11 +27,15 @@ import {
 let loadGeneration = 0;
 let sceneLoading = false;
 let timeStepInFlight = false;
-let activeTimeStep: Promise<void> | null = null;
+// The in-flight step is either a time step (void) or an edit refresh
+// (boolean: true when the caller must fall back to a full rebuild).
+let activeTimeStep: Promise<unknown> | null = null;
 // Promise covering the whole in-flight load (including its queued refresh);
 // resolves even on failure so waiting time steps never hang.
 let loadPromise: Promise<void> | null = null;
 let queuedTime: number | null = null;
+// An edit refresh queued behind a load or an active step (Phase 3 Task 4).
+let queuedRefresh: string[] | null = null;
 
 // The group + path->object index of the last successfully built scene.
 // loadRenderScene hands the group to the caller (which integrates it into
@@ -109,12 +114,17 @@ function indexByPath(group: THREE.Group): Map<string, THREE.Object3D> {
 // Applies the manifest's time state to the integrated scene. Animated
 // geometry is rebuilt; instanced prototypes can appear, disappear, or
 // change count as invisibleIds changes. Every await is generation-guarded.
+// `refreshPaths` (edit refresh) additionally force-refetches geometry for
+// the affected prims — an edit can swap geometry on a non-animated node —
+// consuming slots from the batched `prefetched` map first.
 async function updateNodes(
   nodes: RenderNode[],
   byPath: Map<string, THREE.Object3D>,
   time: number,
   isStale: () => boolean,
   instancing: InstanceContext | null = null,
+  refreshPaths: Set<string> | null = null,
+  prefetched: Map<string, ArrayBuffer | Uint8Array | null> | null = null,
 ): Promise<void> {
   for (const node of nodes) {
     if (isStale()) return;
@@ -161,17 +171,31 @@ async function updateNodes(
       const wrapper = isDrawable ? object.parent! : object;
       if (!isSubtreeNode) applyTransform(wrapper, node.transform);
       wrapper.visible = node.visible;
-      if (node.animated && isDrawable) {
+      const refreshing = refreshPaths !== null && refreshPaths.has(node.path);
+      if (isDrawable && (node.animated || refreshing)) {
         // Only geometry whose OWN attrs carry time samples changes per
         // step; transform-only animated nodes (the bulk of instanced/
-        // xform-driven scenes) keep their load-time geometry forever.
-        if (node.geometry_animated) {
+        // xform-driven scenes) keep their load-time geometry forever. An
+        // edit refresh refetches the affected prim regardless.
+        if (node.geometry_animated || refreshing) {
           if (isStale()) return;
           try {
-            const geometry = toBufferGeometry(await fetchers.getGeometry(node.path, time));
+            // Edit refreshes consume the batched slots first (a failed
+            // slot keeps the last geometry, fail-soft like playback); the
+            // per-path command stays the playback-step path.
+            const pre = prefetched?.get(node.path);
+            prefetched?.delete(node.path);
+            const frame = pre !== undefined ? pre : await fetchers.getGeometry(node.path, time);
             if (isStale()) return;
-            drawable.geometry.dispose();
-            drawable.geometry = geometry;
+            if (frame) {
+              const geometry = toBufferGeometry(frame);
+              if (isStale()) {
+                geometry.dispose();
+                return;
+              }
+              drawable.geometry.dispose();
+              drawable.geometry = geometry;
+            }
           } catch (e) {
             console.warn(`usdbee: keeping last geometry at ${node.path}:`, e);
           }
@@ -207,11 +231,17 @@ async function updateNodes(
         }
       }
     }
-    await updateNodes(node.children, byPath, time, isStale, context);
+    await updateNodes(node.children, byPath, time, isStale, context, refreshPaths, prefetched);
   }
 }
 
-async function updateScene(nodes: RenderNode[], time: number, isStale: () => boolean): Promise<void> {
+async function updateScene(
+  nodes: RenderNode[],
+  time: number,
+  isStale: () => boolean,
+  refreshPaths: Set<string> | null = null,
+  prefetched: Map<string, ArrayBuffer | Uint8Array | null> | null = null,
+): Promise<void> {
   const present = new Set<string>();
   const collect = (entries: RenderNode[]) => {
     for (const node of entries) {
@@ -220,13 +250,99 @@ async function updateScene(nodes: RenderNode[], time: number, isStale: () => boo
     }
   };
   collect(nodes);
-  await updateNodes(nodes, currentPaths, time, isStale);
+  await updateNodes(nodes, currentPaths, time, isStale, null, refreshPaths, prefetched);
   if (isStale()) return;
   for (const [path, object] of currentPaths) {
     if ((object as THREE.InstancedMesh).isInstancedMesh && !present.has(path)) {
       object.parent!.visible = false;
     }
   }
+}
+
+// Geometry for the edit-refreshed prims, fetched through the BATCH
+// command (ruling: a single-path refresh is a 1-element batch) in
+// bounded sequential slices. A failed batch command leaves the map
+// unfilled and updateNodes falls back to per-path fetches, fail-soft.
+async function prefetchEditGeometry(
+  manifest: RenderNode[],
+  refreshPaths: Set<string>,
+  time: number,
+): Promise<Map<string, ArrayBuffer | Uint8Array | null>> {
+  const prefetched = new Map<string, ArrayBuffer | Uint8Array | null>();
+  const paths: string[] = [];
+  const walk = (nodes: RenderNode[]) => {
+    for (const node of nodes) {
+      if (node.has_geometry && refreshPaths.has(node.path)) paths.push(node.path);
+      walk(node.children);
+    }
+  };
+  walk(manifest);
+  for (let start = 0; start < paths.length; start += GEOMETRY_BATCH_SIZE) {
+    const slice = paths.slice(start, start + GEOMETRY_BATCH_SIZE);
+    try {
+      const slots = await fetchers.getGeometryBatch!(slice, time);
+      slice.forEach((path, slot) => prefetched.set(path, slots[slot] ?? null));
+    } catch (e) {
+      console.warn("usdbee: edit-refresh geometry batch failed; fetching per path:", e);
+      break;
+    }
+  }
+  return prefetched;
+}
+
+// Whether an edit changed the scene STRUCTURE below any affected path:
+// prims appearing or vanishing (variant swaps, edits that add children)
+// cannot be patched in place — the caller must rebuild the scene. Bounded
+// to the affected subtrees, not the whole manifest.
+function structureChanged(
+  manifest: RenderNode[],
+  refreshPaths: Set<string>,
+  byPath: Map<string, THREE.Object3D>,
+): boolean {
+  const manifestNodes = new Map<string, RenderNode>();
+  const walk = (nodes: RenderNode[]) => {
+    for (const node of nodes) {
+      manifestNodes.set(node.path, node);
+      walk(node.children);
+    }
+  };
+  walk(manifest);
+  for (const path of refreshPaths) {
+    const node = manifestNodes.get(path);
+    // The path index maps a prim with geometry to its MESH (it shadows
+    // the wrapper); the wrapper carries the subtree, so compare from it.
+    let object = byPath.get(path);
+    if (object && (object as THREE.Mesh).isMesh && object.parent && object.parent.name === path) {
+      object = object.parent;
+    }
+    if (!node && object) return true; // prim vanished from the stage
+    if (!node && !object) continue; // prim not rendered (details-only)
+    if (node && !object) return true; // prim appeared — needs a build
+    const sceneNames = new Set<string>();
+    object!.traverse((child) => {
+      if (child.name) sceneNames.add(child.name);
+    });
+    let missing = false;
+    const walkSubtree = (entry: RenderNode) => {
+      if (!sceneNames.has(entry.path)) {
+        missing = true;
+        return;
+      }
+      entry.children.forEach(walkSubtree);
+    };
+    walkSubtree(node!);
+    if (missing) return true;
+    const subtree = new Set<string>();
+    const collect = (entry: RenderNode) => {
+      subtree.add(entry.path);
+      entry.children.forEach(collect);
+    };
+    collect(node!);
+    for (const name of sceneNames) {
+      if (!subtree.has(name)) return true; // stale object below the prim
+    }
+  }
+  return false;
 }
 
 export const renderState = $state({
@@ -260,6 +376,9 @@ export const renderState = $state({
     const generation = ++loadGeneration;
     sceneLoading = true;
     queuedTime = null;
+    // A rebuild supersedes any queued edit refresh (the load re-fetches
+    // everything anyway) — drop it like a queued time step.
+    queuedRefresh = null;
     this.time = startTime;
     this.onTimeChange?.(startTime);
     this.status = "loading";
@@ -283,6 +402,9 @@ export const renderState = $state({
       const pendingTime = queuedTime;
       queuedTime = null;
       if (pendingTime !== null) await this.setStageTime(pendingTime);
+      const pendingRefresh = queuedRefresh;
+      queuedRefresh = null;
+      if (pendingRefresh !== null) await this.refreshAfterEdit(pendingRefresh);
       return group;
     } catch (e) {
       if (generation !== loadGeneration) return null;
@@ -310,11 +432,11 @@ export const renderState = $state({
     if (sceneLoading) {
       queuedTime = time;
       // Resolve only once the load (and its queued refresh) has run.
-      return loadPromise ?? activeTimeStep ?? Promise.resolve();
+      return (loadPromise ?? activeTimeStep ?? Promise.resolve()) as Promise<void>;
     }
     if (timeStepInFlight) {
       queuedTime = time;
-      return activeTimeStep ?? Promise.resolve();
+      return (activeTimeStep as Promise<void>) ?? Promise.resolve();
     }
     const generation = ++loadGeneration;
     const group = currentGroup;
@@ -343,10 +465,67 @@ export const renderState = $state({
           // awaited so a queued-completion caller still resolves after the
           // load's refresh applied.
           if (pendingTime !== null) void this.setStageTime(pendingTime);
+          const pendingRefresh = queuedRefresh;
+          queuedRefresh = null;
+          if (pendingRefresh !== null) void this.refreshAfterEdit(pendingRefresh);
         }
       }
     })();
-    return activeTimeStep;
+    return activeTimeStep as Promise<void>;
+  },
+
+  // Edit refresh (Phase 3 Task 4): after usd-stage-changed, re-fetch the
+  // affected prims' node transforms + geometry IN PLACE — one manifest
+  // fetch plus one batched geometry fetch for the affected paths — through
+  // the same generation-guard/coalescing machinery as playback steps, so
+  // refreshes never fight the bounded drain. Resolves true when the edit
+  // changed the scene structure (or the refresh was coalesced away and
+  // the verdict is unknown): the caller then falls back to a full rebuild.
+  refreshAfterEdit(paths: string[]): Promise<boolean> {
+    if (sceneLoading || timeStepInFlight) {
+      queuedRefresh = paths;
+      // shortcut: the coalesced drain loses the rebuild verdict, so a
+      // coalesced caller conservatively rebuilds the whole scene.
+      return Promise.resolve(true);
+    }
+    const generation = ++loadGeneration;
+    const group = currentGroup;
+    if (!group) return Promise.resolve(false);
+    timeStepInFlight = true;
+    activeTimeStep = (async (): Promise<boolean> => {
+      try {
+        const time = this.time ?? 0;
+        const manifest = await invoke<RenderNode[]>("get_scene_manifest", { time });
+        if (generation !== loadGeneration || currentGroup !== group) return true;
+        const refreshPaths = new Set(paths);
+        const prefetched = await prefetchEditGeometry(manifest, refreshPaths, time);
+        if (generation !== loadGeneration || currentGroup !== group) return true;
+        const structural = structureChanged(manifest, refreshPaths, currentPaths);
+        const isStale = () => generation !== loadGeneration || currentGroup !== group;
+        await updateScene(manifest, time, isStale, refreshPaths, prefetched);
+        if (isStale()) return true;
+        return structural;
+      } catch (e) {
+        // Keep the last good scene on screen; surface why. A failed
+        // refresh is not known to have applied — caller rebuilds.
+        if (generation === loadGeneration) {
+          this.error = typeof e === "string" ? e : String(e);
+        }
+        return true;
+      } finally {
+        timeStepInFlight = false;
+        activeTimeStep = null;
+        if (!sceneLoading) {
+          const pendingTime = queuedTime;
+          queuedTime = null;
+          if (pendingTime !== null) void this.setStageTime(pendingTime);
+          const pendingRefresh = queuedRefresh;
+          queuedRefresh = null;
+          if (pendingRefresh !== null) void this.refreshAfterEdit(pendingRefresh);
+        }
+      }
+    })();
+    return activeTimeStep as Promise<boolean>;
   },
 
   // Animated content refresh: a full re-load at the current stage time,

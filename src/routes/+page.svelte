@@ -32,6 +32,8 @@
     toPlayheadOffset,
   } from "$lib/render/renderState.svelte";
   import { disposeScene } from "$lib/render/sceneBuilder";
+  import { TransformGizmo, type GizmoCommit } from "$lib/render/transformGizmo";
+  import { composeOpUpdate, matricesClose, type GizmoMode } from "$lib/render/xformOps";
   import type { StageInfo } from "$lib/stage/types";
   import { stageModalErrorLines } from "$lib/stage/modalErrors";
   import { upAxisRotation } from "$lib/stage/upAxis";
@@ -65,6 +67,13 @@
   let lightElevation = $state<number>(45); // Degrees (0 to 90)
 
   let showFovSlider = $state<boolean>(false);
+
+  // Transform gizmo (Phase 3 Task 4): attached to a scene-root proxy at the
+  // selected prim's world transform; commits author through Task 1's
+  // set_attribute_value and the usd-stage-changed refresh re-anchors it.
+  let gizmo = $state<TransformGizmo | null>(null);
+  let gizmoMode = $state<GizmoMode>("translate");
+  let gizmoError = $state<string | null>(null);
 
   // Hierarchy Tree State
   let expandedNodes = $state<Record<string, boolean>>({});
@@ -194,6 +203,119 @@
   $effect(() => {
     if (viewer.scene) viewer.scene.background = new THREE.Color(viewer.backgroundColor);
   });
+
+  // --- Transform gizmo (Phase 3, Task 4) -------------------------------
+
+  // A gizmo needs a world matrix to anchor to and a local stack it can
+  // author into. Instance selections and stacks the Phase 1 evaluator
+  // refuses (orient, unsupported pivots, no authored ops) disable it with
+  // a readable status — no data beats wrong data.
+  const gizmoGate = $derived.by(() => {
+    const details = stageState.details;
+    if (!stageState.selectedPath || !details) return { attachable: false, message: null };
+    if (!details.is_active) {
+      return {
+        attachable: false,
+        message: "prim is inactive; reactivate it before editing",
+      };
+    }
+    if (details.is_instance) {
+      return {
+        attachable: false,
+        message: `instance — edit the prototype at ${details.instance_of ?? "?"}`,
+      };
+    }
+    if (!details.local_transform || !details.world_transform) {
+      return {
+        attachable: false,
+        message: "transform stack not editable (unsupported or unauthored ops)",
+      };
+    }
+    return { attachable: true, message: null };
+  });
+
+  const gizmoMessage = $derived(gizmoError ?? gizmoGate.message);
+
+  // The prim's world matrix in VIEWPORT space: the USD world transform
+  // composed with the loaded group's recentering + up-axis transform.
+  function gizmoWorldMatrix(): THREE.Matrix4 | null {
+    const details = stageState.details;
+    if (!details?.world_transform) return null;
+    const world = new THREE.Matrix4().fromArray(details.world_transform);
+    const group = viewer.loadedGroup;
+    if (group) {
+      group.updateMatrixWorld();
+      world.premultiply(group.matrixWorld);
+    }
+    return world;
+  }
+
+  // Commit errors clear with the next selection; a fresh anchor snaps the
+  // proxy back to stage truth (also the failure path: a refused commit
+  // leaves details unchanged, so the re-anchor undoes the drag).
+  $effect(() => {
+    const _path = stageState.details?.path;
+    gizmoError = null;
+  });
+
+  $effect(() => {
+    const kit = gizmo;
+    const gate = gizmoGate;
+    if (!kit) return;
+    kit.controls.setMode(gizmoMode);
+    if (!gate.attachable) {
+      kit.detach();
+      return;
+    }
+    const world = gizmoWorldMatrix();
+    if (world) kit.attach(world);
+  });
+
+  // Drag end -> desired USD local matrix -> the op(s) to author. The
+  // parent/world chain cancels in the start/end ratio, so no ancestor
+  // walk is needed: L' = L * inv(startWorld) * endWorld.
+  async function handleGizmoCommit(commit: GizmoCommit) {
+    const details = stageState.details;
+    if (!details?.local_transform || !details.world_transform) return;
+    const local = new THREE.Matrix4().fromArray(details.local_transform);
+    const target = local
+      .clone()
+      .multiply(commit.startWorld.clone().invert())
+      .multiply(commit.endWorld)
+      .toArray() as number[];
+    if (matricesClose(target, details.local_transform)) {
+      gizmo?.attach(gizmoWorldMatrix() ?? commit.endWorld);
+      return;
+    }
+    const orderAttribute = details.attributes.find((a) => a.name === "xformOpOrder");
+    const order = Array.isArray(orderAttribute?.value.data) ? (orderAttribute!.value.data as string[]) : [];
+    const result = composeOpUpdate({
+      mode: gizmoMode,
+      order,
+      attrs: details.attributes,
+      localMatrix: details.local_transform,
+      targetLocalMatrix: target,
+    });
+    if (!result.ok) {
+      gizmoError = result.error;
+      gizmo?.attach(gizmoWorldMatrix() ?? commit.endWorld);
+      return;
+    }
+    for (const write of result.writes) {
+      // xformOpOrder is uniform: it authors its default, never a time
+      // sample; the op values author at the viewer's current time code.
+      const error = await stageState.setAttributeValue(
+        write.name,
+        { type: write.type, data: write.data },
+        write.name === "xformOpOrder" ? null : undefined,
+      );
+      if (error !== null) {
+        gizmoError = error;
+        break;
+      }
+    }
+    gizmo?.attach(gizmoWorldMatrix() ?? commit.endWorld);
+  }
 
   $effect(() => {
     viewer.showExportModal = showExportModal;
@@ -459,12 +581,10 @@
       listen("usd-scene-loaded", (event: any) => {
         void handleSceneLoaded(event.payload);
       }),
-      // An edit landed (value, metadata, variant selection): the tree and
-      // the selected prim re-query, and the viewport manifest re-fetches
-      // without the loading overlay.
-      listen("usd-stage-changed", () => {
+      listen("usd-stage-changed", (event) => {
+        const paths = ((event.payload as { paths?: string[] } | null)?.paths ?? []) as string[];
         void stageState.refreshAfterEdit();
-        void refreshSceneAfterEdit();
+        void refreshSceneAfterEdit(paths);
       }),
     ];
 
@@ -483,6 +603,12 @@
 
     if (canvas) {
       viewer.init(canvas);
+      // The gizmo lives with the renderer kit's camera/scene/orbit: drag
+      // events come off the same canvas, and the orbit disables while a
+      // gizmo drag is active. The editing POLICY (gating, anchor, commit
+      // math) stays here in the page.
+      gizmo = new TransformGizmo(viewer.camera, viewer.renderer.domElement, viewer.scene, viewer.controls);
+      gizmo.onCommit = handleGizmoCommit;
     }
 
     // Task 6 playback driver: the render loop advances the stage playhead
@@ -505,6 +631,8 @@
       window.removeEventListener("keyup", handleGlobalKeyup);
       unlisteners.forEach((u) => u.then((f) => f()));
       renderState.onTimeChange = null;
+      gizmo?.dispose();
+      gizmo = null;
       viewer.dispose();
     };
   });
@@ -618,10 +746,19 @@
     }
   }
 
-  // The usd-stage-changed manifest re-fetch: swap the viewport scene at
-  // the CURRENT stage time (no loading overlay, no playhead jump).
-  async function refreshSceneAfterEdit() {
+  // An edit landed: renderState re-fetches the affected prims' transforms
+  // and geometry IN PLACE (one manifest + one batched geometry fetch, same
+  // generation guards as playback). Structural changes (variant swaps
+  // adding/removing children) still fall back to the full rebuild.
+  async function refreshSceneAfterEdit(paths: string[]) {
     if (!viewer.scene) return;
+    let needsRebuild = true;
+    try {
+      needsRebuild = paths.length > 0 ? await renderState.refreshAfterEdit(paths) : true;
+    } catch (e) {
+      console.warn("usdbee: edit refresh failed; rebuilding the scene:", e);
+    }
+    if (!needsRebuild) return;
     removeLoadedGroup();
     const group = await renderState.loadRenderScene(renderState.time ?? 0, dependencies ?? {});
     if (group) integrateScene(group);
@@ -1212,6 +1349,36 @@
           </svg>
           <span>Inertia: {viewer.enableDamping ? "On" : "Off"}</span>
         </button>
+
+        <div class="gizmo-sep"></div>
+        <button
+          class="tool-btn"
+          class:active={gizmoMode === "translate"}
+          disabled={!gizmoGate.attachable}
+          onclick={() => (gizmoMode = "translate")}
+          title="Move the selected prim (viewport gizmo)"
+        >
+          <span>Move</span>
+        </button>
+        <button
+          class="tool-btn"
+          class:active={gizmoMode === "rotate"}
+          disabled={!gizmoGate.attachable}
+          onclick={() => (gizmoMode = "rotate")}
+          title="Rotate the selected prim (XYZ Euler degrees)"
+        >
+          <span>Rotate</span>
+        </button>
+        <button
+          class="tool-btn"
+          class:active={gizmoMode === "scale"}
+          disabled={!gizmoGate.attachable}
+          onclick={() => (gizmoMode = "scale")}
+          title="Scale the selected prim"
+        >
+          <span>Scale</span>
+        </button>
+        {#if gizmoMessage}<span class="gizmo-status" title={gizmoMessage}>{gizmoMessage}</span>{/if}
 
         <div class="triangle-count" style="gap: 4px;">
           <svg

@@ -2,6 +2,7 @@
   import { stageState } from "$lib/stage/stageState.svelte";
   import { formatValue } from "$lib/stage/valueFormat";
   import AttributeEditor from "./AttributeEditor.svelte";
+  import TransformEditor from "./TransformEditor.svelte";
 
   let open = $state(true);
   // Backend errors per variant-set name (cleared when a new selection is
@@ -9,6 +10,13 @@
   let variantErrors = $state<Record<string, string | null>>({});
 
   const details = $derived(stageState.details);
+
+  // Review fix: errors from a previous selection must not survive a prim
+  // switch — clear the per-set error map whenever the details path moves.
+  $effect(() => {
+    const _path = details?.path;
+    variantErrors = {};
+  });
 
   const localTransform = $derived(
     details?.local_transform ? formatValue({ type: "matrix4d", data: details.local_transform }) : null,
@@ -69,6 +77,8 @@
             </div>
           {/if}
 
+          <TransformEditor attributes={details.attributes} />
+
           {#if details.attributes.length > 0}
             <div class="inspector-section">
               <h4>Attributes</h4>
@@ -120,12 +130,16 @@
                       title="authored selection: {set.authored_selection ?? 'none'}"
                       value={set.authored_selection ?? ""}
                       onchange={async (event) => {
-                        const selection = event.currentTarget.value || null;
+                        const select = event.currentTarget;
+                        const selection = select.value || null;
                         variantErrors[set.name] = null;
-                        variantErrors[set.name] = await stageState.setVariantSelection(
-                          set.name,
-                          selection,
-                        );
+                        variantErrors[set.name] = await stageState.setVariantSelection(set.name, selection);
+                        // Review fix: a failed commit must not leave the
+                        // uncommitted selection shown — reset the DOM value
+                        // to what the stage still authors.
+                        if (variantErrors[set.name] !== null) {
+                          select.value = set.authored_selection ?? "";
+                        }
                       }}
                     >
                       <!-- The empty option clears the local selection; weaker

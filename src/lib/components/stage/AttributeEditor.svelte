@@ -46,9 +46,12 @@
     }
     // On success the details refresh rewrites `value.data`, which resets
     // the draft via the effect; on failure keep the draft for fixing and
-    // swallow the follow-up blur.
+    // swallow the follow-up blur. A successful ENTER commit also
+    // suppresses its immediate follow-up blur (review fix): the
+    // event-driven refresh may not have rewritten `value.data` yet, and
+    // the blur would fire the same commit a second time.
     error = await oncommit(result.value);
-    if (error !== null) suppressNextBlur = true;
+    if (error !== null || !fromBlur) suppressNextBlur = true;
   }
 
   // Bool payloads come from the checkbox itself, not the text draft.

@@ -1083,3 +1083,81 @@ fn set_metadata_active_true_reactivates_an_inactive_prim() {
     .expect_err("non-reactivation metadata on an inactive prim must fail");
     assert!(error.contains("inactive"), "got: {}", error);
 }
+
+#[test]
+fn set_value_authors_xform_op_vectors_and_order() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "xforms.usda");
+
+    // Existing double3 translate: the gizmo authors the declared spelling.
+    request_set_value(
+        &state,
+        "/World",
+        "xformOp:translate",
+        payload("double3", serde_json::json!([11, 0, 0])),
+        None,
+    )
+    .expect("authoring a double3 translate should succeed");
+    let details = details_via_owner(&state, "/World", None);
+    assert_eq!(
+        attribute(&details, "xformOp:translate").value.data,
+        serde_json::json!([11.0, 0.0, 0.0])
+    );
+
+    // A rotateXYZ the prim never authored: created as float3, then
+    // xformOpOrder re-authored as a token array with the op appended at
+    // the END of the list (most-local, the gizmo contract).
+    request_set_value(
+        &state,
+        "/World",
+        "xformOp:rotateXYZ",
+        payload("float3", serde_json::json!([0, 0, 90])),
+        None,
+    )
+    .expect("creating a float3 rotateXYZ should succeed");
+    request_set_value(
+        &state,
+        "/World",
+        "xformOpOrder",
+        payload(
+            "token_array",
+            serde_json::json!(["xformOp:translate", "xformOp:rotateXYZ"]),
+        ),
+        None,
+    )
+    .expect("authoring the token-array order should succeed");
+
+    let details = details_via_owner(&state, "/World", None);
+    assert_eq!(
+        attribute(&details, "xformOpOrder").value.data,
+        serde_json::json!(["xformOp:translate", "xformOp:rotateXYZ"])
+    );
+
+    // Composed local: first-listed translate applies LAST, so points
+    // rotate 90 deg about Z first, then move +11 along X (row-vector
+    // convention: translation in the LAST ROW, the w column stays 0).
+    let local = details
+        .local_transform
+        .expect("local transform should compose");
+    let expected = [
+        0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 11.0, 0.0, 0.0, 1.0,
+    ];
+    for (got, want) in local.iter().zip(expected) {
+        assert!(
+            (got - want).abs() < 1e-9,
+            "local transform {:?} != {:?}",
+            local,
+            expected
+        );
+    }
+
+    // Wrong-shape payloads refuse readably instead of authoring garbage.
+    let bad = request_set_value(
+        &state,
+        "/World",
+        "xformOp:translate",
+        payload("double3", serde_json::json!([1, 2])),
+        None,
+    );
+    assert!(bad.is_err());
+}

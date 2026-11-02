@@ -96,9 +96,14 @@ export const stageState = $state({
 
   // Author an attribute value on the selected prim (session layer); returns
   // the backend error string, or null on success. Time is the viewer's
-  // current USD time code so sampled edits land where the user is looking.
+  // current USD time code so sampled edits land where the user is looking;
+  // uniform attributes (xformOpOrder) pass null to author the default.
   // The usd-stage-changed event drives the details/tree/manifest refresh.
-  async setAttributeValue(name: string, value: ValuePayload): Promise<string | null> {
+  async setAttributeValue(
+    name: string,
+    value: ValuePayload,
+    time: number | null = renderState.time,
+  ): Promise<string | null> {
     if (!this.selectedPath) return "no prim selected";
     try {
       await invoke("set_attribute_value", {

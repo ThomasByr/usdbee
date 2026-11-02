@@ -636,8 +636,14 @@ fn editable_prim(
 /// The ValueTypeName spelling for a payload type: identical to the payload
 /// family except the value-type registry calls asset paths "asset".
 fn payload_type_name(payload: &ValuePayload) -> Result<ValueTypeName, String> {
+    // The serializer's generic spellings map back to the declared USD
+    // names create_attribute expects (the gizmo sends the declared
+    // spellings directly; these arms keep the round trip consistent).
     let spelling = match payload.r#type.as_str() {
         "assetpath" => "asset",
+        "vec3f" => "float3",
+        "vec3d" => "double3",
+        "token_array" => "token[]",
         other => other,
     };
     ValueTypeName::find(spelling)

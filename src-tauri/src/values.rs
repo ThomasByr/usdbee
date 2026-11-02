@@ -400,9 +400,11 @@ fn as_bool(payload: &ValuePayload) -> Result<bool, String> {
 /// Reverse of `serialize_payload`: a ValuePayload back into an `sdf::Value`.
 /// Only the scalar families the inspector can edit convert — bool, the
 /// integer and floating scalars (incl. half and timecode), string, token,
-/// assetpath. Every other family (arrays, vectors, matrices, dicts, path
-/// arrays) is a readable "not editable yet" error: better a clear refusal
-/// than a silent wrong-kind authoring.
+/// assetpath — plus the vec3 and token-array families the transform
+/// gizmo authors (float3/double3 accept both the declared USD spelling and
+/// the serializer's generic vec3f/vec3d). Every other family (matrices,
+/// dicts, path arrays) is a readable "not editable yet" error: better a
+/// clear refusal than a silent wrong-kind authoring.
 pub fn value_payload_to_sdf(payload: &ValuePayload) -> Result<Value, String> {
     let not_editable = || format!("type not editable yet: {}", payload.r#type);
     Ok(match payload.r#type.as_str() {
@@ -429,8 +431,55 @@ pub fn value_payload_to_sdf(payload: &ValuePayload) -> Result<Value, String> {
         "string" => Value::String(payload_string(payload)?),
         "token" => Value::Token(payload_string(payload)?.into()),
         "assetpath" => Value::AssetPath(AssetPath::new(payload_string(payload)?)),
+        "float3" | "vec3f" => {
+            let (x, y, z) = payload_vec3(payload)?;
+            Value::Vec3f(gf::Vec3f {
+                x: x as f32,
+                y: y as f32,
+                z: z as f32,
+            })
+        }
+        "double3" | "vec3d" => {
+            let (x, y, z) = payload_vec3(payload)?;
+            Value::Vec3d(gf::Vec3d { x, y, z })
+        }
+        "token_array" => Value::TokenVec(
+            payload
+                .data
+                .as_array()
+                .ok_or_else(|| format!("token_array value is not a list: {}", payload.data))?
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .ok_or_else(|| format!("token_array entry is not a string: {}", item))
+                        .map(|token| token.to_owned().into())
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
         _ => return Err(not_editable()),
     })
+}
+
+/// The payload's [x, y, z] numbers (vec3 families).
+fn payload_vec3(payload: &ValuePayload) -> Result<(f64, f64, f64), String> {
+    let items = payload
+        .data
+        .as_array()
+        .ok_or_else(|| format!("{} value is not a [x, y, z] list", payload.r#type))?;
+    if items.len() != 3 {
+        return Err(format!(
+            "{} value needs exactly 3 components, got {}",
+            payload.r#type,
+            items.len()
+        ));
+    }
+    let mut out = [0.0; 3];
+    for (index, item) in items.iter().enumerate() {
+        out[index] = item
+            .as_f64()
+            .ok_or_else(|| format!("{} component {} is not a number", payload.r#type, index))?;
+    }
+    Ok((out[0], out[1], out[2]))
 }
 
 fn string_repr(value: &Value) -> String {
