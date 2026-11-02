@@ -1537,7 +1537,7 @@
           style="background: #a33;"
           onclick={() => {
             showCloseConfirm = false;
-            void getCurrentWindow().destroy();
+            getCurrentWindow().destroy().catch(console.warn);
           }}>Close anyway</button
         >
       </div>
