@@ -305,6 +305,108 @@ describe("renderState.setStageTime", () => {
     expect(appeared.count).toBe(1);
   });
 
+  it("keeps an Xform-rooted prototype subtree alive across time ticks", async () => {
+    // A subtree prototype: the instance matrices live on the synthetic
+    // root, its descendant Mesh carries a local transform of its own. A
+    // time tick must refresh count/matrices from the root (composed with
+    // the child's transform), never from the descendant's empty instances.
+    const offspring = (matrices: number[][]) =>
+      node({
+        path: "/Scene/Instancer/__proto_0",
+        name: "__proto_0",
+        type_name: "Xform",
+        animated: true,
+        instances: matrices,
+        children: [
+          node({
+            path: "/Scene/Instancer/__proto_0/Shape",
+            name: "Shape",
+            type_name: "Mesh",
+            has_geometry: true,
+            animated: true,
+            transform: translate(3),
+          }),
+        ],
+      });
+    const scene = (matrices: number[][]) => [
+      node({
+        path: "/Scene/Instancer",
+        name: "Instancer",
+        type_name: "PointInstancer",
+        children: [offspring(matrices)],
+      }),
+    ];
+
+    const group = await loadScene(() => scene([translate(1), translate(2), translate(3)]));
+    let mesh = findMesh(group) as THREE.InstancedMesh;
+    let wrapper = mesh.parent!;
+    expect(mesh.count).toBe(3);
+    // instance x child transform: translate(1..3) + translate(3) = 4..6.
+    expect([...mesh.instanceMatrix.array][12]).toBe(4);
+    expect([...mesh.instanceMatrix.array][28]).toBe(5);
+    expect([...mesh.instanceMatrix.array][44]).toBe(6);
+    // buildNode collapsed the wrapper to identity (transform folded into
+    // the instance matrices).
+    expect(wrapper.matrix.elements[12]).toBe(0);
+
+    // Tick 1: count shrinks; matrices must re-derive from the root.
+    mockIpc(() => scene([translate(4), translate(5)]));
+    await renderState.setStageTime(1);
+    mesh = findMesh(group) as THREE.InstancedMesh;
+    wrapper = mesh.parent!;
+    expect(mesh.count).toBe(2);
+    expect([...mesh.instanceMatrix.array][12]).toBe(7);
+    expect([...mesh.instanceMatrix.array][28]).toBe(8);
+    expect(wrapper.matrix.elements[12]).toBe(0);
+
+    // Tick 2: count grows past capacity; the whole subtree stays visible.
+    mockIpc(() => scene([translate(6), translate(7), translate(8), translate(9)]));
+    await renderState.setStageTime(2);
+    mesh = findMesh(group) as THREE.InstancedMesh;
+    wrapper = mesh.parent!;
+    expect(mesh.count).toBe(4);
+    expect([...mesh.instanceMatrix.array][12]).toBe(9);
+    expect(wrapper.matrix.elements[12]).toBe(0);
+    expect(wrapper.visible).toBe(true);
+  });
+
+  it("does not double-apply a static prototype descendant's transform on update", async () => {
+    const scene = () => [
+      node({
+        path: "/Scene/Instancer",
+        name: "Instancer",
+        type_name: "PointInstancer",
+        children: [
+          node({
+            path: "/Scene/Instancer/__proto_0",
+            name: "__proto_0",
+            type_name: "Xform",
+            instances: [translate(1)],
+            children: [
+              node({
+                path: "/Scene/Instancer/__proto_0/Shape",
+                name: "Shape",
+                type_name: "Mesh",
+                has_geometry: true,
+                transform: translate(3),
+              }),
+            ],
+          }),
+        ],
+      }),
+    ];
+    const group = await loadScene(scene);
+    const wrapper = findMesh(group).parent!;
+    expect(wrapper.matrix.elements[12]).toBe(0);
+
+    await renderState.setStageTime(1);
+
+    // The wrapper stays collapsed; the transform lives in the matrix of
+    // each instance, and an in-place update must not re-apply it.
+    expect(wrapper.matrix.elements[12]).toBe(0);
+    expect((findMesh(group) as THREE.InstancedMesh).count).toBe(1);
+  });
+
   it("keeps queued time-step promises pending until the coalesced refresh finishes", async () => {
     const wobble = node({ path: "/Scene/Wobble", name: "Wobble" });
     await loadScene(() => [wobble]);

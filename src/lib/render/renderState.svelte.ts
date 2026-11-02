@@ -16,6 +16,7 @@ import {
   disposeScene,
   toBufferGeometry,
   type FallbackDependencies,
+  type InstanceContext,
   type SceneFetchers,
 } from "./sceneBuilder";
 
@@ -101,6 +102,7 @@ async function updateNodes(
   byPath: Map<string, THREE.Object3D>,
   time: number,
   isStale: () => boolean,
+  instancing: InstanceContext | null = null,
 ): Promise<void> {
   for (const node of nodes) {
     if (isStale()) return;
@@ -123,11 +125,29 @@ async function updateNodes(
       }
       continue;
     }
+    const context: InstanceContext | null =
+      node.instances.length > 0
+        ? { instances: node.instances, transform: new THREE.Matrix4() }
+        : instancing
+          ? {
+              instances: instancing.instances,
+              transform: instancing.transform.clone().multiply(new THREE.Matrix4().fromArray(node.transform)),
+            }
+          : null;
     if (object) {
+      // Thread the instancing context exactly like buildNode: a node with
+      // its own instances roots a synthetic subtree (wrapper keeps its
+      // transform, which is identity per the manifest), while a node under
+      // one had its wrapper collapsed to identity with the transform folded
+      // into the per-instance matrices. So for a subtree descendant the
+      // wrapper stays collapsed and count/matrices re-derive from the root
+      // context — applying node.transform or reading the descendant's own
+      // (empty) node.instances here would hide or drift every child.
+      const isSubtreeNode = instancing !== null && node.instances.length === 0;
       const drawable = object as THREE.Mesh | THREE.Points;
       const isDrawable = object instanceof THREE.Mesh || (drawable as THREE.Points).isPoints;
       const wrapper = isDrawable ? object.parent! : object;
-      applyTransform(wrapper, node.transform);
+      if (!isSubtreeNode) applyTransform(wrapper, node.transform);
       wrapper.visible = node.visible;
       if (node.animated && isDrawable) {
         if (isStale()) return;
@@ -140,12 +160,20 @@ async function updateNodes(
           console.warn(`usdbee: keeping last geometry at ${node.path}:`, e);
         }
         let instanced = drawable as THREE.InstancedMesh;
-        if (instanced.isInstancedMesh) {
-          if (node.instances.length > instanced.instanceMatrix.count) {
+        const matrices =
+          node.instances.length > 0
+            ? node.instances.map((instance) => new THREE.Matrix4().fromArray(instance))
+            : isSubtreeNode
+              ? context!.instances.map((instance) =>
+                  new THREE.Matrix4().fromArray(instance).multiply(context!.transform),
+                )
+              : null;
+        if (instanced.isInstancedMesh && matrices && matrices.length > 0) {
+          if (matrices.length > instanced.instanceMatrix.count) {
             const replacement = new THREE.InstancedMesh(
               instanced.geometry,
               instanced.material,
-              node.instances.length,
+              matrices.length,
             );
             replacement.name = instanced.name;
             replacement.castShadow = instanced.castShadow;
@@ -156,14 +184,13 @@ async function updateNodes(
             byPath.set(node.path, replacement);
             instanced = replacement;
           }
-          instanced.count = node.instances.length;
-          const matrix = new THREE.Matrix4();
-          node.instances.forEach((instance, i) => instanced.setMatrixAt(i, matrix.fromArray(instance)));
+          instanced.count = matrices.length;
+          matrices.forEach((matrix, i) => instanced.setMatrixAt(i, matrix));
           instanced.instanceMatrix.needsUpdate = true;
         }
       }
     }
-    await updateNodes(node.children, byPath, time, isStale);
+    await updateNodes(node.children, byPath, time, isStale, context);
   }
 }
 

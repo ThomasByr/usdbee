@@ -89,7 +89,9 @@ async function fetchMaterial(
 // the synthetic prototype node's row-major matrices, `transform` the
 // accumulated subtree transform from the node holding them to the child
 // being built (instance matrix x accumulated transform per geometry child).
-interface InstanceContext {
+// Exported for renderState's in-place time updates, which thread the same
+// context through the manifest walk.
+export interface InstanceContext {
   instances: number[][];
   transform: THREE.Matrix4;
 }
