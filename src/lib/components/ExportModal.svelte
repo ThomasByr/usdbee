@@ -25,6 +25,7 @@
   let resolution = "1920x1080";
   let bgTransparent = true;
   let previewUrl: string | null = null;
+  let previewGeneration = 0;
 
   let exportTime = 0;
   let crop = false;
@@ -50,6 +51,7 @@
   }
 
   async function updatePreview() {
+    const generation = ++previewGeneration;
     if (!renderer || !scene || !camera) {
       console.log("updatePreview: missing renderer/scene/camera");
       return;
@@ -59,6 +61,13 @@
     if (!res) return;
 
     try {
+      if (hasAnimation && previewAt) {
+        let pTime =
+          format === "mp4" ? (previewTarget === "start" ? exportStartTime : exportEndTime) : exportTime;
+        await previewAt(pTime);
+      }
+      if (generation !== previewGeneration) return;
+
       const originalSize = new THREE.Vector2();
       renderer.getSize(originalSize);
       const originalClearAlpha = renderer.getClearAlpha();
@@ -71,12 +80,6 @@
         scene.background = null;
       } else if (!isTransparent) {
         renderer.setClearColor(0x333333, 1);
-      }
-
-      if (hasAnimation && previewAt) {
-        let pTime =
-          format === "mp4" ? (previewTarget === "start" ? exportStartTime : exportEndTime) : exportTime;
-        await previewAt(pTime);
       }
 
       // render to preview
