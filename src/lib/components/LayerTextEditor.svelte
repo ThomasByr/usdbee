@@ -2,7 +2,8 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import type { LayerInfo } from "$lib/stage/types";
-  import { layerDisplayName } from "$lib/stage/layerText";
+  import { layerDisplayName, layerTextRevisionAction } from "$lib/stage/layerText";
+  import { layerTextState } from "$lib/state/layerTextState.svelte";
 
   // The Task 6 text layer editor: pick a stage layer, edit its usda text in
   // a plain textarea, save it back into the stage's in-memory layer. The
@@ -13,6 +14,10 @@
   let layers = $state<LayerInfo[]>([]);
   let selectedId = $state<string | null>(null);
   let text = $state<string>("");
+  let loadedText = $state<string>("");
+  let stageRevision = $state(0);
+  let loadedRevision = $state(0);
+  let conflict = $state<string | null>(null);
   let loading = $state(false);
   let saving = $state(false);
   // The inline parse/import error; null when the text is clean.
@@ -22,8 +27,8 @@
     try {
       const listed = await invoke<LayerInfo[]>("list_stage_layers");
       layers = listed;
-      // The textarea reloads only when the selection must change: a stage
-      // change must not wipe in-progress edits.
+      // Selection changes load their layer; same-selection revision handling
+      // decides whether a clean draft reloads or a dirty one conflicts.
       if (selectedId === null || !listed.some((l) => l.identifier === selectedId)) {
         selectedId = listed[0]?.identifier ?? null;
         await loadText();
@@ -33,32 +38,54 @@
       layers = [];
       selectedId = null;
       text = "";
+      loadedText = "";
+      loadedRevision = stageRevision;
+      conflict = null;
     }
   }
 
   async function loadText(): Promise<void> {
     if (selectedId === null) {
       text = "";
+      loadedText = "";
+      loadedRevision = stageRevision;
+      conflict = null;
       return;
     }
     loading = true;
     error = null;
     try {
-      text = await invoke<string>("export_layer_text", { identifier: selectedId });
+      const exported = await invoke<string>("export_layer_text", { identifier: selectedId });
+      text = exported;
+      loadedText = exported;
+      loadedRevision = stageRevision;
+      conflict = null;
     } catch (e) {
       text = "";
+      loadedText = "";
+      loadedRevision = stageRevision;
       error = typeof e === "string" ? e : String(e);
     } finally {
       loading = false;
     }
   }
 
+  const conflictMessage =
+    "The stage changed after this draft was loaded. Reload the layer text before saving, or copy your edits elsewhere.";
+
   async function saveToStage(): Promise<void> {
     if (selectedId === null) return;
+    if (layerTextRevisionAction(loadedRevision, stageRevision, text !== loadedText) === "conflict") {
+      conflict = conflictMessage;
+      return;
+    }
     saving = true;
     error = null;
+    conflict = null;
     try {
       await invoke("import_layer_text", { identifier: selectedId, text });
+      loadedText = text;
+      loadedRevision = stageRevision;
       // The backend emits usd-stage-changed, so the tree/manifest/edit
       // state refresh through their own listeners.
     } catch (e) {
@@ -68,12 +95,27 @@
     }
   }
 
+  async function onStageChanged(): Promise<void> {
+    stageRevision += 1;
+    const selected = selectedId;
+    await refreshLayers();
+    if (selected === null || selected !== selectedId) return;
+    const action = layerTextRevisionAction(loadedRevision, stageRevision, text !== loadedText);
+    if (action === "reload") await loadText();
+    if (action === "conflict") conflict = conflictMessage;
+  }
+
+  $effect(() => {
+    layerTextState.draftDirty = selectedId !== null && text !== loadedText;
+  });
+
   $effect(() => {
     void refreshLayers();
     const unlisten = listen("usd-stage-changed", () => {
-      void refreshLayers();
+      void onStageChanged();
     });
     return () => {
+      layerTextState.draftDirty = false;
       void unlisten.then((stop) => stop());
     };
   });
@@ -116,6 +158,12 @@
     disabled={loading || selectedId === null}
   ></textarea>
 
+  {#if conflict}
+    <div class="error-text" role="alert">
+      {conflict}
+      <button onclick={() => void loadText()}>Reload latest stage text</button>
+    </div>
+  {/if}
   {#if error}
     <div class="error-text" role="alert">{error}</div>
   {/if}

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { stageState } from "$lib/stage/stageState.svelte";
   import type { AttributeInfo } from "$lib/stage/types";
+  import { parseEditedValue } from "$lib/stage/valueEdit";
 
   // Numeric transform-op editors (Phase 3, Task 4): per-axis fields for
   // the authored triplet ops the gizmo also authors (translate, rotateXYZ
@@ -64,15 +65,14 @@
       return;
     }
     const current = op.value.data as number[];
-    const text = (drafts[op.name]?.[axis] ?? "").trim();
-    const n = Number(text);
-    if (!Number.isFinite(n)) {
-      errors[op.name] = `"${text}" is not a number`;
+    const parsed = parseEditedValue("double", drafts[op.name]?.[axis] ?? "");
+    if (!parsed.ok || typeof parsed.data !== "number") {
+      errors[op.name] = parsed.ok ? "not a number" : parsed.error;
       suppressNextBlur[op.name] = true;
       return;
     }
     const data = [...current];
-    data[axis] = n;
+    data[axis] = parsed.data;
     if (data.every((v, i) => v === current[i])) {
       errors[op.name] = null;
       return;

@@ -97,8 +97,7 @@
                           // author their default — never a time sample at
                           // the viewer's current time code.
                           attr.variability === "uniform" ? null : undefined,
-                        )
-                      }
+                        )}
                     />
                   </span>
                 </div>
@@ -108,6 +107,15 @@
 
           <div class="inspector-section">
             <h4>Metadata</h4>
+            <div class="attr-row">
+              <span class="attr-name">active</span>
+              <span class="attr-value">
+                <AttributeEditor
+                  value={{ type: "bool", data: details.is_active }}
+                  oncommit={(v) => stageState.setPrimMetadata("active", v)}
+                />
+              </span>
+            </div>
             <div class="attr-row">
               <span class="attr-name">kind</span>
               <span class="attr-value">

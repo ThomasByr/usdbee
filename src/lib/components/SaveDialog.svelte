@@ -2,6 +2,8 @@
   import { save } from "@tauri-apps/plugin-dialog";
   import { editState } from "$lib/state/editState.svelte";
   import type { LayerSaveRequest, LayerInfo } from "$lib/stage/types";
+  import { layerDisplayName } from "$lib/stage/layerText";
+  import { invoke } from "@tauri-apps/api/core";
 
   let { onClose } = $props<{ onClose: () => void }>();
 
@@ -10,6 +12,28 @@
   // archive, leaving the original untouched.
   const isUsdzStage = $derived(editState.editTarget?.is_usdz_stage ?? false);
   let usdzPath = $state("");
+  let targetLayers = $state<LayerInfo[]>([]);
+  let editTargetError = $state<string | null>(null);
+
+  async function refreshTargetLayers(): Promise<void> {
+    try {
+      targetLayers = await invoke<LayerInfo[]>("list_stage_layers");
+    } catch {
+      targetLayers = [];
+    }
+  }
+
+  async function changeEditTarget(event: Event): Promise<void> {
+    const select = event.currentTarget as HTMLSelectElement;
+    editTargetError = await editState.setEditTarget(select.value || null);
+    if (editTargetError !== null) {
+      select.value = editState.editTarget?.layer_identifier ?? "";
+    }
+  }
+
+  $effect(() => {
+    void refreshTargetLayers();
+  });
 
   // Per-layer save paths, seeded once per dialog mount: regular layers
   // default to the file they were read from, session layers start empty
@@ -103,11 +127,28 @@
   <div class="modal-content save-dialog" onclick={(e) => e.stopPropagation()}>
     <h3>{isUsdzStage ? "Save As usdz" : "Save Layers"}</h3>
 
+    <div class="save-row">
+      <label class="save-layer-name" for="edit-target">Edit target</label>
+      <select
+        id="edit-target"
+        class="save-path-input"
+        value={editState.editTarget?.layer_identifier ?? ""}
+        disabled={targetLayers.length === 0}
+        onchange={(event) => void changeEditTarget(event)}
+      >
+        {#each targetLayers as layer (layer.identifier)}
+          <option value={layer.identifier}>{layerDisplayName(layer)}</option>
+        {/each}
+      </select>
+    </div>
+    {#if editTargetError}
+      <div class="error-text">{editTargetError}</div>
+    {/if}
+
     {#if isUsdzStage}
       <div class="error-text">
-        This stage was opened from a .usdz package — its layers cannot be saved in place.
-        Save As usdz repacks the stage (session edits included) into a new .usdz archive;
-        the original file is never modified.
+        This stage was opened from a .usdz package — its layers cannot be saved in place. Save As usdz repacks
+        the stage (session edits included) into a new .usdz archive; the original file is never modified.
       </div>
       <div class="save-row">
         <div class="save-layer-name">usdz destination</div>

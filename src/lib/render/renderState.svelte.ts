@@ -53,9 +53,7 @@ const fetchers: SceneFetchers = {
   // Load-time batch prefill: one invoke per slice of GEOMETRY_BATCH_SIZE
   // paths, slots decoded here so sceneBuilder only sees per-path results.
   getGeometryBatch: async (paths: string[], time = renderState.time) =>
-    decodeGeometryBatch(
-      await invoke<ArrayBuffer>("get_geometry_batch", { paths, time }),
-    ),
+    decodeGeometryBatch(await invoke<ArrayBuffer>("get_geometry_batch", { paths, time })),
   getMaterial: (path: string) => invoke<MaterialInfo>("get_material_data", { path }).catch(() => null),
   loadTexture: (filePath: string, onError: () => void) => {
     try {
@@ -316,7 +314,9 @@ function structureChanged(
       object = object.parent;
     }
     if (!node && object) return true; // prim vanished from the stage
-    if (!node && !object) continue; // prim not rendered (details-only)
+    // shortcut: non-render edits rebuild the whole scene; upgrade to targeted
+    // material dependency invalidation if incremental material updates matter.
+    if (!node && !object) return true;
     if (node && !object) return true; // prim appeared — needs a build
     const sceneNames = new Set<string>();
     object!.traverse((child) => {
@@ -369,10 +369,7 @@ export const renderState = $state({
     return work;
   },
 
-  async loadWork(
-    startTime: number,
-    fallbackColors: FallbackDependencies,
-  ): Promise<THREE.Group | null> {
+  async loadWork(startTime: number, fallbackColors: FallbackDependencies): Promise<THREE.Group | null> {
     const generation = ++loadGeneration;
     sceneLoading = true;
     queuedTime = null;
@@ -482,6 +479,8 @@ export const renderState = $state({
   // changed the scene structure (or the refresh was coalesced away and
   // the verdict is unknown): the caller then falls back to a full rebuild.
   refreshAfterEdit(paths: string[]): Promise<boolean> {
+    // Whole-layer imports and their undo/redo can reshape any prim.
+    if (paths.includes("/")) return Promise.resolve(true);
     if (sceneLoading || timeStepInFlight) {
       queuedRefresh = paths;
       // shortcut: the coalesced drain loses the rebuild verdict, so a

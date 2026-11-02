@@ -28,6 +28,7 @@
   import { stageState } from "$lib/stage/stageState.svelte";
   import { editState } from "$lib/state/editState.svelte";
   import { confirmCloseNeeded } from "$lib/state/closeGuard";
+  import { layerTextState } from "$lib/state/layerTextState.svelte";
   import {
     advanceStageTime,
     renderState,
@@ -77,6 +78,7 @@
   let gizmo = $state<TransformGizmo | null>(null);
   let gizmoMode = $state<GizmoMode>("translate");
   let gizmoError = $state<string | null>(null);
+  let gizmoCommitInFlight = $state(false);
 
   // Hierarchy Tree State
   let expandedNodes = $state<Record<string, boolean>>({});
@@ -261,53 +263,57 @@
   // walk is needed: L' = L * inv(startWorld) * endWorld.
   async function handleGizmoCommit(commit: GizmoCommit) {
     const details = stageState.details;
-    if (!details?.local_transform || !details.world_transform) return;
-    const local = new THREE.Matrix4().fromArray(details.local_transform);
-    const target = local
-      .clone()
-      .multiply(commit.startWorld.clone().invert())
-      .multiply(commit.endWorld)
-      .toArray() as number[];
-    if (matricesClose(target, details.local_transform)) {
-      gizmo?.attach(gizmoWorldMatrix() ?? commit.endWorld);
-      return;
-    }
-    const orderAttribute = details.attributes.find((a) => a.name === "xformOpOrder");
-    const order = Array.isArray(orderAttribute?.value.data) ? (orderAttribute!.value.data as string[]) : [];
-    const result = composeOpUpdate({
-      mode: gizmoMode,
-      order,
-      attrs: details.attributes,
-      localMatrix: details.local_transform,
-      targetLocalMatrix: target,
-    });
-    if (!result.ok) {
-      gizmoError = result.error;
-      gizmo?.attach(gizmoWorldMatrix() ?? commit.endWorld);
-      return;
-    }
-    let failed = false;
-    for (const write of result.writes) {
-      // xformOpOrder is uniform: it authors its default, never a time
-      // sample; the op values author at the viewer's current time code.
-      const error = await stageState.setAttributeValue(
-        write.name,
-        { type: write.type, data: write.data },
-        write.name === "xformOpOrder" ? null : undefined,
-      );
-      if (error !== null) {
-        gizmoError = error;
-        failed = true;
-        break;
+    if (gizmoCommitInFlight || !details?.local_transform || !details.world_transform) return;
+    gizmoCommitInFlight = true;
+    if (gizmo) gizmo.controls.enabled = false;
+    try {
+      const local = new THREE.Matrix4().fromArray(details.local_transform);
+      const target = local
+        .clone()
+        .multiply(commit.startWorld.clone().invert())
+        .multiply(commit.endWorld)
+        .toArray() as number[];
+      if (matricesClose(target, details.local_transform)) {
+        gizmo?.attach(gizmoWorldMatrix() ?? commit.endWorld);
+        return;
       }
+      const orderAttribute = details.attributes.find((a) => a.name === "xformOpOrder");
+      const order = Array.isArray(orderAttribute?.value.data) ? (orderAttribute!.value.data as string[]) : [];
+      const result = composeOpUpdate({
+        mode: gizmoMode,
+        order,
+        attrs: details.attributes,
+        localMatrix: details.local_transform,
+        targetLocalMatrix: target,
+      });
+      if (!result.ok) {
+        gizmoError = result.error;
+        gizmo?.attach(gizmoWorldMatrix() ?? commit.endWorld);
+        return;
+      }
+      let failed = false;
+      for (const write of result.writes) {
+        // xformOpOrder is uniform: it authors its default, never a time
+        // sample; the op values author at the viewer's current time code.
+        const error = await stageState.setAttributeValue(
+          write.name,
+          { type: write.type, data: write.data },
+          write.name === "xformOpOrder" ? null : undefined,
+        );
+        if (error !== null) {
+          gizmoError = error;
+          failed = true;
+          break;
+        }
+      }
+      // Keep commits disabled until fresh details land; a second drag must
+      // never compute from the pre-commit local transform.
+      if (!failed) await stageState.refreshAfterEdit();
+      gizmo?.attach(failed ? (gizmoWorldMatrix() ?? commit.endWorld) : commit.endWorld);
+    } finally {
+      gizmoCommitInFlight = false;
+      if (gizmo) gizmo.controls.enabled = true;
     }
-    // A successful commit anchors at the drag's end pose until the
-    // usd-stage-changed refresh re-anchors from fresh details — the stale
-    // details would snap the proxy back between commit and refresh (and a
-    // second drag in that window would compute L' from a stale L). A
-    // failed commit leaves details unchanged, so re-anchoring from them
-    // undoes the drag.
-    gizmo?.attach(failed ? (gizmoWorldMatrix() ?? commit.endWorld) : commit.endWorld);
   }
 
   $effect(() => {
@@ -604,7 +610,7 @@
     // closeGuard.ts (Vitest-pinned).
     unlisteners.push(
       getCurrentWindow().onCloseRequested((event) => {
-        if (confirmCloseNeeded(editState.dirtyLayers.length)) {
+        if (confirmCloseNeeded(editState.dirtyLayers.length, layerTextState.draftDirty)) {
           event.preventDefault();
           showCloseConfirm = true;
         }
@@ -1497,8 +1503,7 @@
     <div class="modal-content close-confirm-box">
       <h3>Unsaved changes</h3>
       <p>
-        {editState.dirtyLayers.length} layer(s) have unsaved edits. Close anyway and lose
-        them?
+        {editState.dirtyLayers.length} layer(s) have unsaved edits. Close anyway and lose them?
       </p>
       <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;">
         <button class="tool-btn" onclick={() => (showCloseConfirm = false)}>Cancel</button>

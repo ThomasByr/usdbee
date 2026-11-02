@@ -49,11 +49,18 @@ export function parseEditedValue(type: string, raw: string | boolean): ParseResu
     if (typeof raw === "boolean") return { ok: true, data: raw };
     return { ok: false, error: "bool needs a checkbox value" };
   }
+  if (!INT_TYPES.has(type) && !FLOAT_TYPES.has(type)) {
+    // string, token, assetpath: whitespace and empty values are data.
+    return { ok: true, data: String(raw) };
+  }
   const text = String(raw).trim();
   if (text === "") return { ok: false, error: "value is empty" };
   if (INT_TYPES.has(type)) {
     if (!/^[+-]?\d+$/.test(text)) return { ok: false, error: `"${text}" is not an integer` };
     const n = Number(text);
+    if (!Number.isSafeInteger(n)) {
+      return { ok: false, error: `"${text}" is outside JavaScript's safe integer range` };
+    }
     const [min, max] = INT_RANGES[type];
     if (n < min) {
       return { ok: false, error: `"${text}" is below the ${type} minimum ${min}` };
@@ -68,8 +75,7 @@ export function parseEditedValue(type: string, raw: string | boolean): ParseResu
     if (!Number.isFinite(n)) return { ok: false, error: `"${text}" is not a number` };
     return { ok: true, data: n };
   }
-  // string, token, assetpath: pass the text through.
-  return { ok: true, data: text };
+  return { ok: false, error: `unsupported editable type ${type}` };
 }
 
 export type CommitResult = { ok: true; value: ValuePayload } | { ok: false; error: string };

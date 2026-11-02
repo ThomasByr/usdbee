@@ -82,14 +82,19 @@ describe("parseEditedValue", () => {
     // uint, u32
     expect(parseEditedValue("uint", "4294967295").ok).toBe(true);
     expect(parseEditedValue("uint", "4294967296").ok).toBe(false);
-    // int64 / uint64. Past 2^53 JS numbers are float-imprecise (the out-of-
-    // range spellings collapse onto the max float), so exact-boundary refusal
-    // is the backend's job — these asserts only pin the in-range acceptance.
-    expect(parseEditedValue("int64", "9223372036854775807").ok).toBe(true);
-    expect(parseEditedValue("int64", "-9223372036854775808").ok).toBe(true);
+    // int64 / uint64 outside the JS-safe range are rejected, never rounded.
+    expect(parseEditedValue("int64", "9223372036854775807").ok).toBe(false);
+    expect(parseEditedValue("int64", "-9223372036854775808").ok).toBe(false);
     expect(parseEditedValue("int64", "92233720368547758080").ok).toBe(false);
-    expect(parseEditedValue("uint64", "18446744073709551615").ok).toBe(true);
+    expect(parseEditedValue("uint64", "18446744073709551615").ok).toBe(false);
     expect(parseEditedValue("uint64", "184467440737095516160").ok).toBe(false);
+  });
+
+  it("rejects integers that Number cannot represent exactly", () => {
+    const result = parseEditedValue("int64", "9007199254740993");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("safe integer");
+    expect(parseEditedValue("int64", "9007199254740991")).toEqual({ ok: true, data: 9007199254740991 });
   });
 
   it("parses bools from checkbox state", () => {
@@ -98,10 +103,11 @@ describe("parseEditedValue", () => {
     expect(parseEditedValue("bool", "maybe").ok).toBe(false);
   });
 
-  it("passes token, string and assetpath text through", () => {
+  it("passes token, string and assetpath text through unchanged", () => {
     expect(parseEditedValue("token", "prop")).toEqual({ ok: true, data: "prop" });
-    expect(parseEditedValue("string", "a b")).toEqual({ ok: true, data: "a b" });
-    expect(parseEditedValue("assetpath", "./tex.png")).toEqual({ ok: true, data: "./tex.png" });
+    expect(parseEditedValue("string", "  a b  ")).toEqual({ ok: true, data: "  a b  " });
+    expect(parseEditedValue("string", "")).toEqual({ ok: true, data: "" });
+    expect(parseEditedValue("assetpath", " ./tex.png ")).toEqual({ ok: true, data: " ./tex.png " });
   });
 });
 

@@ -17,4 +17,9 @@ describe("confirmCloseNeeded", () => {
   it("treats negative counts as clean (no dirty layers)", () => {
     expect(confirmCloseNeeded(-1)).toBe(false);
   });
+
+  it("confirms for an unapplied layer-text draft even with clean layers", () => {
+    expect(confirmCloseNeeded(0, true)).toBe(true);
+    expect(confirmCloseNeeded(0, false)).toBe(false);
+  });
 });

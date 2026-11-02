@@ -667,6 +667,16 @@ describe("renderState.setStageTime", () => {
 });
 
 describe("renderState.refreshAfterEdit", () => {
+  it("treats the root path as a full-rebuild marker", async () => {
+    await loadScene(() => [
+      node({ path: "/Scene/Shape", name: "Shape", type_name: "Mesh", has_geometry: true }),
+    ]);
+    mockedInvoke.mockClear();
+
+    expect(await renderState.refreshAfterEdit(["/"])).toBe(true);
+    expect(mockedInvoke).not.toHaveBeenCalled();
+  });
+
   it("patches an edited prim in place through the batched geometry fetch", async () => {
     const shape = node({
       path: "/Scene/Shape",
@@ -693,6 +703,14 @@ describe("renderState.refreshAfterEdit", () => {
     const wrapper = group.children.find((child) => child.name === "/Scene/Shape");
     expect(wrapper!.matrix.elements[12]).toBe(5);
     expect(mesh.geometry.getAttribute("position").getY(2)).toBe(1);
+  });
+
+  it("requests a rebuild for material and shader edits outside the render manifest", async () => {
+    const shape = node({ path: "/Scene/Shape", name: "Shape", type_name: "Mesh", has_geometry: true });
+    await loadScene(() => [shape]);
+    mockIpc(() => [shape]);
+
+    expect(await renderState.refreshAfterEdit(["/Scene/Looks/Material/Shader"])).toBe(true);
   });
 
   it("reports a needed rebuild when an affected prim gains a child", async () => {
