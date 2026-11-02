@@ -8,6 +8,7 @@
   // Backend errors per variant-set name (cleared when a new selection is
   // attempted); the kind editor reuses AttributeEditor's own error span.
   let variantErrors = $state<Record<string, string | null>>({});
+  let prototypeCopied = $state(false);
 
   const details = $derived(stageState.details);
 
@@ -16,6 +17,7 @@
   $effect(() => {
     const _path = details?.path;
     variantErrors = {};
+    prototypeCopied = false;
   });
 
   const localTransform = $derived(
@@ -56,6 +58,22 @@
               <span class="badge badge-off">abstract</span>
             {/if}
           </div>
+
+          {#if details.is_instance}
+            <div class="instance-banner">
+              <span>Instanced prim — edits affect all instances. Edit the prototype instead:</span>
+              <code>{details.instance_of ?? ""}</code>
+              <button
+                title="Copy the prototype path"
+                onclick={() => {
+                  navigator.clipboard
+                    ?.writeText(details.instance_of ?? "")
+                    .then(() => (prototypeCopied = true))
+                    .catch(() => {});
+                }}>{prototypeCopied ? "Copied" : "Copy path"}</button
+              >
+            </div>
+          {/if}
 
           {#if localTransform !== null || worldTransform !== null}
             <div class="inspector-section">
