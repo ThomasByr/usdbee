@@ -24,6 +24,9 @@ let loadGeneration = 0;
 let sceneLoading = false;
 let timeStepInFlight = false;
 let activeTimeStep: Promise<void> | null = null;
+// Promise covering the whole in-flight load (including its queued refresh);
+// resolves even on failure so waiting time steps never hang.
+let loadPromise: Promise<void> | null = null;
 let queuedTime: number | null = null;
 
 // The group + path->object index of the last successfully built scene.
@@ -229,6 +232,17 @@ export const renderState = $state({
     startTime = 0,
     fallbackColors: FallbackDependencies = {},
   ): Promise<THREE.Group | null> {
+    const work = this.loadWork(startTime, fallbackColors);
+    // Assigned right after the call: the work body runs synchronously up to
+    // its first await, so no caller can observe the gap below.
+    loadPromise = work.then(() => {});
+    return work;
+  },
+
+  async loadWork(
+    startTime: number,
+    fallbackColors: FallbackDependencies,
+  ): Promise<THREE.Group | null> {
     const generation = ++loadGeneration;
     sceneLoading = true;
     queuedTime = null;
@@ -260,8 +274,14 @@ export const renderState = $state({
       if (generation !== loadGeneration) return null;
       sceneLoading = false;
       queuedTime = null;
+      // A failed load leaves no integrated scene to step: release the old
+      // group so setStageTime cannot mutate a dead scene.
+      currentGroup = null;
+      currentPaths = new Map();
+      currentFallbacks = {};
       this.status = "error";
       this.error = typeof e === "string" ? e : String(e);
+      console.warn("usdbee: scene load failed; released the old scene:", this.error);
       return null;
     }
   },
@@ -275,7 +295,8 @@ export const renderState = $state({
     this.onTimeChange?.(time);
     if (sceneLoading) {
       queuedTime = time;
-      return activeTimeStep ?? Promise.resolve();
+      // Resolve only once the load (and its queued refresh) has run.
+      return loadPromise ?? activeTimeStep ?? Promise.resolve();
     }
     if (timeStepInFlight) {
       queuedTime = time;
@@ -308,8 +329,8 @@ export const renderState = $state({
     return activeTimeStep;
   },
 
-  // Animated content refresh: a full re-load at the current time.
+  // Animated content refresh: a full re-load at the current stage time.
   refreshAnimated(): Promise<THREE.Group | null> {
-    return this.loadRenderScene();
+    return this.loadRenderScene(this.time !== null ? this.time : 0);
   },
 });

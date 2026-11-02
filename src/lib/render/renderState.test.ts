@@ -79,6 +79,25 @@ describe("renderState", () => {
     expect(renderState.status).toBe("error");
     expect(renderState.error).toBe("manifest blew up");
   });
+
+  it("releases the old scene after a failed reload so time steps cannot mutate it", async () => {
+    const wobble = node({ path: "/Scene/Wobble", name: "Wobble", transform: translate(1) });
+    const group = await loadScene(() => [wobble]);
+
+    mockedInvoke.mockRejectedValueOnce("reload blew up");
+    const reloaded = await renderState.loadRenderScene();
+    expect(reloaded).toBeNull();
+    expect(renderState.status).toBe("error");
+    expect(renderState.error).toBe("reload blew up");
+
+    // A dead scene must not be stepped: no IPC, no mutation of the old group.
+    mockIpc(() => [node({ ...wobble, transform: translate(9) })]);
+    mockedInvoke.mockClear();
+    await renderState.setStageTime(5);
+
+    expect(mockedInvoke).not.toHaveBeenCalled();
+    expect(group.children[0].matrix.elements[12]).toBe(1);
+  });
 });
 
 // --- Task 6: time codes end-to-end ------------------------------------
@@ -172,15 +191,40 @@ describe("renderState.setStageTime", () => {
     });
 
     const loading = renderState.loadRenderScene();
-    await renderState.setStageTime(5);
+    // The queued step's promise now resolves only after the load's refresh
+    // runs, so it cannot be awaited until the pending manifest resolves.
+    const step = renderState.setStageTime(5);
     const callsDuringLoad = manifestCalls;
     pending.resolve([node({ path: "/New", name: "New", transform: translate(2) })]);
     const newGroup = await loading;
+    await step;
 
     expect(callsDuringLoad).toBe(1);
     expect(newGroup).toBeTruthy();
     expect(oldGroup.children[0].matrix.elements[12]).toBe(1);
     expect(newGroup!.children[0].matrix.elements[12]).toBe(7);
+    expect(renderState.time).toBe(5);
+  });
+
+  it("does not resolve a time step requested during a load before that load's refresh applied", async () => {
+    const pending = deferred<RenderNode[]>();
+    mockIpc(() => pending.promise);
+    const loading = renderState.loadRenderScene();
+
+    const step = renderState.setStageTime(5);
+    let resolved = false;
+    void step.then(() => {
+      resolved = true;
+    });
+    for (let i = 0; i < 3; i++) await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    pending.resolve([node({ path: "/Scene/New", name: "New", transform: translate(7) })]);
+    const group = await loading;
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+    // The load's queued refresh ran and applied before the promise resolved.
+    expect(group!.children[0].matrix.elements[12]).toBe(7);
     expect(renderState.time).toBe(5);
   });
 
@@ -459,6 +503,19 @@ describe("renderState.setStageTime", () => {
     const wrapper = group.children.find((child) => child.name === "/Scene/Wobble");
     expect(wrapper!.matrix.elements[12]).toBe(6);
     expect(renderState.time).toBe(6);
+  });
+
+  it("refreshes animated content at the current stage time", async () => {
+    await loadScene(() => []);
+    await renderState.setStageTime(5);
+    mockedInvoke.mockClear();
+
+    mockIpc(() => []);
+    const group = await renderState.refreshAnimated();
+
+    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { time: 5 });
+    expect(group).toBeTruthy();
+    expect(renderState.time).toBe(5);
   });
 
   it("uses each step's own time for geometry and finishes with the latest queued data", async () => {
