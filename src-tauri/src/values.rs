@@ -607,6 +607,17 @@ enum ComposedXform {
     Unsupported,
 }
 
+/// The outcome of evaluating a single xform op.
+#[derive(Debug)]
+enum OpOutcome {
+    Matrix(gf::Matrix4d),
+    /// The op names a real attribute that has no value at the requested
+    /// time (e.g. a time-sampled op queried at default time).
+    NoValue,
+    /// The op name or its value type is outside the evaluator's coverage.
+    Unrecognized,
+}
+
 fn compose_xform(prim: &Prim, time: Option<f64>) -> Result<ComposedXform, String> {
     let order = prim
         .attribute("xformOpOrder")
@@ -622,16 +633,24 @@ fn compose_xform(prim: &Prim, time: Option<f64>) -> Result<ComposedXform, String
             acc = gf::Matrix4d::IDENTITY;
             continue;
         }
-        let Some(matrix) = op_transform(prim, op, time)? else {
-            eprintln!(
-                "xform op {op} on {} is not supported; reporting no transform",
-                prim.path()
-            );
-            return Ok(ComposedXform::Unsupported);
-        };
-        acc = matrix * acc;
+        let outcome = op_transform(prim, op, time)?;
+        match outcome {
+            OpOutcome::Matrix(matrix) => acc = matrix * acc,
+            ref other => {
+                eprintln!("{}", xform_warning(op, &prim.path().to_string(), other));
+                return Ok(ComposedXform::Unsupported);
+            }
+        }
     }
     Ok(ComposedXform::Matrix(acc))
+}
+
+fn xform_warning(op: &str, path: &str, outcome: &OpOutcome) -> String {
+    let reason = match outcome {
+        OpOutcome::NoValue => "has no value at the requested time",
+        OpOutcome::Unrecognized | OpOutcome::Matrix(_) => "is not supported",
+    };
+    format!("xform op {op} on {path} {reason}; reporting no transform")
 }
 
 /// Whether the prim's `xformOpOrder` contains `!resetXformStack!`.
@@ -645,22 +664,26 @@ fn resets_xform_stack(prim: &Prim, time: Option<f64>) -> Result<bool, String> {
     ))
 }
 
-/// shortcut: unsupported xform ops yield None, Phase 3 extends coverage
-///
-/// Only plain `xformOp:<name>` attributes are evaluated. Suffixed forms
-/// (`xformOp:translate:pivot`), inverted forms (leading `!`), and any op
-/// whose value cannot be decoded yield `None` so the caller reports no
-/// transform instead of a plausible-but-wrong matrix.
-fn op_transform(prim: &Prim, op: &str, time: Option<f64>) -> Result<Option<gf::Matrix4d>, String> {
+/// Suffixed ops (`xformOp:translate:pivot`) evaluate as their base op, and
+/// `!inverted!` entries evaluate as the inverse of their op's matrix (the
+/// Maya pivot pattern pairs the two around the in-between ops).
+fn op_transform(prim: &Prim, op: &str, time: Option<f64>) -> Result<OpOutcome, String> {
+    let (op, invert) = match op
+        .strip_prefix("!inverted!")
+        .or_else(|| op.strip_prefix("!invert!"))
+    {
+        Some(op) => (op, true),
+        None => (op, false),
+    };
     let Some(name) = op.strip_prefix("xformOp:") else {
-        return Ok(None);
+        return Ok(OpOutcome::Unrecognized);
     };
     let Some(value) = prim
         .attribute(op)
         .value_at::<Value>(time.map(TimeCode::new))
         .map_err(err)?
     else {
-        return Ok(None);
+        return Ok(OpOutcome::NoValue);
     };
     let vec3 = |value: &Value| -> Option<[f64; 3]> {
         match value {
@@ -674,22 +697,32 @@ fn op_transform(prim: &Prim, op: &str, time: Option<f64>) -> Result<Option<gf::M
         b'Y' => gf::Matrix4d::rotation_y(degrees.to_radians()),
         _ => gf::Matrix4d::rotation_z(degrees.to_radians()),
     };
-    Ok(match (name, &value) {
+    let degrees = |value: &Value| -> Option<f64> {
+        match value {
+            Value::Double(d) => Some(*d),
+            Value::Float(f) => Some(*f as f64),
+            _ => None,
+        }
+    };
+    // Suffixes (`xformOp:translate:pivot`) evaluate as the base op; the
+    // decoded value and the matrix come from the base name alone.
+    let base = name.split(':').next().unwrap_or(name);
+    let matrix = match (base, &value) {
         ("translate", v) => vec3(v).map(gf::Matrix4d::translation),
         ("scale", v) => vec3(v).map(gf::Matrix4d::scale),
-        ("rotateX", Value::Double(degrees)) => Some(rotate(b'X', *degrees)),
-        ("rotateY", Value::Double(degrees)) => Some(rotate(b'Y', *degrees)),
-        ("rotateZ", Value::Double(degrees)) => Some(rotate(b'Z', *degrees)),
+        ("rotateX", v) => degrees(v).map(|d| rotate(b'X', d)),
+        ("rotateY", v) => degrees(v).map(|d| rotate(b'Y', d)),
+        ("rotateZ", v) => degrees(v).map(|d| rotate(b'Z', d)),
         // rotateZYX & friends: the first axis named is the most local (USD
         // xformOp.h), so in the row-vector convention its matrix is
         // leftmost and each axis uses its own vec3 component, in degrees.
         (name, v) if name.starts_with("rotate") && name.len() == "rotate".len() + 3 => {
             let order = &name.as_bytes()["rotate".len()..];
             if !order.iter().all(|axis| matches!(axis, b'X' | b'Y' | b'Z')) {
-                return Ok(None);
+                return Ok(OpOutcome::Unrecognized);
             }
             let Some([x, y, z]) = vec3(v) else {
-                return Ok(None);
+                return Ok(OpOutcome::Unrecognized);
             };
             let angle = |axis: u8| match axis {
                 b'X' => x,
@@ -706,7 +739,16 @@ fn op_transform(prim: &Prim, op: &str, time: Option<f64>) -> Result<Option<gf::M
         ("orient", Value::Quatd(q)) => Some(gf::Matrix4d::from_quat([q.w, q.x, q.y, q.z])),
         ("transform", Value::Matrix4d(matrix)) => Some(*matrix),
         _ => None,
-    })
+    };
+    match (matrix, invert) {
+        (Some(matrix), false) => Ok(OpOutcome::Matrix(matrix)),
+        // A singular op matrix has no inverse; treat it as unrecognized
+        // rather than dropping the inversion.
+        (Some(matrix), true) => Ok(matrix
+            .inverse()
+            .map_or(OpOutcome::Unrecognized, OpOutcome::Matrix)),
+        (None, _) => Ok(OpOutcome::Unrecognized),
+    }
 }
 
 /// The prim's world transform: its local transform composed with every
@@ -944,6 +986,79 @@ mod tests {
         let payload = payload(None, &Value::UnregisteredValue("opaque".into()));
         assert_eq!(payload.r#type, "unsupported");
         assert_eq!(payload.data, json!("opaque"));
+    }
+
+    #[test]
+    fn op_transform_distinguishes_no_value_from_unsupported_ops() {
+        let stage = xforms_stage();
+        let time_orient = stage
+            .prim("/World/TimeOrient")
+            .unwrap_or_else(|e| panic!("/World/TimeOrient resolvable: {e}"));
+        // Samples are authored at 1s+ only, so default time has no value: a
+        // distinct outcome from an op the evaluator cannot decode.
+        assert!(matches!(
+            op_transform(&time_orient, "xformOp:orient", None).unwrap(),
+            OpOutcome::NoValue
+        ));
+        assert!(xform_warning("xformOp:orient", "/World/TimeOrient", &OpOutcome::NoValue)
+            .contains("no value at the requested time"));
+
+        let unsupported = stage
+            .prim("/World/Unsupported")
+            .unwrap_or_else(|e| panic!("/World/Unsupported resolvable: {e}"));
+        assert!(matches!(
+            op_transform(&unsupported, "xformOp:flip", None).unwrap(),
+            OpOutcome::Unrecognized
+        ));
+        assert!(xform_warning("xformOp:flip", "/World/Unsupported", &OpOutcome::Unrecognized)
+            .contains("not supported"));
+    }
+
+    #[test]
+    fn op_transform_evaluates_the_orient_at_its_authored_time_only() {
+        let stage = xforms_stage();
+        let prim = stage
+            .prim("/World/TimeOrient")
+            .unwrap_or_else(|e| panic!("/World/TimeOrient resolvable: {e}"));
+        assert!(local_transform(&prim, None).unwrap().is_none());
+        // quat (cos45, 0, 0, sin45) rotates Z by 90 degrees.
+        let matrix = local_transform(&prim, Some(1.0))
+            .unwrap()
+            .expect("the quaternion evaluates at its sample");
+        assert_close(
+            &[
+                0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            &matrix.0,
+        );
+    }
+
+    #[test]
+    fn op_transform_decodes_float_valued_rotation_degrees() {
+        let stage = xforms_stage();
+        let prim = stage
+            .prim("/World/FloatRotate")
+            .unwrap_or_else(|e| panic!("/World/FloatRotate resolvable: {e}"));
+        let matrix = op_transform(&prim, "xformOp:rotateY", None)
+            .unwrap();
+        let OpOutcome::Matrix(matrix) = matrix else {
+            panic!("float rotateY evaluates: {matrix:?}")
+        };
+        assert_close(&gf::Matrix4d::rotation_y(90.0_f64.to_radians()).0, &matrix.0);
+    }
+
+    fn xforms_stage() -> Stage {
+        let path = format!("{}/tests/fixtures/xforms.usda", env!("CARGO_MANIFEST_DIR"));
+        Stage::open(&path).expect("xforms.usda opens")
+    }
+
+    fn assert_close(expected: &[f64; 16], actual: &[f64; 16]) {
+        for (i, (e, a)) in expected.iter().zip(actual).enumerate() {
+            assert!(
+                (e - a).abs() < 1e-6,
+                "element {i}: expected {e}, got {a}"
+            );
+        }
     }
 
     #[test]

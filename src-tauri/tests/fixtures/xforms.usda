@@ -35,4 +35,40 @@ def Xform "World"
         double3 xformOp:translate = (0, 0, 1)
         uniform token[] xformOpOrder = ["xformOp:translate:pivot", "xformOp:translate"]
     }
+
+    def Xform "MayaPivot"
+    {
+        double3 xformOp:translate:pivot = (5, 0, 0)
+        double xformOp:rotateZ = 90
+        double3 xformOp:translate = (0, 0, 1)
+        uniform token[] xformOpOrder = ["xformOp:translate:pivot", "xformOp:rotateZ", "!inverted!xformOp:translate:pivot", "xformOp:translate"]
+    }
+
+    def Xform "MayaPivotInvert"
+    {
+        double3 xformOp:translate:pivot = (5, 0, 0)
+        double xformOp:rotateZ = 90
+        double3 xformOp:translate = (0, 0, 1)
+        uniform token[] xformOpOrder = ["xformOp:translate:pivot", "xformOp:rotateZ", "!invert!xformOp:translate:pivot", "xformOp:translate"]
+    }
+
+    def Xform "Unsupported"
+    {
+        bool xformOp:flip = 0
+        uniform token[] xformOpOrder = ["xformOp:flip"]
+    }
+
+    def Xform "TimeOrient"
+    {
+        quatd xformOp:orient.timeSamples = {
+            1: (0.7071067811865476, 0, 0, 0.7071067811865476)
+        }
+        uniform token[] xformOpOrder = ["xformOp:orient"]
+    }
+
+    def Xform "FloatRotate"
+    {
+        float xformOp:rotateY = 90
+        uniform token[] xformOpOrder = ["xformOp:rotateY"]
+    }
 }

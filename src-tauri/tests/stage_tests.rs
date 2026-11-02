@@ -581,14 +581,83 @@ fn details_reset_xform_stack_discards_prior_ops_and_inheritance() {
 }
 
 #[test]
+fn details_suffixed_pivot_op_evaluates_as_translate() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "xforms.usda");
+    let local = details_via_owner(&state, "/World/Pivoted", None)
+        .local_transform
+        .expect("suffixed pivot op evaluates as its base translate");
+    assert_matrix_close(
+        &[
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 5.0, 0.0, 1.0, 1.0,
+        ],
+        &local,
+    );
+
+    // The parent /World translate (10, 0, 0) composes after the local.
+    let world = details_via_owner(&state, "/World/Pivoted", None)
+        .world_transform
+        .expect("world composes the parent");
+    assert_matrix_close(
+        &[
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 15.0, 0.0, 1.0, 1.0,
+        ],
+        &world,
+    );
+}
+
+#[test]
+fn details_maya_pivot_pattern_composes_pivot_relative_rotation() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "xforms.usda");
+    // `!inverted!` and `!invert!` are both USD inversion markers.
+    for path in ["/World/MayaPivot", "/World/MayaPivotInvert"] {
+        let local = details_via_owner(&state, path, None)
+            .local_transform
+            .expect("the pivot pattern evaluates");
+    // Ops pre-multiply left-to-right: pivot(5,0,0), rotateZ(90), the pivot
+    // inverse, then translate(0,0,1), so the matrix fixes the pivot point
+    // under the rotation and shifts by (5, -5, 1).
+    assert_matrix_close(
+        &[
+            0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 5.0, -5.0, 1.0, 1.0,
+        ],
+        &local,
+    );
+    }
+}
+
+#[test]
+fn details_time_sampled_orient_has_no_transform_at_default_time() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "xforms.usda");
+    // /World/TimeOrient only authors samples at time 1s+: at default time
+    // there is no value, which is no-transform, not a bad op.
+    let details = details_via_owner(&state, "/World/TimeOrient", None);
+    assert!(
+        details.local_transform.is_none(),
+        "no value at this time means no transform"
+    );
+    let at_one = details_via_owner(&state, "/World/TimeOrient", Some(1.0))
+        .local_transform
+        .expect("the quaternion evaluates at its authored time");
+    assert_matrix_close(
+        &[
+            0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+        &at_one,
+    );
+}
+
+#[test]
 fn details_unsupported_xform_ops_yield_no_transform() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "xforms.usda");
-    let details = details_via_owner(&state, "/World/Pivoted", None);
+    let details = details_via_owner(&state, "/World/Unsupported", None);
 
     assert!(
         details.local_transform.is_none(),
-        "pivot ops must not silently compose a wrong matrix"
+        "unsupported ops must not silently compose a wrong matrix"
     );
     assert!(details.world_transform.is_none());
 }
