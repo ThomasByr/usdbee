@@ -12,6 +12,16 @@ use usdbee_lib::stage::{
     spawn_stage_owner, RenderNode, StageRequest, StageState,
 };
 
+fn open_fixture_manifest(name: &str, time: Option<f64>) -> Vec<RenderNode> {
+    let (stage, info) = open_stage(&fixture(name)).expect("stage should open");
+    assert!(
+        info.composition_errors.is_empty(),
+        "composition errors: {:?}",
+        info.composition_errors
+    );
+    serialize_render_manifest(&stage, time).expect("manifest should serialize")
+}
+
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
@@ -349,6 +359,39 @@ fn manifest_expands_native_instance_prototype_children() {
         assert_eq!(mesh.type_name, "Mesh");
         assert!(mesh.has_geometry);
     }
+}
+
+#[test]
+fn native_instances_of_one_prototype_expand_independently() {
+    // native_instances.usda: two instances share one prototype; the first
+    // sits under a translated mover, the second under nothing. The shared
+    // prototype traversal must not leak one instance's transform or
+    // animated state into the other (memoization correctness pin).
+    let nodes = open_fixture_manifest("native_instances.usda", Some(0.0));
+
+    let mover = expect(&nodes, "/Scene/Mover");
+    assert_eq!(mover.transform[12], 1.0, "mover translate");
+    assert!(mover.animated, "sampled xform animates the subtree");
+    let in_motion = expect(&nodes, "/Scene/Mover/InMotion");
+    assert!(in_motion.children.len() >= 2, "instance expands the prototype");
+    let moving_mesh = expect(&nodes, "/Scene/Mover/InMotion/WheelMesh");
+    assert_eq!(moving_mesh.type_name, "Mesh");
+    assert!(moving_mesh.has_geometry);
+    assert!(
+        moving_mesh.animated,
+        "descendants of an instance under a sampled xform animate"
+    );
+
+    let at_rest = expect(&nodes, "/Scene/AtRest");
+    assert_eq!(at_rest.transform[12], 0.0, "its own translate");
+    assert_eq!(at_rest.transform[13], 5.0);
+    let resting_mesh = expect(&nodes, "/Scene/AtRest/WheelMesh");
+    assert!(resting_mesh.has_geometry);
+    assert!(
+        !resting_mesh.animated,
+        "the sharing instance never inherits the other tree's ancestor moves"
+    );
+    assert_eq!(moving_mesh.transform, resting_mesh.transform);
 }
 
 #[test]
