@@ -4,6 +4,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 import { invoke } from "@tauri-apps/api/core";
 import { stageState } from "./stageState.svelte";
+import { renderState } from "../render/renderState.svelte";
 
 const info = { path: "/a.usda" };
 const details = { path: "/A" } as never;
@@ -39,6 +40,33 @@ describe("stageState", () => {
     expect(stageState.details).toBeNull();
     expect(stageState.status).toBe("error");
     expect(stageState.error).toBe("bad stage");
+  });
+
+  it("passes the current render time when fetching selected prim details", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    renderState.time = 12.5;
+    mockedInvoke.mockResolvedValueOnce(details);
+
+    await stageState.selectPrim("/A");
+
+    expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { path: "/A", time: 12.5 });
+  });
+
+  it("refreshes the current selection at a newer render time", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    renderState.time = 1;
+    mockedInvoke.mockResolvedValueOnce(details);
+    await stageState.selectPrim("/A");
+    renderState.time = 2;
+    mockedInvoke.mockResolvedValueOnce(details);
+
+    const refresh = (stageState as any).refreshSelectedDetails;
+    expect(refresh).toBeTypeOf("function");
+    await refresh.call(stageState);
+
+    expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { path: "/A", time: 2 });
   });
 
   it("adopts a backend-opened stage without composing it again", async () => {

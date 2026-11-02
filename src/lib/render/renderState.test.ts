@@ -11,12 +11,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { invoke } from "@tauri-apps/api/core";
 import * as THREE from "three";
-import {
-  advanceStageTime,
-  renderState,
-  toAbsoluteTime,
-  toPlayheadOffset,
-} from "./renderState.svelte";
+import { advanceStageTime, renderState, toAbsoluteTime, toPlayheadOffset } from "./renderState.svelte";
 import type { RenderNode } from "../stage/types";
 
 const mockedInvoke = vi.mocked(invoke);
@@ -40,11 +35,21 @@ describe("renderState", () => {
 
     const group = await renderState.loadRenderScene();
 
-    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { time: null });
+    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { time: 0 });
     expect(group).toBeTruthy();
     expect(group!.children).toHaveLength(0);
     expect(renderState.status).toBe("ready");
     expect(renderState.error).toBeNull();
+  });
+
+  it("resets stale stage time to the new stage start on load", async () => {
+    renderState.time = 99;
+    mockedInvoke.mockResolvedValueOnce([]);
+
+    await renderState.loadRenderScene(10);
+
+    expect(renderState.time).toBe(10);
+    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { time: 10 });
   });
 
   it("discards a stale manifest response after a newer load", async () => {
@@ -144,8 +149,49 @@ function findMesh(group: THREE.Group): THREE.Mesh {
 }
 
 describe("renderState.setStageTime", () => {
+  it("notifies the inspector hook whenever time changes", async () => {
+    const listener = vi.fn();
+    (renderState as any).onTimeChange = listener;
+
+    await renderState.setStageTime(4);
+
+    expect(listener).toHaveBeenCalledWith(4);
+    (renderState as any).onTimeChange = null;
+  });
+
+  it("queues a time step during a scene build instead of mutating the old group", async () => {
+    const oldNode = node({ path: "/Old", name: "Old", transform: translate(1) });
+    const oldGroup = await loadScene(() => [oldNode]);
+    const pending = deferred<RenderNode[]>();
+    let manifestCalls = 0;
+    mockIpc(() => {
+      manifestCalls += 1;
+      return manifestCalls === 1
+        ? pending.promise
+        : [node({ path: "/New", name: "New", transform: translate(7) })];
+    });
+
+    const loading = renderState.loadRenderScene();
+    await renderState.setStageTime(5);
+    const callsDuringLoad = manifestCalls;
+    pending.resolve([node({ path: "/New", name: "New", transform: translate(2) })]);
+    const newGroup = await loading;
+
+    expect(callsDuringLoad).toBe(1);
+    expect(newGroup).toBeTruthy();
+    expect(oldGroup.children[0].matrix.elements[12]).toBe(1);
+    expect(newGroup!.children[0].matrix.elements[12]).toBe(7);
+    expect(renderState.time).toBe(5);
+  });
+
   it("refetches geometry only for animated nodes and applies transforms in place", async () => {
-    const wobble = node({ path: "/Scene/Wobble", name: "Wobble", type_name: "Mesh", has_geometry: true, animated: true });
+    const wobble = node({
+      path: "/Scene/Wobble",
+      name: "Wobble",
+      type_name: "Mesh",
+      has_geometry: true,
+      animated: true,
+    });
     const still = node({ path: "/Scene/Still", name: "Still", type_name: "Mesh", has_geometry: true });
     const group = await loadScene(() => [wobble, still]);
 
@@ -166,65 +212,107 @@ describe("renderState.setStageTime", () => {
   });
 
   it("applies new transforms from the time manifest in place", async () => {
-    const wobble = node({ path: "/Scene/Wobble", name: "Wobble", type_name: "Mesh", has_geometry: true, animated: true });
+    const wobble = node({
+      path: "/Scene/Wobble",
+      name: "Wobble",
+      type_name: "Mesh",
+      has_geometry: true,
+      animated: true,
+    });
     const group = await loadScene(() => [wobble]);
 
     mockIpc(() => [node({ ...wobble, transform: translate(3) })]);
     await renderState.setStageTime(8);
 
     const wrapper = group.children.find((child) => child.name === "/Scene/Wobble");
-    expect(wrapper!.position.x).toBe(3);
+    expect(wrapper!.matrix.elements[12]).toBe(3);
   });
 
-  it("rejects a stale time response after a newer time step", async () => {
-    const wobble = node({ path: "/Scene/Wobble", name: "Wobble", type_name: "Mesh", has_geometry: true, animated: true });
+  it("coalesces rapid time steps to one active and one latest manifest fetch", async () => {
+    const wobble = node({ path: "/Scene/Wobble", name: "Wobble" });
+    await loadScene(() => [wobble]);
+    const active = deferred<RenderNode[]>();
+    const requested: number[] = [];
+    mockedInvoke.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === "get_scene_manifest") {
+        requested.push(args.time);
+        return requested.length === 1 ? active.promise : [node({ ...wobble, transform: translate(9) })];
+      }
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    const steps = [
+      renderState.setStageTime(5),
+      renderState.setStageTime(6),
+      renderState.setStageTime(7),
+      renderState.setStageTime(8),
+      renderState.setStageTime(9),
+    ];
+    const callsWhileActive = requested.length;
+    active.resolve([node({ ...wobble, transform: translate(5) })]);
+    await Promise.all(steps);
+
+    expect(callsWhileActive).toBe(1);
+    expect(requested).toEqual([5, 9]);
+    expect(renderState.time).toBe(9);
+  });
+
+  it("applies the latest queued transform after the active manifest completes", async () => {
+    const wobble = node({
+      path: "/Scene/Wobble",
+      name: "Wobble",
+      type_name: "Mesh",
+      has_geometry: true,
+      animated: true,
+    });
     const group = await loadScene(() => [wobble]);
 
-    const stale = deferred<RenderNode[]>();
+    const active = deferred<RenderNode[]>();
     let manifestCall = 0;
     mockIpc(() => {
       manifestCall += 1;
-      // First manifest fetch (t=5) hangs; the later one (t=6) resolves.
-      return manifestCall === 1 ? stale.promise : [node({ ...wobble, transform: translate(6) })];
+      return manifestCall === 1 ? active.promise : [node({ ...wobble, transform: translate(6) })];
     });
-    const staleStep = renderState.setStageTime(5);
-    await renderState.setStageTime(6);
+    const activeStep = renderState.setStageTime(5);
+    const latestStep = renderState.setStageTime(6);
+
+    active.resolve([node({ ...wobble, transform: translate(9) })]);
+    await Promise.all([activeStep, latestStep]);
 
     const wrapper = group.children.find((child) => child.name === "/Scene/Wobble");
-    expect(wrapper!.position.x).toBe(6);
-
-    // The stale t=5 manifest lands after the t=6 step already applied: the
-    // generation guard must discard it, not overwrite the newer time.
-    stale.resolve([node({ ...wobble, transform: translate(9) })]);
-    await staleStep;
-    expect(wrapper!.position.x).toBe(6);
+    expect(wrapper!.matrix.elements[12]).toBe(6);
     expect(renderState.time).toBe(6);
   });
 
-  it("keeps the newer step's geometry when an older step's slow fetch lands late", async () => {
-    const wobble = node({ path: "/Scene/Wobble", name: "Wobble", type_name: "Mesh", has_geometry: true, animated: true });
+  it("uses each step's own time for geometry and finishes with the latest queued data", async () => {
+    const wobble = node({
+      path: "/Scene/Wobble",
+      name: "Wobble",
+      type_name: "Mesh",
+      has_geometry: true,
+      animated: true,
+    });
     const group = await loadScene(() => [wobble]);
 
-    // t=5's per-node geometry fetch hangs; t=6's resolves immediately.
     const slow = deferred<ArrayBuffer>();
     mockedInvoke.mockImplementation(async (cmd: string, args: any) => {
       if (cmd === "get_scene_manifest") return [wobble];
-      if (cmd === "get_geometry_data")
-        return args.time === 5 ? slow.promise : packedGeometry(2);
+      if (cmd === "get_geometry_data") return args.time === 5 ? slow.promise : packedGeometry(2);
       if (cmd === "get_material_data") return { name: "Mat", surface: null };
       throw new Error(`unexpected command: ${cmd}`);
     });
 
     const slowStep = renderState.setStageTime(5);
-    await renderState.setStageTime(6);
+    const latestStep = renderState.setStageTime(6);
+    slow.resolve(packedGeometry(9));
+    await Promise.all([slowStep, latestStep]);
+
     const mesh = findMesh(group);
     expect(mesh.geometry.getAttribute("position").getY(2)).toBe(2);
-
-    // The t=5 geometry resolves after the t=6 step finished applying: the
-    // per-node staleness check must abort before it overwrites the screen.
-    slow.resolve(packedGeometry(9));
-    await slowStep;
-    expect(mesh.geometry.getAttribute("position").getY(2)).toBe(2);
+    const geometryTimes = mockedInvoke.mock.calls
+      .filter(([cmd]) => cmd === "get_geometry_data")
+      .map(([, args]) => (args as any).time);
+    expect(geometryTimes).toEqual([5, 6]);
     expect(renderState.time).toBe(6);
   });
 });

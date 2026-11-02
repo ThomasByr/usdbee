@@ -407,6 +407,10 @@
       }
     }
 
+    renderState.onTimeChange = () => {
+      void stageState.refreshSelectedDetails();
+    };
+
     // Listeners for Rust events
     const unlisteners = [
       listen("open-export-modal", () => {
@@ -444,7 +448,6 @@
       await loadRustScene();
     }
 
-
     if (canvas) {
       viewer.init(canvas);
     }
@@ -458,13 +461,7 @@
       const end = info?.end_time_code ?? 0;
       if (end <= start) return;
       const tcps = info?.time_codes_per_second ?? 24;
-      const next = advanceStageTime(
-        renderState.time ?? start,
-        deltaSeconds,
-        tcps,
-        start,
-        end,
-      );
+      const next = advanceStageTime(renderState.time ?? start, deltaSeconds, tcps, start, end);
       viewer.animationProgress = toPlayheadOffset(next, start);
       void renderState.setStageTime(next);
     };
@@ -474,6 +471,7 @@
       window.removeEventListener("keydown", handleGlobalKeydown);
       window.removeEventListener("keyup", handleGlobalKeyup);
       unlisteners.forEach((u) => u.then((f) => f()));
+      renderState.onTimeChange = null;
       viewer.dispose();
     };
   });
@@ -516,7 +514,10 @@
     viewer.hasAnimation = renderState.hasAnimated;
     const info = stageState.stageInfo;
     viewer.animationDuration = (info?.end_time_code ?? 0) - (info?.start_time_code ?? 0);
-    viewer.animationProgress = toPlayheadOffset(renderState.time ?? info?.start_time_code ?? 0, info?.start_time_code ?? 0);
+    viewer.animationProgress = toPlayheadOffset(
+      renderState.time ?? info?.start_time_code ?? 0,
+      info?.start_time_code ?? 0,
+    );
 
     viewer.sceneBox.setFromObject(group, true);
     let size = viewer.sceneBox.getSize(new THREE.Vector3()).length();
@@ -565,9 +566,13 @@
   async function loadRustScene() {
     if (!viewer.scene) return;
     removeLoadedGroup();
+    viewer.animationProgress = 0;
     loadingProgress = { stage: "Composing Rust render scene...", percent: 40 };
     try {
-      const group = await renderState.loadRenderScene();
+      const group = await renderState.loadRenderScene(
+        stageState.stageInfo?.start_time_code ?? 0,
+        dependencies ?? {},
+      );
       if (group) {
         integrateScene(group);
       } else if (renderState.status === "error") {

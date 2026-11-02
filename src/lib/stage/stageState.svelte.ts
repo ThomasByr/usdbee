@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { PrimDetails, PrimNode, StageInfo } from "./types";
+import { renderState } from "../render/renderState.svelte";
 
 let loadGeneration = 0;
 let selectionGeneration = 0;
@@ -64,12 +65,16 @@ export const stageState = $state({
     this.details = null;
     if (this.status !== "ready") return;
     try {
-      const details = await invoke<PrimDetails>("get_prim_details", { path });
+      const details = await invoke<PrimDetails>("get_prim_details", { path, time: renderState.time });
       if (generation === selectionGeneration) this.details = details;
     } catch (e) {
       if (generation !== selectionGeneration) return;
       this.details = null;
       this.error = typeof e === "string" ? e : String(e);
     }
+  },
+
+  async refreshSelectedDetails(): Promise<void> {
+    if (this.selectedPath) await this.selectPrim(this.selectedPath);
   },
 });
