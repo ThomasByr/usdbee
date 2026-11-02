@@ -767,19 +767,28 @@ input[type="color"]::-webkit-color-swatch {
   margin-left: 6px;
 }
 
-.variant-option {
-  font-size: 10px;
-  font-family: monospace;
-  padding: 1px 5px;
+.variant-select {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.05rem 0.2rem;
+  border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 3px;
-  border: 1px solid #3c3c3c;
-  color: #888;
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
 }
 
-.variant-option.selected {
-  border-color: #0e639c;
-  background: #0e639c;
-  color: white;
+.variant-select:focus {
+  outline: none;
+  border-color: rgba(120, 170, 255, 0.7);
+}
+
+.variant-error {
+  font-size: 0.72rem;
+  color: #ff8080;
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .arc-row {

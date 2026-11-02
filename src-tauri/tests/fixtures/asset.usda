@@ -4,7 +4,23 @@
 )
 
 def Xform "Model"
+(
+    prepend variantSets = "trim"
+    variants = {
+        string trim = "base"
+    }
+)
 {
+    variantSet "trim" = {
+        "base" {
+        }
+        "sport" {
+            def Cube "Spoiler"
+            {
+            }
+        }
+    }
+
     def Sphere "Wheel"
     {
         double radius = 0.5

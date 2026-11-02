@@ -112,4 +112,52 @@ describe("stageState", () => {
     expect(stageState.stageInfo).toEqual(currentInfo);
     expect(stageState.status).toBe("ready");
   });
+
+  it("setVariantSelection invokes the backend and passes null for a clear", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    await stageState.selectPrim("/A");
+    mockedInvoke.mockResolvedValue(undefined);
+
+    const error = await stageState.setVariantSelection("color", "blue");
+
+    expect(error).toBeNull();
+    expect(mockedInvoke).toHaveBeenCalledWith("set_variant_selection", {
+      path: "/A",
+      variantSet: "color",
+      selection: "blue",
+    });
+
+    await stageState.setVariantSelection("color", null);
+    expect(mockedInvoke).toHaveBeenLastCalledWith("set_variant_selection", {
+      path: "/A",
+      variantSet: "color",
+      selection: null,
+    });
+  });
+
+  it("setVariantSelection surfaces backend errors", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    await stageState.selectPrim("/A");
+    mockedInvoke.mockRejectedValueOnce("prim not found: /A");
+
+    const error = await stageState.setVariantSelection("color", "blue");
+
+    expect(error).toBe("prim not found: /A");
+  });
+
+  it("refreshAfterEdit refetches the tree and re-selects the prim", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    renderState.time = 3;
+    mockedInvoke.mockResolvedValueOnce(details);
+    await stageState.selectPrim("/A");
+
+    mockedInvoke.mockResolvedValueOnce([]).mockResolvedValueOnce(details);
+    await stageState.refreshAfterEdit();
+
+    expect(mockedInvoke).toHaveBeenCalledWith("get_stage_tree");
+    expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { path: "/A", time: 3 });
+  });
 });

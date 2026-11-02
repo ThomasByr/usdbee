@@ -4,6 +4,9 @@
   import AttributeEditor from "./AttributeEditor.svelte";
 
   let open = $state(true);
+  // Backend errors per variant-set name (cleared when a new selection is
+  // attempted); the kind editor reuses AttributeEditor's own error span.
+  let variantErrors = $state<Record<string, string | null>>({});
 
   const details = $derived(stageState.details);
 
@@ -84,19 +87,26 @@
             </div>
           {/if}
 
-          {#if details.metadata.length > 0}
-            <div class="inspector-section">
-              <h4>Metadata</h4>
-              {#each details.metadata as [field, value] (field)}
-                <div class="attr-row">
-                  <span class="attr-name">{field}</span>
-                  <span class="attr-value">
-                    <AttributeEditor {value} oncommit={(v) => stageState.setPrimMetadata(field, v)} />
-                  </span>
-                </div>
-              {/each}
+          <div class="inspector-section">
+            <h4>Metadata</h4>
+            <div class="attr-row">
+              <span class="attr-name">kind</span>
+              <span class="attr-value">
+                <AttributeEditor
+                  value={{ type: "token", data: details.kind }}
+                  oncommit={(v) => stageState.setPrimMetadata("kind", v)}
+                />
+              </span>
             </div>
-          {/if}
+            {#each details.metadata as [field, value] (field)}
+              <div class="attr-row">
+                <span class="attr-name">{field}</span>
+                <span class="attr-value">
+                  <AttributeEditor {value} oncommit={(v) => stageState.setPrimMetadata(field, v)} />
+                </span>
+              </div>
+            {/each}
+          </div>
 
           {#if details.variant_sets.length > 0}
             <div class="inspector-section">
@@ -105,13 +115,31 @@
                 <div class="variant-set">
                   <span class="attr-name">{set.name}</span>
                   <span class="variant-options">
-                    {#each set.options as option (option)}
-                      <span
-                        class="variant-option"
-                        class:selected={option === set.authored_selection}
-                        title={option === set.authored_selection ? "authored selection" : ""}>{option}</span
-                      >
-                    {/each}
+                    <select
+                      class="variant-select"
+                      title="authored selection: {set.authored_selection ?? 'none'}"
+                      value={set.authored_selection ?? ""}
+                      onchange={async (event) => {
+                        const selection = event.currentTarget.value || null;
+                        variantErrors[set.name] = null;
+                        variantErrors[set.name] = await stageState.setVariantSelection(
+                          set.name,
+                          selection,
+                        );
+                      }}
+                    >
+                      <!-- The empty option clears the local selection; weaker
+                        layer opinions compose again. -->
+                      <option value="">(none)</option>
+                      {#each set.options as option (option)}
+                        <option value={option}>{option}</option>
+                      {/each}
+                    </select>
+                    {#if variantErrors[set.name]}
+                      <span class="variant-error" title={variantErrors[set.name]}>
+                        {variantErrors[set.name]}
+                      </span>
+                    {/if}
                   </span>
                 </div>
               {/each}

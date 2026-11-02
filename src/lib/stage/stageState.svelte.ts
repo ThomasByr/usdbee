@@ -78,9 +78,26 @@ export const stageState = $state({
     if (this.selectedPath) await this.selectPrim(this.selectedPath);
   },
 
+  // The usd-stage-changed refresh: an edit can reshape the composed tree
+  // (metadata, variants), so the tree refetches and the current prim
+  // re-selects for fresh details. The viewport manifest rebuild lives in
+  // the page (it owns scene integration).
+  async refreshAfterEdit(): Promise<void> {
+    if (this.status !== "ready") return;
+    try {
+      const tree = await invoke<PrimNode[]>("get_stage_tree");
+      if (this.status !== "ready") return;
+      this.tree = tree;
+    } catch {
+      // The tree refetch is best-effort; details still refresh below.
+    }
+    if (this.selectedPath) await this.selectPrim(this.selectedPath);
+  },
+
   // Author an attribute value on the selected prim (session layer); returns
   // the backend error string, or null on success. Time is the viewer's
   // current USD time code so sampled edits land where the user is looking.
+  // The usd-stage-changed event drives the details/tree/manifest refresh.
   async setAttributeValue(name: string, value: ValuePayload): Promise<string | null> {
     if (!this.selectedPath) return "no prim selected";
     try {
@@ -90,22 +107,35 @@ export const stageState = $state({
         value,
         time: renderState.time,
       });
-      await this.selectPrim(this.selectedPath);
       return null;
     } catch (e) {
       return typeof e === "string" ? e : String(e);
     }
   },
 
-  // Author a metadata field on the selected prim; metadata can change the
-  // tree (e.g. active), so the tree refetches on success.
+  // Author a metadata field on the selected prim; the usd-stage-changed
+  // event drives the tree/details/manifest refresh.
   async setPrimMetadata(key: string, value: ValuePayload): Promise<string | null> {
     if (!this.selectedPath) return "no prim selected";
     try {
       await invoke("set_prim_metadata", { path: this.selectedPath, key, value });
-      const tree = await invoke<PrimNode[]>("get_stage_tree");
-      this.tree = tree;
-      await this.selectPrim(this.selectedPath);
+      return null;
+    } catch (e) {
+      return typeof e === "string" ? e : String(e);
+    }
+  },
+
+  // Author (or clear, with null) one variant-set selection on the selected
+  // prim; a switch reshapes the composed tree, so the usd-stage-changed
+  // event drives the refresh.
+  async setVariantSelection(variantSet: string, selection: string | null): Promise<string | null> {
+    if (!this.selectedPath) return "no prim selected";
+    try {
+      await invoke("set_variant_selection", {
+        path: this.selectedPath,
+        variantSet,
+        selection,
+      });
       return null;
     } catch (e) {
       return typeof e === "string" ? e : String(e);

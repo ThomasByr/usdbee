@@ -13,6 +13,10 @@
   const editable = $derived(isEditableValue(value));
   let draft = $state("");
   let error = $state<string | null>(null);
+  // A failed Enter-commit keeps the draft for fixing, and the blur that
+  // follows must not fire the same failed commit a second time: the flag
+  // suppresses that one blur and resets on the next focus.
+  let suppressNextBlur = $state(false);
 
   // Sync the draft to the incoming data on mount and on every details
   // refresh (a successful commit refreshes details; a failed one leaves
@@ -23,11 +27,16 @@
     error = null;
   });
 
-  async function commit() {
+  async function commit(fromBlur = false) {
+    if (fromBlur && suppressNextBlur) {
+      suppressNextBlur = false;
+      return;
+    }
     if (!editable) return;
     const result = commitEditedValue(value, draft);
     if (!result.ok) {
       error = result.error;
+      suppressNextBlur = true;
       return;
     }
     if (result.value.data === value.data) {
@@ -36,8 +45,10 @@
       return;
     }
     // On success the details refresh rewrites `value.data`, which resets
-    // the draft via the effect; on failure keep the draft for fixing.
+    // the draft via the effect; on failure keep the draft for fixing and
+    // swallow the follow-up blur.
     error = await oncommit(result.value);
+    if (error !== null) suppressNextBlur = true;
   }
 
   // Bool payloads come from the checkbox itself, not the text draft.
@@ -65,13 +76,14 @@
       class:value-error={error !== null}
       type="text"
       bind:value={draft}
+      onfocus={() => (suppressNextBlur = false)}
       onkeydown={(event) => {
         if (event.key === "Enter") {
           event.preventDefault();
           commit();
         }
       }}
-      onblur={commit}
+      onblur={() => commit(true)}
     />
     {#if error !== null}<span class="value-editor-error" title={error}>{error}</span>{/if}
   </span>

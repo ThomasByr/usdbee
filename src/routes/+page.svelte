@@ -452,9 +452,19 @@
       }),
       listen<StageInfo>("usd-stage-opened", (event) => {
         stageState.adoptOpenedStage(event.payload);
+        // Re-query the edit target + dirty layers: the previous stage's
+        // dirty set must not survive into the new open.
+        void editState.refresh();
       }),
       listen("usd-scene-loaded", (event: any) => {
         void handleSceneLoaded(event.payload);
+      }),
+      // An edit landed (value, metadata, variant selection): the tree and
+      // the selected prim re-query, and the viewport manifest re-fetches
+      // without the loading overlay.
+      listen("usd-stage-changed", () => {
+        void stageState.refreshAfterEdit();
+        void refreshSceneAfterEdit();
       }),
     ];
 
@@ -606,6 +616,15 @@
     } finally {
       loadingProgress = null;
     }
+  }
+
+  // The usd-stage-changed manifest re-fetch: swap the viewport scene at
+  // the CURRENT stage time (no loading overlay, no playhead jump).
+  async function refreshSceneAfterEdit() {
+    if (!viewer.scene) return;
+    removeLoadedGroup();
+    const group = await renderState.loadRenderScene(renderState.time ?? 0, dependencies ?? {});
+    if (group) integrateScene(group);
   }
 
   async function openUsdFile() {

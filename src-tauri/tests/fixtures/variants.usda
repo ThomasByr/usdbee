@@ -25,6 +25,12 @@ def Xform "Prop" (
                 color3f[] primvars:displayColor = [(0, 0, 1)]
             }
         }
+        "green" {
+            def Sphere "GreenShape"
+            {
+                color3f[] primvars:displayColor = [(0, 1, 0)]
+            }
+        }
     }
 
     variantSet "size" = {

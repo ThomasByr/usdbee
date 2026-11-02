@@ -12,7 +12,8 @@ use openusd::ar::DefaultResolver;
 use openusd::gf;
 use openusd::sdf::{self, ValueTypeName};
 use openusd::usd::{
-    EditTarget, InitialLoadSet, PrimPredicate, SchemaBase, Stage, TimeCode, UndoStage,
+    EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, SchemaBase, Stage, TimeCode,
+    UndoStage,
 };
 use openusd_schemas::geom::{
     Imageable, ImageableExt, PointInstancer, PointInstancerSchema, Purpose, Visibility,
@@ -78,6 +79,13 @@ pub enum StageRequest {
         path: String,
         key: String,
         value: ValuePayload,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    SetVariantSelection {
+        path: String,
+        variant_set: String,
+        // None clears the set's selection on the edit target.
+        selection: Option<String>,
         reply: mpsc::Sender<Result<(), String>>,
     },
     GetEditTarget {
@@ -300,20 +308,15 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                     };
                     if response.is_ok() {
                         if let Some(ref stage) = current_stage {
-                            // shortcut: coarse clear — any edit invalidates
-                            // every cached tessellation; per-path eviction
-                            // when edits grow edit-target awareness
-                            mesh_cache.clear();
-                            // shortcut: coarse clear — any edit can change
-                            // composed types/purpose/bindings, so the whole
-                            // manifest skeleton rebuilds; fine until edits
-                            // become frequent
-                            manifest_skeleton = None;
-                            resolve_memo.clear();
-                            mark_dirty(&mut dirty_layers, stage);
-                            if let Some(sink) = &sink {
-                                sink(std::slice::from_ref(&path));
-                            }
+                            after_mutation(
+                                stage,
+                                &sink,
+                                &mut mesh_cache,
+                                &mut manifest_skeleton,
+                                &mut resolve_memo,
+                                &mut dirty_layers,
+                                &path,
+                            );
                         }
                     }
                     let _ = reply.send(response);
@@ -333,20 +336,48 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                     };
                     if response.is_ok() {
                         if let Some(ref stage) = current_stage {
-                            // shortcut: coarse clear — any edit invalidates
-                            // every cached tessellation; per-path eviction
-                            // when edits grow edit-target awareness
-                            mesh_cache.clear();
-                            // shortcut: coarse clear — any edit can change
-                            // composed types/purpose/bindings, so the whole
-                            // manifest skeleton rebuilds; fine until edits
-                            // become frequent
-                            manifest_skeleton = None;
-                            resolve_memo.clear();
-                            mark_dirty(&mut dirty_layers, stage);
-                            if let Some(sink) = &sink {
-                                sink(std::slice::from_ref(&path));
-                            }
+                            after_mutation(
+                                stage,
+                                &sink,
+                                &mut mesh_cache,
+                                &mut manifest_skeleton,
+                                &mut resolve_memo,
+                                &mut dirty_layers,
+                                &path,
+                            );
+                        }
+                    }
+                    let _ = reply.send(response);
+                }
+                StageRequest::SetVariantSelection {
+                    path,
+                    variant_set,
+                    selection,
+                    reply,
+                } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            author_variant_selection(
+                                stage,
+                                &path,
+                                &variant_set,
+                                selection.as_deref(),
+                            )
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    if response.is_ok() {
+                        if let Some(ref stage) = current_stage {
+                            after_mutation(
+                                stage,
+                                &sink,
+                                &mut mesh_cache,
+                                &mut manifest_skeleton,
+                                &mut resolve_memo,
+                                &mut dirty_layers,
+                                &path,
+                            );
                         }
                     }
                     let _ = reply.send(response);
@@ -698,6 +729,143 @@ fn author_prim_metadata(
         }
     }
     Ok(())
+}
+
+/// Post-success bookkeeping every mutation arm shares: the coarse cache
+/// clears (tessellations, manifest skeleton, resolve memo), the owner-side
+/// dirty mark for the edit target's layer, and the `usd-stage-changed`
+/// emission for the edited path.
+fn after_mutation(
+    stage: &Stage,
+    sink: &Option<StageChangeSink>,
+    mesh_cache: &mut MeshCache,
+    manifest_skeleton: &mut Option<ManifestSkeleton>,
+    resolve_memo: &mut ResolveMemo,
+    dirty_layers: &mut Vec<String>,
+    path: &str,
+) {
+    // shortcut: coarse clear — any edit invalidates every cached
+    // tessellation; per-path eviction when edits grow edit-target awareness
+    mesh_cache.clear();
+    // shortcut: coarse clear — any edit can change composed
+    // types/purpose/bindings, so the whole manifest skeleton rebuilds;
+    // fine until edits become frequent
+    *manifest_skeleton = None;
+    resolve_memo.clear();
+    mark_dirty(dirty_layers, stage);
+    if let Some(sink) = sink {
+        let edited = path.to_string();
+        sink(std::slice::from_ref(&edited));
+    }
+}
+
+/// Author (or clear, with `None`) one variant-set selection on the current
+/// edit target. openusd 0.8 has no `VariantSets::set_selection` (a crate
+/// TODO), so this writes the `variantSelection` field the way C++
+/// `UsdPrimData::SetVariantSelection` does: read the target layer's own
+/// opinion, set or remove the set's entry, erase the field when the dict
+/// empties.
+///
+/// A target on a layer the prim composes FROM (a referenced asset) needs
+/// the arc's namespace mapping: the identity mapping a plain layer target
+/// carries would author at the composed path, which composes nowhere in
+/// the source layer. The matching arc target (`edit_target_for_arc`) is
+/// located by layer and installed for the write via `edit_context`, which
+/// restores the user's target on drop.
+fn author_variant_selection(
+    stage: &Stage,
+    path: &str,
+    variant_set: &str,
+    selection: Option<&str>,
+) -> Result<(), String> {
+    let prim = editable_prim(stage, path, false)?;
+    let target_id = stage.edit_target().layer_identifier().to_string();
+    for arc in [
+        EditTargetArc::Reference,
+        EditTargetArc::Payload,
+        EditTargetArc::Inherit,
+        EditTargetArc::Specialize,
+    ] {
+        let Ok(arc_target) = prim.edit_target_for_arc(arc) else {
+            continue;
+        };
+        if !same_layer(stage, arc_target.layer_identifier(), &target_id) {
+            continue;
+        }
+        // The current target IS this arc's source layer: write through the
+        // arc mapping so the selection lands at the layer-side spec path.
+        let context = stage
+            .edit_context(arc_target)
+            .map_err(|e| variant_selection_err(path, variant_set, &e))?;
+        apply_variant_selection(&prim, path, variant_set, selection)?;
+        drop(context);
+        return Ok(());
+    }
+    // No arc sources the prim from the target layer: a local stack target
+    // (session/root/sublayer), whose identity mapping is already correct.
+    apply_variant_selection(&prim, path, variant_set, selection)
+}
+
+/// The read-modify-write of the `variantSelection` field against whatever
+/// edit target is current.
+fn apply_variant_selection(
+    prim: &openusd::usd::Prim,
+    path: &str,
+    variant_set: &str,
+    selection: Option<&str>,
+) -> Result<(), String> {
+    prim.clone()
+        .update_metadata("variantSelection", |local| {
+            let mut selections = match local {
+                Some(sdf::Value::VariantSelectionMap(map)) => map,
+                // Hand-authored layers may spell the field as a plain
+                // dictionary; keep those sibling selections.
+                Some(sdf::Value::Dictionary(dict)) => dict
+                    .into_iter()
+                    .filter_map(|(set, value)| match value {
+                        sdf::Value::Token(token) => Some((set, token.as_str().to_owned())),
+                        sdf::Value::String(value) => Some((set, value)),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => HashMap::new(),
+            };
+            match selection {
+                Some(selection) => {
+                    selections.insert(variant_set.to_owned(), selection.to_owned());
+                    Some(sdf::Value::VariantSelectionMap(selections))
+                }
+                None => {
+                    selections.remove(variant_set);
+                    // An emptied dict clears the field entirely, the way a
+                    // selection delete reads back as "nothing authored here".
+                    if selections.is_empty() {
+                        None
+                    } else {
+                        Some(sdf::Value::VariantSelectionMap(selections))
+                    }
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|e| variant_selection_err(path, variant_set, &e))
+}
+
+fn variant_selection_err(path: &str, variant_set: &str, error: impl std::fmt::Display) -> String {
+    format!(
+        "failed to set variant selection {} on {}: {}",
+        variant_set, path, error
+    )
+}
+
+/// Whether two layer identifiers name one layer of this stage — the
+/// spellings can differ (anchored, search-path, or symlinked forms of one
+/// file), so both resolve through the stage's layer registry first.
+fn same_layer(stage: &Stage, a: &str, b: &str) -> bool {
+    match (stage.layer(a), stage.layer(b)) {
+        (Some(a), Some(b)) => a.identifier() == b.identifier(),
+        _ => false,
+    }
 }
 
 /// Record the current edit target's layer as carrying unsaved edits.
@@ -2058,6 +2226,38 @@ pub fn request_set_prim_metadata(
             path: path.to_string(),
             key: key.to_string(),
             value: value.clone(),
+            reply,
+        })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn set_variant_selection(
+    path: String,
+    variant_set: String,
+    selection: Option<String>,
+    state: tauri::State<'_, StageState>,
+) -> Result<(), String> {
+    request_set_variant_selection(&state.sender, &path, &variant_set, selection.as_deref())
+}
+
+pub fn request_set_variant_selection(
+    sender: &mpsc::Sender<StageRequest>,
+    path: &str,
+    variant_set: &str,
+    selection: Option<&str>,
+) -> Result<(), String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::SetVariantSelection {
+            path: path.to_string(),
+            variant_set: variant_set.to_string(),
+            selection: selection.map(str::to_string),
             reply,
         })
         .map_err(|_| "stage service unavailable".to_string())?;

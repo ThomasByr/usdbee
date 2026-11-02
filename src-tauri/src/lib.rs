@@ -98,6 +98,7 @@ pub fn run() {
             stage::get_material_data,
             stage::set_attribute_value,
             stage::set_prim_metadata,
+            stage::set_variant_selection,
             stage::get_edit_target,
             stage::set_edit_target,
             stage::list_dirty_layers,
