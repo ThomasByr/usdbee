@@ -34,6 +34,10 @@ export interface RenderNode {
   type_name: string;
   has_geometry: boolean;
   animated: boolean;
+  // The node's OWN geometry attrs (points/normals/widths/primvars, Task 6
+  // ruling) have authored time samples — per-step geometry refetch happens
+  // only for these; `animated` additionally covers transform motion.
+  geometry_animated: boolean;
   material: string | null;
   instances: number[][];
   transform: number[];

@@ -48,6 +48,7 @@ function node(overrides: Partial<RenderNode>): RenderNode {
     type_name: "Xform",
     has_geometry: false,
     animated: false,
+    geometry_animated: false,
     material: null,
     instances: [],
     transform: IDENTITY,

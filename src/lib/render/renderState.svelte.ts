@@ -5,8 +5,10 @@
 //
 // Task 6 adds time codes end-to-end: setStageTime(t) re-fetches the
 // manifest and updates the ALREADY-integrated group in place — transforms
-// and visibility for every node, geometry only for `animated: true` ones
-// (static meshes are never touched, and the scene is not rebuilt).
+// and visibility for every node, geometry only for `geometry_animated`
+// ones (whose own geometry attrs carry time samples); transform-only
+// animated nodes keep their load-time geometry, and the scene is not
+// rebuilt.
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import * as THREE from "three";
 import type { MaterialInfo, RenderNode } from "../stage/types";
@@ -153,14 +155,19 @@ async function updateNodes(
       if (!isSubtreeNode) applyTransform(wrapper, node.transform);
       wrapper.visible = node.visible;
       if (node.animated && isDrawable) {
-        if (isStale()) return;
-        try {
-          const geometry = toBufferGeometry(await fetchers.getGeometry(node.path, time));
+        // Only geometry whose OWN attrs carry time samples changes per
+        // step; transform-only animated nodes (the bulk of instanced/
+        // xform-driven scenes) keep their load-time geometry forever.
+        if (node.geometry_animated) {
           if (isStale()) return;
-          drawable.geometry.dispose();
-          drawable.geometry = geometry;
-        } catch (e) {
-          console.warn(`usdbee: keeping last geometry at ${node.path}:`, e);
+          try {
+            const geometry = toBufferGeometry(await fetchers.getGeometry(node.path, time));
+            if (isStale()) return;
+            drawable.geometry.dispose();
+            drawable.geometry = geometry;
+          } catch (e) {
+            console.warn(`usdbee: keeping last geometry at ${node.path}:`, e);
+          }
         }
         let instanced = drawable as THREE.InstancedMesh;
         const matrices =

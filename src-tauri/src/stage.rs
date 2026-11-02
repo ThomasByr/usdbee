@@ -322,6 +322,13 @@ pub struct RenderNode {
     pub type_name: String,
     pub has_geometry: bool,
     pub animated: bool,
+    /// The node's OWN geometry-defining attributes have authored time
+    /// samples (Task 6 ruling's "own sampled geometry attrs"): a playback
+    /// step must refetch this node's geometry. `animated` keeps its
+    /// broader meaning (any motion signal, incl. ancestor transforms and
+    /// instancer arrays); transform-only animated nodes keep their
+    /// load-time geometry, which never changes.
+    pub geometry_animated: bool,
     pub material: Option<String>,
     pub instances: Vec<[f64; 16]>,
     pub transform: [f64; 16],
@@ -534,11 +541,14 @@ fn prototype_children(
         // instance matrix, so sampled proto xformOps animate the
         // child as much as the instancer's own arrays do.
         let proto_renders_geometry = renders_geometry(&type_name);
-        let animated = {
-            let (proto_moves, proto_deforms) =
-                samples_scene_motion(&prototype, proto_renders_geometry)?;
-            instancer_moves || proto_moves || (proto_renders_geometry && proto_deforms)
-        };
+        let (proto_moves, proto_deforms) =
+            samples_scene_motion(&prototype, proto_renders_geometry)?;
+        let animated = instancer_moves || proto_moves || (proto_renders_geometry && proto_deforms);
+        // The synthetic node fetches the prototype ROOT's geometry (the
+        // one cache entry keyed by its resolved path), so only the root's
+        // own sampled geometry attrs count here — its descendants carry
+        // their own per-node flags from the walked subtree below.
+        let geometry_animated = proto_renders_geometry && proto_deforms;
         let mut instances = Vec::new();
         for (i, &proto_index) in proto_indices.iter().enumerate() {
             if proto_index < 0
@@ -585,6 +595,7 @@ fn prototype_children(
             has_geometry: renders_geometry(&type_name) && !excluded,
             type_name,
             animated,
+            geometry_animated,
             children: prototype_children,
         });
     }
@@ -708,6 +719,7 @@ fn render_children(
             has_geometry: renders_geometry(&type_name),
             type_name,
             animated: deforms || moves,
+            geometry_animated: deforms,
             instances: Vec::new(),
             transform: transform.0,
             visible,

@@ -130,6 +130,7 @@ function node(overrides: Partial<RenderNode>): RenderNode {
     type_name: "Xform",
     has_geometry: false,
     animated: false,
+    geometry_animated: false,
     material: null,
     instances: [],
     transform: IDENTITY,
@@ -228,13 +229,14 @@ describe("renderState.setStageTime", () => {
     expect(renderState.time).toBe(5);
   });
 
-  it("refetches geometry only for animated nodes and applies transforms in place", async () => {
+  it("refetches geometry for deforming nodes and applies transforms in place", async () => {
     const wobble = node({
       path: "/Scene/Wobble",
       name: "Wobble",
       type_name: "Mesh",
       has_geometry: true,
       animated: true,
+      geometry_animated: true,
     });
     const still = node({ path: "/Scene/Still", name: "Still", type_name: "Mesh", has_geometry: true });
     const group = await loadScene(() => [wobble, still]);
@@ -255,6 +257,29 @@ describe("renderState.setStageTime", () => {
     expect(stillWrapper).toBeTruthy();
   });
 
+  it("skips the geometry refetch for transform-only animated nodes", async () => {
+    // The bike case: every node animates via ancestor xformOps but no
+    // points are sampled. One playback step must fetch the manifest and
+    // ZERO geometry payloads, while the transform still applies.
+    const mover = node({
+      path: "/Scene/Mover",
+      name: "Mover",
+      type_name: "Mesh",
+      has_geometry: true,
+      animated: true,
+      geometry_animated: false,
+    });
+    const group = await loadScene(() => [mover]);
+
+    mockIpc(() => [node({ ...mover, transform: translate(5) })]);
+    await renderState.setStageTime(5);
+
+    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { time: 5 });
+    expect(mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_geometry_data")).toHaveLength(0);
+    const wrapper = group.children.find((child) => child.name === "/Scene/Mover");
+    expect(wrapper!.matrix.elements[12]).toBe(5);
+  });
+
   it("applies new transforms from the time manifest in place", async () => {
     const wobble = node({
       path: "/Scene/Wobble",
@@ -262,6 +287,7 @@ describe("renderState.setStageTime", () => {
       type_name: "Mesh",
       has_geometry: true,
       animated: true,
+      geometry_animated: true,
     });
     const group = await loadScene(() => [wobble]);
 
@@ -597,6 +623,7 @@ describe("renderState.setStageTime", () => {
       type_name: "Mesh",
       has_geometry: true,
       animated: true,
+      geometry_animated: true,
     });
     const group = await loadScene(() => [wobble]);
 

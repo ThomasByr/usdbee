@@ -97,6 +97,42 @@ fn manifest_flags_own_geometry_and_xform_sampling() {
 }
 
 #[test]
+fn manifest_separates_geometry_deformation_from_transform_motion() {
+    let nodes = manifest_at(Some(0.0));
+
+    // Wobble's points are time-sampled: its own geometry deforms, so a
+    // playback step must refetch it.
+    let wobble = expect(&nodes, "/Scene/Wobble");
+    assert!(wobble.animated);
+    assert!(
+        wobble.geometry_animated,
+        "sampled points imply geometry_animated"
+    );
+
+    // Pulse samples only xformOp:translate (its custom `size` samples are
+    // unrendered data): transforms per step, but geometry never changes.
+    let pulse = expect(&nodes, "/Scene/Pulse");
+    assert!(pulse.animated);
+    assert!(
+        !pulse.geometry_animated,
+        "sampled xformOps alone do not deform geometry"
+    );
+
+    // The Child mesh is static under a sampled-ancestor Xform: it animates
+    // (its transform changes per step) but its geometry is load-time-stable.
+    let child = expect(&nodes, "/Scene/Mover/Child");
+    assert!(child.animated);
+    assert!(
+        !child.geometry_animated,
+        "ancestor transform motion never deforms the child's geometry"
+    );
+
+    let still = expect(&nodes, "/Scene/Still");
+    assert!(!still.animated);
+    assert!(!still.geometry_animated);
+}
+
+#[test]
 fn manifest_flags_children_of_an_animated_xform() {
     let nodes = manifest_at(Some(0.0));
 
