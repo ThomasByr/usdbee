@@ -15,7 +15,9 @@ export const GEOMETRY_VERSION = 1;
 // Batched fetch (Phase 2.5 Task 3) header, little-endian, mirrored by
 // src-tauri/src/stage.rs::frame_batch: batch magic "USBG" (0x55534247),
 // version u32, slot_count u32, then per slot status u32 (0 ok / 1 error),
-// length u32, bytes (the per-path USDB frame, or a UTF-8 error message).
+// length u32, bytes (the per-path USDB frame, or a UTF-8 error message),
+// zero-padded to a 4-byte multiple. The padding keeps every slot payload
+// view aligned; the decoder skips it via the aligned slot stride.
 export const GEOMETRY_BATCH_MAGIC = 0x55534247;
 export const GEOMETRY_BATCH_VERSION = 1;
 
@@ -122,7 +124,9 @@ export function decodeGeometryBatch(buffer: ArrayBuffer): (Uint8Array | null)[] 
       );
     }
     slots.push(status === 0 ? new Uint8Array(buffer, offset + 8, length) : null);
-    offset += 8 + length;
+    // The frame pads each payload to a 4-byte multiple so the next slot's
+    // header and view stay aligned; the length field is the real size.
+    offset += 8 + ((length + 3) & ~3);
   }
   if (offset !== buffer.byteLength) {
     throw new Error(`geometry batch payload has ${buffer.byteLength - offset} trailing bytes`);

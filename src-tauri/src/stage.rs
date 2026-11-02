@@ -1195,8 +1195,12 @@ fn resolved_render_path(
 
 /// Framed multi-slot geometry response (Phase 2.5 Task 3): little-endian
 /// u32 batch magic "USBG" (0x5553_4247), version 1, slot count, then per
-/// slot a status (0 ok / 1 err) + byte length + bytes (a USDB frame, or a
-/// UTF-8 error message). Mirrored by src/lib/render/geometryDecoder.ts.
+/// slot a status (0 ok / 1 err) + byte length + bytes, padded with zeros
+/// to a 4-byte multiple. The padding keeps every slot payload (and thus
+/// the next slot header) at a 4-byte-aligned offset, which the frontend
+/// typed-array views in decodeGeometry require; the length field stays
+/// the real payload length and the decoder skips the padding itself.
+/// Mirrored by src/lib/render/geometryDecoder.ts.
 const BATCH_MAGIC: u32 = 0x5553_4247;
 const BATCH_VERSION: u32 = 1;
 
@@ -1218,6 +1222,11 @@ fn frame_batch(slots: Vec<Result<Vec<u8>, String>>) -> Vec<u8> {
                 out.extend(error.into_bytes());
             }
         }
+        // USDB frames are already a multiple of 4 (u32 header + f32/u32
+        // data), but error messages are arbitrary UTF-8; zero-pad so slot
+        // boundaries never depend on payload alignment.
+        let pad = (4 - out.len() % 4) % 4;
+        out.extend(std::iter::repeat_n(0u8, pad));
     }
     out
 }

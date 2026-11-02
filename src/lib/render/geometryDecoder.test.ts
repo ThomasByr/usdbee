@@ -148,7 +148,8 @@ describe("decodeGeometry", () => {
 
 describe("decodeGeometryBatch", () => {
   // Mirrors Rust stage.rs::frame_batch: magic "USBG", version 1, slot
-  // count, then per slot status (0 ok / 1 err) + length + bytes.
+  // count, then per slot status (0 ok / 1 err) + length + bytes, padded to
+  // a 4-byte multiple so slot boundaries stay aligned.
   function buildBatch(slots: (ArrayBuffer | string)[]): ArrayBuffer {
     const body = slots.map((slot) => {
       if (slot instanceof ArrayBuffer) {
@@ -157,7 +158,7 @@ describe("decodeGeometryBatch", () => {
       return { status: 1, bytes: new TextEncoder().encode(slot) };
     });
     const size =
-      12 + body.reduce((sum, slot) => sum + 8 + slot.bytes.byteLength, 0);
+      12 + body.reduce((sum, slot) => sum + 8 + ((slot.bytes.byteLength + 3) & ~3), 0);
     const buffer = new ArrayBuffer(size);
     const view = new DataView(buffer);
     view.setUint32(0, 0x55534247, true);
@@ -168,7 +169,7 @@ describe("decodeGeometryBatch", () => {
       view.setUint32(offset, slot.status, true);
       view.setUint32(offset + 4, slot.bytes.byteLength, true);
       new Uint8Array(buffer, offset + 8).set(new Uint8Array(slot.bytes));
-      offset += 8 + slot.bytes.byteLength;
+      offset += 8 + ((slot.bytes.byteLength + 3) & ~3);
     }
     return buffer;
   }
@@ -189,6 +190,29 @@ describe("decodeGeometryBatch", () => {
     expect(slots[0]).toBeTruthy();
     expect(slots[1]).toBe(null);
     const decoded = decodeGeometry(slots[0]!);
+    expect(Array.from(decoded.positions)).toEqual(Array.from(decodeGeometry(frame).positions));
+    expect(Array.from(decoded.indices)).toEqual([0, 1, 2]);
+  });
+
+  it("decodes an ok slot that follows an unaligned error slot", () => {
+    // I1: "prim not found: /World/Nope" is 27 bytes, so the padding contract
+    // is what keeps this ok slot's byteOffset a multiple of 4; without it
+    // decodeGeometry throws RangeError on the typed-array view.
+    const frame = buildPayload({
+      flags: 0,
+      positions: [
+        [0, 0, 0],
+        [1, 0, 0],
+        [0, 1, 0],
+      ],
+      indices: [0, 1, 2],
+    });
+    const slots = decodeGeometryBatch(buildBatch(["prim not found: /World/Nope", frame]));
+
+    expect(slots).toHaveLength(2);
+    expect(slots[0]).toBe(null);
+    expect(slots[1]).toBeTruthy();
+    const decoded = decodeGeometry(slots[1]!);
     expect(Array.from(decoded.positions)).toEqual(Array.from(decodeGeometry(frame).positions));
     expect(Array.from(decoded.indices)).toEqual([0, 1, 2]);
   });

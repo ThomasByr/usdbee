@@ -210,7 +210,7 @@ fn batch_round_trip_frames_slots_fail_soft_per_path() {
         let status = u32_le(bytes, *offset);
         let len = u32_le(bytes, *offset + 4) as usize;
         let payload = bytes[*offset + 8..*offset + 8 + len].to_vec();
-        *offset += 8 + len;
+        *offset += 8 + ((len + 3) & !3);
         (status, payload)
     };
 
@@ -236,6 +236,57 @@ fn batch_round_trip_frames_slots_fail_soft_per_path() {
         "error says no geometry: {}",
         error
     );
+    assert_eq!(offset, bytes.len(), "no trailing bytes");
+}
+
+#[test]
+fn ok_slot_after_an_unaligned_error_slot_stays_aligned_and_decodes() {
+    // I1: an error slot's UTF-8 message need not be a multiple of 4; frame_batch
+    // pads payloads to 4 bytes so the next slot starts aligned and stays
+    // decodable instead of throwing RangeError in the frontend decoder.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "basic.usda");
+
+    let bytes = request_geometry_batch(
+        &state.sender,
+        &["/World/Nope".to_string(), "/World/Ball".to_string()],
+        None,
+    )
+    .expect("batch should frame");
+
+    let mut offset: usize = 12;
+    let slot = |bytes: &[u8], offset: &mut usize| -> (u32, Vec<u8>, u32) {
+        let start = *offset + 8;
+        let status = u32_le(bytes, *offset);
+        let len = u32_le(bytes, *offset + 4) as usize;
+        let payload = bytes[*offset + 8..*offset + 8 + len].to_vec();
+        *offset += 8 + ((len + 3) & !3);
+        (status, payload, start as u32)
+    };
+
+    let (status, error_payload, _start) = slot(&bytes, &mut offset);
+    assert_eq!(status, 1, "first slot: error from missing prim");
+    let error = String::from_utf8_lossy(&error_payload);
+    assert!(
+        error.contains("/World/Nope"),
+        "error names the path: {}",
+        error
+    );
+    assert_ne!(
+        error_payload.len() % 4,
+        0,
+        "error message length is not a multiple of 4"
+    );
+
+    let (status, payload, start) = slot(&bytes, &mut offset);
+    assert_eq!(status, 0, "second slot: ok despite the preceding error");
+    assert_eq!(
+        start % 4,
+        0,
+        "ok slot payload starts at a 4-byte aligned offset"
+    );
+    assert_eq!(u32_le(&payload, 0), 0x5553_4442, "slot bytes are a USDB frame");
+    assert_eq!(u32_le(&payload, 8), 3, "Ball vertex count");
     assert_eq!(offset, bytes.len(), "no trailing bytes");
 }
 
