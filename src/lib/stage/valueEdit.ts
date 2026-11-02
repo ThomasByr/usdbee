@@ -23,6 +23,17 @@ const EDITABLE_TYPES = new Set([
 const INT_TYPES = new Set(["uchar", "int", "uint", "int64", "uint64"]);
 const FLOAT_TYPES = new Set(["half", "float", "double", "timecode"]);
 
+// Exact ranges per integer family; out-of-range input is refused instead of
+// authoring a wrapped value. The backend re-checks every bound exactly (JS
+// numbers go imprecise past 2^53, so the backend is the authority there).
+const INT_RANGES: Record<string, [number, number]> = {
+  uchar: [0, 255],
+  int: [-2147483648, 2147483647],
+  uint: [0, 4294967295],
+  int64: [-9223372036854775808, 9223372036854775807],
+  uint64: [0, 18446744073709551615],
+};
+
 export function isEditableValue(value: ValuePayload): boolean {
   return EDITABLE_TYPES.has(value.type);
 }
@@ -43,8 +54,12 @@ export function parseEditedValue(type: string, raw: string | boolean): ParseResu
   if (INT_TYPES.has(type)) {
     if (!/^[+-]?\d+$/.test(text)) return { ok: false, error: `"${text}" is not an integer` };
     const n = Number(text);
-    if ((type === "uint" || type === "uint64" || type === "uchar") && n < 0) {
-      return { ok: false, error: `"${text}" is negative` };
+    const [min, max] = INT_RANGES[type];
+    if (n < min) {
+      return { ok: false, error: `"${text}" is below the ${type} minimum ${min}` };
+    }
+    if (n > max) {
+      return { ok: false, error: `"${text}" is above the ${type} maximum ${max}` };
     }
     return { ok: true, data: n };
   }

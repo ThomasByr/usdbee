@@ -3,6 +3,28 @@
 // names exactly — no rename attrs are set on the Rust side, so field names
 // serialize verbatim (already snake_case).
 
+// Rust stage.rs::EditTargetInfo / LayerInfo / LayerSaveRequest — the
+// Phase 3 editing surface (edit target switching, dirty layers, saving).
+export interface EditTargetInfo {
+  layer_identifier: string;
+  is_session: boolean;
+  // True when the stage was opened from a .usdz path: saving layers is
+  // refused (Save As usdz arrives in a later task).
+  is_usdz_stage: boolean;
+}
+
+export interface LayerInfo {
+  identifier: string;
+  // Where the layer was read from; null for anonymous layers.
+  original_path: string | null;
+  is_session: boolean;
+}
+
+export interface LayerSaveRequest {
+  identifier: string;
+  path: string;
+}
+
 export interface StageInfo {
   root_layer: string;
   time_codes_per_second: number;

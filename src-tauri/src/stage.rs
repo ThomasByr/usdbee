@@ -5,13 +5,15 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 use openusd::ar::DefaultResolver;
 use openusd::gf;
 use openusd::sdf::{self, ValueTypeName};
-use openusd::usd::{InitialLoadSet, PrimPredicate, SchemaBase, Stage, TimeCode, UndoStage};
+use openusd::usd::{
+    EditTarget, InitialLoadSet, PrimPredicate, SchemaBase, Stage, TimeCode, UndoStage,
+};
 use openusd_schemas::geom::{
     Imageable, ImageableExt, PointInstancer, PointInstancerSchema, Purpose, Visibility,
 };
@@ -73,6 +75,43 @@ pub enum StageRequest {
         value: ValuePayload,
         reply: mpsc::Sender<Result<(), String>>,
     },
+    GetEditTarget {
+        reply: mpsc::Sender<Result<EditTargetInfo, String>>,
+    },
+    // None = the session layer; Some(identifier) = a layer in this stage.
+    SetEditTarget {
+        identifier: Option<String>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    ListDirtyLayers {
+        reply: mpsc::Sender<Result<Vec<LayerInfo>, String>>,
+    },
+    // The only command that writes USD content to disk; nothing else in
+    // USDBEE ever does.
+    SaveLayers {
+        requests: Vec<LayerSaveRequest>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditTargetInfo {
+    pub layer_identifier: String,
+    pub is_session: bool,
+    pub is_usdz_stage: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerInfo {
+    pub identifier: String,
+    pub original_path: Option<String>,
+    pub is_session: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerSaveRequest {
+    pub identifier: String,
+    pub path: String,
 }
 
 pub struct StageState {
@@ -81,18 +120,11 @@ pub struct StageState {
     // handle so tests (and any introspection) can count real tessellation
     // work without reaching into the owner thread; used by the dedup pin.
     tessellations: Arc<AtomicUsize>,
-    // The edit-target layer identifier of the last successful mutation
-    // (owner-side dirty bookkeeping; Task 2 grows this into a layer list).
-    dirty_layer: Arc<Mutex<Option<String>>>,
 }
 
 impl StageState {
     pub fn mesh_tessellations(&self) -> usize {
         self.tessellations.load(Ordering::Relaxed)
-    }
-
-    pub fn dirty_layer(&self) -> Option<String> {
-        self.dirty_layer.lock().ok().and_then(|slot| slot.clone())
     }
 }
 
@@ -108,9 +140,7 @@ pub fn spawn_stage_owner() -> StageState {
 pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState {
     let (sender, receiver) = mpsc::channel();
     let tessellations = Arc::new(AtomicUsize::new(0));
-    let dirty_layer = Arc::new(Mutex::new(None));
     let owner_counter = tessellations.clone();
-    let dirty_slot = dirty_layer.clone();
     thread::spawn(move || {
         // The stage lives wrapped in openusd's UndoStage (Task 5 wires the
         // undo commands; recording starts now). Every read goes through its
@@ -120,6 +150,14 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
         // The time-independent manifest skeleton, built by the first manifest
         // call after an open; cleared on Open (like the geometry MeshCache).
         let mut manifest_skeleton: Option<ManifestSkeleton> = None;
+        // Edit-target layer identifiers with unsaved edits, in first-edit
+        // order; cleared on Open, drained by successful SaveLayers. openusd's
+        // `Layer::is_dirty` only reports in-flight overlay edits (it drains at
+        // every commit), so "unsaved on disk" is owner-side bookkeeping.
+        let mut dirty_layers: Vec<String> = Vec::new();
+        // Stamped at Open from the opened path's suffix; a usdz-opened stage
+        // cannot save layers (Task 7 adds the Save As usdz path).
+        let mut stage_is_usdz = false;
         // Requested-render-path -> geometry-cache-key resolutions, shared by
         // the geometry/material arms; cleared on Open. Prototype resolution
         // measured 0.4 ms/call (Task 1 profile c): memoizing turns repeats
@@ -134,9 +172,15 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                         Ok(info)
                     }))
                     .unwrap_or_else(panic_reply);
+                    stage_is_usdz = response.is_ok()
+                        && path
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("usdz"));
                     mesh_cache.clear();
                     manifest_skeleton = None;
                     resolve_memo.clear();
+                    dirty_layers.clear();
                     owner_counter.store(0, Ordering::Relaxed);
                     let _ = reply.send(response);
                 }
@@ -255,9 +299,7 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                             // become frequent
                             manifest_skeleton = None;
                             resolve_memo.clear();
-                            if let Ok(mut dirty) = dirty_slot.lock() {
-                                *dirty = Some(stage.edit_target().layer_identifier().to_string());
-                            }
+                            mark_dirty(&mut dirty_layers, stage);
                             if let Some(sink) = &sink {
                                 sink(std::slice::from_ref(&path));
                             }
@@ -290,14 +332,62 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                             // become frequent
                             manifest_skeleton = None;
                             resolve_memo.clear();
-                            if let Ok(mut dirty) = dirty_slot.lock() {
-                                *dirty = Some(stage.edit_target().layer_identifier().to_string());
-                            }
+                            mark_dirty(&mut dirty_layers, stage);
                             if let Some(sink) = &sink {
                                 sink(std::slice::from_ref(&path));
                             }
                         }
                     }
+                    let _ = reply.send(response);
+                }
+                StageRequest::GetEditTarget { reply } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            edit_target_info(stage, stage_is_usdz)
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::SetEditTarget { identifier, reply } => {
+                    // Switching the target changes where FUTURE edits land;
+                    // composition is untouched, so no caches clear and no
+                    // usd-stage-changed fires.
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            switch_edit_target(stage, identifier.as_deref())
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::ListDirtyLayers { reply } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            dirty_layers_info(stage, &dirty_layers)
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::SaveLayers { requests, reply } => {
+                    // Saving writes copies through Layer::export: the layer's
+                    // identifier is unchanged, composition is unchanged, so
+                    // no caches clear and usd-stage-changed is NOT emitted.
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            save_requested_layers(stage, stage_is_usdz, &requests)?;
+                            dirty_layers.retain(|id| {
+                                !requests.iter().any(|request| &request.identifier == id)
+                            });
+                            Ok(())
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
                     let _ = reply.send(response);
                 }
             }
@@ -306,7 +396,6 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
     StageState {
         sender,
         tessellations,
-        dirty_layer,
     }
 }
 
@@ -453,7 +542,13 @@ pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
 /// The guards every mutation shares: the prim must exist, must not be an
 /// instance (or live inside one), must be active, and the stage must have
 /// its session edit layer. Failures are readable and carry the prim path.
-fn editable_prim(stage: &Stage, path: &str) -> Result<openusd::usd::Prim, String> {
+/// `allow_inactive` opens the single sanctioned exception: metadata
+/// `active = true` may target an inactive prim (it is the only way back).
+fn editable_prim(
+    stage: &Stage,
+    path: &str,
+    allow_inactive: bool,
+) -> Result<openusd::usd::Prim, String> {
     let prim_path =
         sdf::try_into_path(path).map_err(|e| format!("invalid prim path '{}': {}", path, e))?;
     let prim = stage
@@ -484,7 +579,7 @@ fn editable_prim(stage: &Stage, path: &str) -> Result<openusd::usd::Prim, String
             prototype
         ));
     }
-    if !prim.is_active().map_err(stage_err)? {
+    if !prim.is_active().map_err(stage_err)? && !allow_inactive {
         return Err(format!(
             "prim {} is inactive; reactivate it before editing",
             path
@@ -518,7 +613,7 @@ fn author_attribute_value(
     payload: &ValuePayload,
     time: Option<f64>,
 ) -> Result<(), String> {
-    let prim = editable_prim(stage, path)?;
+    let prim = editable_prim(stage, path, false)?;
     let value = value_payload_to_sdf(payload)?;
     let time = time.map(TimeCode::new);
     let authored = prim
@@ -560,7 +655,10 @@ fn author_prim_metadata(
     key: &str,
     payload: &ValuePayload,
 ) -> Result<(), String> {
-    let prim = editable_prim(stage, path)?;
+    // The reactivation exception: `active` with value true is the one
+    // mutation an inactive prim accepts (it is the only way back).
+    let reactivating = key == "active" && payload.data == serde_json::Value::Bool(true);
+    let prim = editable_prim(stage, path, reactivating)?;
     let value = value_payload_to_sdf(payload)?;
     match key {
         "active" => {
@@ -587,6 +685,161 @@ fn author_prim_metadata(
         other => {
             return Err(format!("metadata key not editable yet: {}", other));
         }
+    }
+    Ok(())
+}
+
+/// Record the current edit target's layer as carrying unsaved edits.
+fn mark_dirty(dirty: &mut Vec<String>, stage: &Stage) {
+    let identifier = stage.edit_target().layer_identifier().to_string();
+    if !dirty.contains(&identifier) {
+        dirty.push(identifier);
+    }
+}
+
+/// The stage's session layer identifier (USDBEE stages carry exactly one).
+fn session_identifier(stage: &Stage) -> Option<String> {
+    stage
+        .session_layer()
+        .map(|layer| layer.identifier().to_string())
+}
+
+fn edit_target_info(stage: &Stage, is_usdz_stage: bool) -> Result<EditTargetInfo, String> {
+    let layer_identifier = stage.edit_target().layer_identifier().to_string();
+    Ok(EditTargetInfo {
+        is_session: session_identifier(stage).as_deref() == Some(layer_identifier.as_str()),
+        layer_identifier,
+        is_usdz_stage,
+    })
+}
+
+/// Switch the edit target: `None` selects the session layer (Err when the
+/// stage has none), `Some(identifier)` any layer of this stage — the same
+/// validation `Stage::set_edit_target` applies (wrong-stage or unknown
+/// layers are refused here, not at some later authoring call).
+fn switch_edit_target(stage: &Stage, identifier: Option<&str>) -> Result<(), String> {
+    let target = match identifier {
+        Some(id) => EditTarget::for_layer(id.to_string()),
+        None => stage
+            .edit_target_session()
+            .ok_or_else(|| "no session layer available as an edit target".to_string())?,
+    };
+    stage.set_edit_target(target).map_err(|e| {
+        format!(
+            "cannot switch the edit target to {}: {}",
+            identifier.unwrap_or("the session layer"),
+            e
+        )
+    })
+}
+
+/// Dirty layers in stack order (session, root, sublayers), then any dirty
+/// target outside the local stack (a referenced layer the target switched
+/// into). `dirty` is the owner-side truth of what mutations touched.
+fn dirty_layers_info(stage: &Stage, dirty: &[String]) -> Result<Vec<LayerInfo>, String> {
+    let session = session_identifier(stage);
+    let stack = stage.layer_stack();
+    let mut ordered: Vec<&String> = stack.iter().filter(|id| dirty.contains(id)).collect();
+    for id in dirty {
+        if !stack.contains(id) {
+            ordered.push(id);
+        }
+    }
+    Ok(ordered
+        .into_iter()
+        .filter_map(|id| {
+            let layer = stage.layer(id);
+            if layer.is_none() {
+                eprintln!("usdbee: dirty layer {} is no longer in the stage", id);
+            }
+            layer.map(|layer| LayerInfo {
+                identifier: id.clone(),
+                original_path: layer.resolved_path().map(str::to_string),
+                is_session: Some(id.as_str()) == session.as_deref(),
+            })
+        })
+        .collect())
+}
+
+/// The file extensions `save_layers` writes (mirrors `Layer::export`, which
+/// picks the writer by extension; usdz is deliberately absent — see the
+/// is_usdz_stage refusal below).
+const SAVEABLE_EXTENSIONS: &[&str] = &["usda", "usdc", "usd"];
+
+/// Lexical same-file comparison for the session-layer refusal: both paths
+/// made absolute, then compared component-wise.
+/// shortcut: symlinked or `..`-laden aliases of one file can slip through;
+/// upgrade to canonicalize-based comparison if a collision ever matters
+/// beyond the dialog's own defaults.
+fn paths_match(a: &str, b: &str) -> bool {
+    let absolute = |path: &str| {
+        let path = Path::new(path);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(path)
+        }
+    };
+    absolute(a) == absolute(b)
+}
+
+/// Write the requested layers to disk via `Layer::export` — a copy: the
+/// layer's identifier is unchanged, so composition and caches are
+/// untouched. Rules: usdz-opened stages refuse entirely; extensions are
+/// whitelisted; session layers only ever save to a NEW `.usda` path, never
+/// over any file the stage composes from. The caller (the owner arm) marks
+/// the saved layers clean.
+fn save_requested_layers(
+    stage: &Stage,
+    is_usdz_stage: bool,
+    requests: &[LayerSaveRequest],
+) -> Result<(), String> {
+    if is_usdz_stage {
+        return Err(
+            "cannot save layers of a stage opened from a .usdz package; Save As usdz arrives in a later task"
+                .to_string(),
+        );
+    }
+    if requests.is_empty() {
+        return Err("no layers to save".to_string());
+    }
+    let session = session_identifier(stage);
+    let stack = stage.layer_stack();
+    for request in requests {
+        let layer = stage
+            .layer(&request.identifier)
+            .ok_or_else(|| format!("layer not found in the stage: {}", request.identifier))?;
+        let extension = Path::new(&request.path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_lowercase)
+            .unwrap_or_default();
+        if !SAVEABLE_EXTENSIONS.contains(&extension.as_str()) {
+            return Err(format!(
+                "cannot save {} to '{}': only .usda, .usdc and .usd files are writable",
+                request.identifier, request.path
+            ));
+        }
+        if Some(request.identifier.as_str()) == session.as_deref() {
+            if extension != "usda" {
+                return Err(format!(
+                    "the session layer {} only saves as a new .usda file",
+                    request.identifier
+                ));
+            }
+            if let Some(colliding) = stack.iter().find(|id| paths_match(id, &request.path)) {
+                return Err(format!(
+                    "refusing to save the session layer over {}; session layers save to a new .usda path",
+                    colliding
+                ));
+            }
+        }
+        layer.export(&request.path).map_err(|e| {
+            format!(
+                "failed to save {} to '{}': {}",
+                request.identifier, request.path, e
+            )
+        })?;
     }
     Ok(())
 }
@@ -1812,6 +2065,98 @@ pub fn request_stage_open(
     sender
         .send(StageRequest::Open {
             path: path.to_path_buf(),
+            reply,
+        })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn get_edit_target(
+    state: tauri::State<'_, StageState>,
+) -> Result<EditTargetInfo, String> {
+    request_edit_target(&state.sender)
+}
+
+pub fn request_edit_target(sender: &mpsc::Sender<StageRequest>) -> Result<EditTargetInfo, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::GetEditTarget { reply })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn set_edit_target(
+    identifier: Option<String>,
+    state: tauri::State<'_, StageState>,
+) -> Result<(), String> {
+    request_set_edit_target(&state.sender, identifier.as_deref())
+}
+
+pub fn request_set_edit_target(
+    sender: &mpsc::Sender<StageRequest>,
+    identifier: Option<&str>,
+) -> Result<(), String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::SetEditTarget {
+            identifier: identifier.map(str::to_string),
+            reply,
+        })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn list_dirty_layers(
+    state: tauri::State<'_, StageState>,
+) -> Result<Vec<LayerInfo>, String> {
+    request_list_dirty_layers(&state.sender)
+}
+
+pub fn request_list_dirty_layers(
+    sender: &mpsc::Sender<StageRequest>,
+) -> Result<Vec<LayerInfo>, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::ListDirtyLayers { reply })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn save_layers(
+    requests: Vec<LayerSaveRequest>,
+    state: tauri::State<'_, StageState>,
+) -> Result<(), String> {
+    request_save_layers(&state.sender, &requests)
+}
+
+pub fn request_save_layers(
+    sender: &mpsc::Sender<StageRequest>,
+    requests: &[LayerSaveRequest],
+) -> Result<(), String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::SaveLayers {
+            requests: requests.to_vec(),
             reply,
         })
         .map_err(|_| "stage service unavailable".to_string())?;

@@ -24,8 +24,13 @@ fn build_system_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
         .accelerator("CmdOrCtrl+E")
         .build(app)?;
 
+    let save_item = MenuItemBuilder::with_id("file_save", "Save...")
+        .accelerator("CmdOrCtrl+S")
+        .build(app)?;
+
     let file_submenu = SubmenuBuilder::new(app, "File")
         .item(&open_item)
+        .item(&save_item)
         .item(&export_item)
         .build()?;
 
@@ -65,6 +70,10 @@ pub fn run() {
                     tauri::async_runtime::spawn(async move {
                         let _ = commands::trigger_open_usd_dialog(app_clone).await;
                     });
+                } else if event.id() == "file_save" {
+                    if let Err(e) = app_handle.emit("open-save-dialog", "show") {
+                        eprintln!("Failed to emit open-save-dialog: {}", e);
+                    }
                 } else if event.id() == "file_export" {
                     println!("Emitting open-export-modal to frontend...");
                     if let Err(e) = app_handle.emit("open-export-modal", "show") {
@@ -89,6 +98,10 @@ pub fn run() {
             stage::get_material_data,
             stage::set_attribute_value,
             stage::set_prim_metadata,
+            stage::get_edit_target,
+            stage::set_edit_target,
+            stage::list_dirty_layers,
+            stage::save_layers,
             omniverse::set_omniverse_url,
             omniverse::get_omniverse_url
         ])

@@ -349,13 +349,37 @@ pub fn serialize_payload(declared: Option<&ValueTypeName>, value: &Value) -> Val
     }
 }
 
-/// The authored spelling a `token` payload converts to when the target
-/// metadata wants a string-typed value (kind accepts both).
+/// The payload's number for the floating families: any JSON number that
+/// `as_f64` accepts (half rounding happens at the f16 conversion).
 fn payload_number(payload: &ValuePayload) -> Result<f64, String> {
     payload
         .data
         .as_f64()
         .ok_or_else(|| format!("{} value is not a number", payload.r#type))
+}
+
+/// The payload's whole (integer) number as i64, refusing anything that does
+/// not round-trip: floats, fractions, and integers beyond i64.
+fn payload_whole(payload: &ValuePayload) -> Result<i64, String> {
+    payload.data.as_i64().ok_or_else(|| {
+        format!(
+            "{} value is not a whole number in i64 range: {}",
+            payload.r#type, payload.data
+        )
+    })
+}
+
+/// `payload_whole` bounded to `[min, max]`: out-of-range values are refused
+/// instead of wrapping into the target integer family.
+fn whole_in_range(payload: &ValuePayload, min: i64, max: i64) -> Result<i64, String> {
+    let value = payload_whole(payload)?;
+    if value < min || value > max {
+        return Err(format!(
+            "{} value {} is out of range {}-{}",
+            payload.r#type, value, min, max
+        ));
+    }
+    Ok(value)
 }
 
 fn payload_string(payload: &ValuePayload) -> Result<String, String> {
@@ -383,11 +407,21 @@ pub fn value_payload_to_sdf(payload: &ValuePayload) -> Result<Value, String> {
     let not_editable = || format!("type not editable yet: {}", payload.r#type);
     Ok(match payload.r#type.as_str() {
         "bool" => Value::Bool(as_bool(payload)?),
-        "uchar" => Value::Uchar(payload_number(payload)? as u8),
-        "int" => Value::Int(payload_number(payload)? as i32),
-        "uint" => Value::Uint(payload_number(payload)? as u32),
-        "int64" => Value::Int64(payload_number(payload)? as i64),
-        "uint64" => Value::Uint64(payload_number(payload)? as u64),
+        "uchar" => Value::Uchar(whole_in_range(payload, 0, u8::MAX as i64)? as u8),
+        "int" => Value::Int(whole_in_range(payload, i32::MIN as i64, i32::MAX as i64)? as i32),
+        "uint" => Value::Uint(whole_in_range(payload, 0, u32::MAX as i64)? as u32),
+        "int64" => Value::Int64(whole_in_range(payload, i64::MIN, i64::MAX)?),
+        // u64 exceeds i64, so this family reads the JSON number exactly as
+        // unsigned; negatives and fractions refuse.
+        "uint64" => {
+            let value = payload.data.as_u64().ok_or_else(|| {
+                format!(
+                    "uint64 value is not a whole number in u64 range: {}",
+                    payload.data
+                )
+            })?;
+            Value::Uint64(value)
+        }
         "half" => Value::Half(gf::f16::from_f32(payload_number(payload)? as f32)),
         "float" => Value::Float(payload_number(payload)? as f32),
         "double" => Value::Double(payload_number(payload)?),
@@ -1146,6 +1180,70 @@ mod tests {
                 "assetpath",
                 json!("./asset.usda"),
                 Value::AssetPath(AssetPath::new("./asset.usda")),
+            ),
+        ];
+        for (r#type, data, expected) in cases {
+            let converted = value_payload_to_sdf(&ValuePayload {
+                r#type: r#type.to_string(),
+                data,
+                truncated: None,
+                count: None,
+            })
+            .unwrap_or_else(|e| panic!("{} should convert: {}", r#type, e));
+            assert_eq!(converted, expected, "{}", r#type);
+        }
+    }
+
+    #[test]
+    fn payload_to_sdf_refuses_out_of_range_integers() {
+        let cases = [
+            ("uchar", json!(256)),
+            ("uchar", json!(-1)),
+            ("int", json!(2147483648i64)),
+            ("int", json!(-2147483649i64)),
+            ("uint", json!(4294967296i64)),
+            ("uint", json!(-1)),
+            ("int64", json!(9223372036854775808u64)),
+            ("uint64", json!(-1)),
+            ("uint64", json!(1.5)),
+            // Fractions never author into an integer family.
+            ("int", json!(2.5)),
+            ("uchar", json!(1.0)),
+        ];
+        for (r#type, data) in cases {
+            let error = value_payload_to_sdf(&ValuePayload {
+                r#type: r#type.to_string(),
+                data,
+                truncated: None,
+                count: None,
+            })
+            .expect_err("out-of-range integers must refuse instead of wrapping");
+            assert!(error.contains(r#type), "{}: {}", r#type, error);
+        }
+    }
+
+    #[test]
+    fn payload_to_sdf_accepts_extreme_in_range_integers() {
+        let cases = [
+            ("uchar", json!(255), Value::Uchar(255)),
+            ("uchar", json!(0), Value::Uchar(0)),
+            ("int", json!(-2147483648), Value::Int(-2147483648)),
+            ("int", json!(2147483647), Value::Int(2147483647)),
+            ("uint", json!(4294967295u64), Value::Uint(4294967295)),
+            (
+                "int64",
+                json!(-9223372036854775808i64),
+                Value::Int64(-9223372036854775808),
+            ),
+            (
+                "int64",
+                json!(9223372036854775807i64),
+                Value::Int64(9223372036854775807),
+            ),
+            (
+                "uint64",
+                json!(18446744073709551615u64),
+                Value::Uint64(18446744073709551615),
             ),
         ];
         for (r#type, data, expected) in cases {

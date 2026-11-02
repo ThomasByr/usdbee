@@ -69,6 +69,29 @@ describe("parseEditedValue", () => {
     expect(parseEditedValue("uint", "abc").ok).toBe(false);
   });
 
+  it("rejects integers outside their family range instead of wrapping", () => {
+    // uchar 0-255
+    expect(parseEditedValue("uchar", "255").ok).toBe(true);
+    expect(parseEditedValue("uchar", "256").ok).toBe(false);
+    expect(parseEditedValue("uchar", "-1").ok).toBe(false);
+    // int, i32
+    expect(parseEditedValue("int", "2147483647").ok).toBe(true);
+    expect(parseEditedValue("int", "-2147483648").ok).toBe(true);
+    expect(parseEditedValue("int", "2147483648").ok).toBe(false);
+    expect(parseEditedValue("int", "-2147483649").ok).toBe(false);
+    // uint, u32
+    expect(parseEditedValue("uint", "4294967295").ok).toBe(true);
+    expect(parseEditedValue("uint", "4294967296").ok).toBe(false);
+    // int64 / uint64. Past 2^53 JS numbers are float-imprecise (the out-of-
+    // range spellings collapse onto the max float), so exact-boundary refusal
+    // is the backend's job — these asserts only pin the in-range acceptance.
+    expect(parseEditedValue("int64", "9223372036854775807").ok).toBe(true);
+    expect(parseEditedValue("int64", "-9223372036854775808").ok).toBe(true);
+    expect(parseEditedValue("int64", "92233720368547758080").ok).toBe(false);
+    expect(parseEditedValue("uint64", "18446744073709551615").ok).toBe(true);
+    expect(parseEditedValue("uint64", "184467440737095516160").ok).toBe(false);
+  });
+
   it("parses bools from checkbox state", () => {
     expect(parseEditedValue("bool", true)).toEqual({ ok: true, data: true });
     expect(parseEditedValue("bool", false)).toEqual({ ok: true, data: false });

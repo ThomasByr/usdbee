@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use usdbee_lib::stage::{
-    request_geometry_data, request_stage_details, request_stage_tree, spawn_stage_owner_with_sink,
-    StageRequest, StageState,
+    request_edit_target, request_geometry_data, request_list_dirty_layers, request_save_layers,
+    request_set_edit_target, request_stage_details, request_stage_open, request_stage_tree,
+    spawn_stage_owner_with_sink, EditTargetInfo, LayerSaveRequest, StageState,
 };
 use usdbee_lib::values::PrimDetails;
 
@@ -22,19 +23,12 @@ fn owner_with_events() -> (StageState, mpsc::Receiver<Vec<String>>) {
     (state, event_rx)
 }
 
+fn open_path_via_owner(state: &StageState, path: &Path) -> usdbee_lib::stage::StageInfo {
+    request_stage_open(path, &state.sender).expect("stage should open")
+}
+
 fn open_via_owner(state: &StageState, name: &str) {
-    let (reply_tx, reply_rx) = mpsc::channel();
-    state
-        .sender
-        .send(StageRequest::Open {
-            path: fixture(name),
-            reply: reply_tx,
-        })
-        .expect("stage owner should accept an open request");
-    reply_rx
-        .recv()
-        .expect("stage owner should reply")
-        .expect("stage should open");
+    let _ = open_path_via_owner(state, &fixture(name));
 }
 
 fn details_via_owner(state: &StageState, path: &str, time: Option<f64>) -> PrimDetails {
@@ -89,11 +83,17 @@ fn set_value_authors_composed_value_on_session_layer() {
     assert_eq!(radius.value.data, serde_json::json!(2.5));
 
     // The edit landed on the session layer, never the root layer.
-    let dirty = state.dirty_layer().expect("an edit marks the stage dirty");
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
+    assert_eq!(
+        dirty.len(),
+        1,
+        "the edit marks exactly the session layer dirty"
+    );
+    assert!(dirty[0].is_session, "the session layer entry is flagged");
     assert!(
-        dirty.contains("session"),
+        dirty[0].identifier.contains("session"),
         "dirty layer should be the session layer, got {}",
-        dirty
+        dirty[0].identifier
     );
 
     // The actor emitted usd-stage-changed with the edited prim path.
@@ -322,4 +322,375 @@ fn edits_without_open_stage_fail() {
     )
     .expect_err("no stage is open");
     assert!(error.contains("no stage open"), "got: {}", error);
+}
+
+// --- Task 2: edit targets, dirty layers, save ---
+
+fn edit_target(state: &StageState) -> EditTargetInfo {
+    request_edit_target(&state.sender).expect("edit target should serialize")
+}
+
+#[test]
+fn edit_target_defaults_to_session_and_switches_to_root() {
+    let (state, _events) = owner_with_events();
+    let info = open_path_via_owner(&state, &fixture("basic.usda"));
+
+    // The default target is the session layer (set at open time).
+    let target = edit_target(&state);
+    assert!(target.is_session);
+    assert!(!target.is_usdz_stage);
+    assert!(target.layer_identifier.contains("session"));
+
+    // A session edit dirties the session layer only.
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(2.5)),
+        None,
+    )
+    .expect("session edit should succeed");
+
+    // Switch to the root layer and edit there.
+    request_set_edit_target(&state.sender, Some(&info.root_layer))
+        .expect("switching to the root layer should succeed");
+    let target = edit_target(&state);
+    assert!(!target.is_session);
+    assert_eq!(target.layer_identifier, info.root_layer);
+
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(3.5)),
+        None,
+    )
+    .expect("root edit should succeed");
+
+    // Both layers are dirty now, each listed with its own identity.
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
+    assert_eq!(
+        dirty.len(),
+        2,
+        "session and root are both dirty: {:?}",
+        dirty
+    );
+    let session = dirty.iter().find(|l| l.is_session).expect("session entry");
+    let root = dirty.iter().find(|l| !l.is_session).expect("root entry");
+    assert_eq!(root.identifier, info.root_layer);
+    assert_eq!(
+        root.original_path.as_deref(),
+        Some(info.root_layer.as_str())
+    );
+    assert!(session.identifier.contains("session"));
+}
+
+#[test]
+fn set_edit_target_rejects_unknown_layers_and_missing_session() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+
+    let error = request_set_edit_target(&state.sender, Some("/nope/missing.usda"))
+        .expect_err("an unknown layer must be rejected");
+    assert!(error.contains("missing.usda"), "got: {}", error);
+
+    // None means the session layer, which exists here: it must succeed.
+    request_set_edit_target(&state.sender, None).expect("None selects the session layer");
+}
+
+#[test]
+fn set_edit_target_without_open_stage_fails() {
+    let state = spawn_stage_owner_with_sink(None);
+    let error = request_set_edit_target(&state.sender, None).expect_err("no stage is open");
+    assert!(error.contains("no stage open"), "got: {}", error);
+    let error = request_list_dirty_layers(&state.sender).expect_err("no stage is open");
+    assert!(error.contains("no stage open"), "got: {}", error);
+}
+
+#[test]
+fn save_layers_writes_the_authored_opinion_and_clears_the_layer() {
+    let (state, _events) = owner_with_events();
+    let info = open_path_via_owner(&state, &fixture("basic.usda"));
+
+    // A session edit first: the session layer must stay dirty and its file
+    // untouched after the root layer below is saved.
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(1.5)),
+        None,
+    )
+    .expect("session edit should succeed");
+
+    request_set_edit_target(&state.sender, Some(&info.root_layer)).expect("switch to root");
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(2.5)),
+        None,
+    )
+    .expect("root edit should succeed");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let saved = dir.path().join("saved.usda");
+    request_save_layers(
+        &state.sender,
+        &[LayerSaveRequest {
+            identifier: info.root_layer.clone(),
+            path: saved.to_string_lossy().to_string(),
+        }],
+    )
+    .expect("saving the root layer should succeed");
+
+    // The file on disk contains the authored opinion...
+    let text = std::fs::read_to_string(&saved).expect("saved file reads");
+    assert!(
+        text.contains("radius = 2.5"),
+        "authored opinion in:\n{}",
+        text
+    );
+
+    // ...the session layer file is untouched, and the root layer is clean.
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
+    assert!(
+        dirty.iter().all(|l| l.is_session),
+        "only the session layer stays dirty: {:?}",
+        dirty
+    );
+    let session = dirty.iter().find(|l| l.is_session).expect("session entry");
+    let session_text = std::fs::read_to_string(
+        session
+            .original_path
+            .as_deref()
+            .expect("the session layer is a real file"),
+    )
+    .expect("session file reads");
+    assert!(
+        !session_text.contains("radius"),
+        "the session layer file must stay untouched"
+    );
+}
+
+#[test]
+fn save_layers_rejects_session_over_existing_layer_paths() {
+    let (state, _events) = owner_with_events();
+    let info = open_path_via_owner(&state, &fixture("basic.usda"));
+
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(2.5)),
+        None,
+    )
+    .expect("session edit should succeed");
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
+    let session = dirty.iter().find(|l| l.is_session).expect("session entry");
+
+    // Same-as-root path: refused (it would overwrite the root layer file).
+    let error = request_save_layers(
+        &state.sender,
+        &[LayerSaveRequest {
+            identifier: session.identifier.clone(),
+            path: info.root_layer.clone(),
+        }],
+    )
+    .expect_err("saving the session layer over the root file must fail");
+    assert!(error.contains("session"), "got: {}", error);
+    assert!(
+        error.contains("basic.usda"),
+        "the error names the colliding file: {}",
+        error
+    );
+
+    // The session layer's own temp path is equally refused.
+    let own = session.original_path.clone().expect("session file path");
+    let error = request_save_layers(
+        &state.sender,
+        &[LayerSaveRequest {
+            identifier: session.identifier.clone(),
+            path: own,
+        }],
+    )
+    .expect_err("saving the session layer over its own file must fail");
+    assert!(error.contains("session"), "got: {}", error);
+
+    // A new usda path is the only allowed spelling.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("session-snapshot.usda");
+    request_save_layers(
+        &state.sender,
+        &[LayerSaveRequest {
+            identifier: session.identifier.clone(),
+            path: path.to_string_lossy().to_string(),
+        }],
+    )
+    .expect("saving the session layer to a new usda path should succeed");
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
+    assert!(
+        dirty.is_empty(),
+        "the session layer is clean after save: {:?}",
+        dirty
+    );
+}
+
+#[test]
+fn save_layers_enforces_the_extension_whitelist() {
+    let (state, _events) = owner_with_events();
+    let info = open_path_via_owner(&state, &fixture("basic.usda"));
+
+    request_set_edit_target(&state.sender, Some(&info.root_layer)).expect("switch to root");
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(2.5)),
+        None,
+    )
+    .expect("root edit should succeed");
+
+    let error = request_save_layers(
+        &state.sender,
+        &[LayerSaveRequest {
+            identifier: info.root_layer.clone(),
+            path: "/tmp/sneaky.exe".to_string(),
+        }],
+    )
+    .expect_err("exe must be refused");
+    assert!(
+        error.contains(".usda"),
+        "the error lists the whitelist: {}",
+        error
+    );
+    assert!(error.contains("exe"), "got: {}", error);
+
+    // usdc and usd stay writable (whitelist members).
+    let dir = tempfile::tempdir().expect("temp dir");
+    for name in ["out.usdc", "out.usd"] {
+        request_save_layers(
+            &state.sender,
+            &[LayerSaveRequest {
+                identifier: info.root_layer.clone(),
+                path: dir.path().join(name).to_string_lossy().to_string(),
+            }],
+        )
+        .unwrap_or_else(|e| panic!("{} should be writable: {}", name, e));
+    }
+}
+
+#[test]
+fn sublayer_dirties_and_lists_independently() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "sublayer_root.usda");
+
+    let sub_identifier = fixture("sublayer_sub.usda");
+    let sub_identifier = sub_identifier.to_string_lossy().to_string();
+    request_set_edit_target(&state.sender, Some(&sub_identifier))
+        .expect("switching to the sublayer should succeed");
+
+    request_set_value(
+        &state,
+        "/Scene/Sub",
+        "radius",
+        payload("double", serde_json::json!(1.5)),
+        None,
+    )
+    .expect("sublayer edit should succeed");
+
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
+    assert_eq!(dirty.len(), 1, "only the sublayer is dirty: {:?}", dirty);
+    assert!(!dirty[0].is_session);
+    assert_eq!(dirty[0].identifier, sub_identifier);
+
+    // The composed value reads back through the sublayer opinion.
+    let details = details_via_owner(&state, "/Scene/Sub", None);
+    let radius = attribute(&details, "radius");
+    assert_eq!(radius.value.data, serde_json::json!(1.5));
+}
+
+#[test]
+fn usdz_opened_stage_is_flagged_and_rejects_saves() {
+    let (state, _events) = owner_with_events();
+
+    // Package basic.usda into a real usdz archive, then open it directly.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usdz = dir.path().join("packed.usdz");
+    let layer = openusd::sdf::Layer::open(fixture("basic.usda").to_string_lossy().as_ref())
+        .expect("basic.usda opens as a layer");
+    layer
+        .export(usdz.to_string_lossy().as_ref())
+        .expect("usdz export works");
+
+    let info = open_path_via_owner(&state, &usdz);
+
+    let target = edit_target(&state);
+    assert!(target.is_usdz_stage, "usdz-opened stages are flagged");
+    assert!(
+        target.is_session,
+        "the session layer stays the default target"
+    );
+    assert_eq!(info.root_layer, usdz.to_string_lossy().to_string());
+
+    // Saving anything from a usdz-opened stage is refused (Task 7 adds
+    // the Save As usdz path).
+    let error = request_save_layers(
+        &state.sender,
+        &[LayerSaveRequest {
+            identifier: info.root_layer.clone(),
+            path: dir.path().join("nope.usda").to_string_lossy().to_string(),
+        }],
+    )
+    .expect_err("usdz-opened stages cannot save layers");
+    assert!(error.contains("usdz"), "got: {}", error);
+}
+
+#[test]
+fn set_metadata_active_true_reactivates_an_inactive_prim() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+
+    usdbee_lib::stage::request_set_prim_metadata(
+        &state.sender,
+        "/World/Ball",
+        "active",
+        &payload("bool", serde_json::json!(false)),
+    )
+    .expect("deactivating a prim should succeed");
+
+    // Reactivation is the ONE mutation allowed on an inactive prim.
+    usdbee_lib::stage::request_set_prim_metadata(
+        &state.sender,
+        "/World/Ball",
+        "active",
+        &payload("bool", serde_json::json!(true)),
+    )
+    .expect("reactivating via active=true metadata should succeed");
+
+    let tree = request_stage_tree(&state.sender).expect("tree should serialize");
+    let world = &tree[0];
+    let ball = world
+        .children
+        .iter()
+        .find(|n| n.path == "/World/Ball")
+        .expect("the prim stays in the tree");
+    assert!(ball.is_active, "the prim is active again");
+
+    // Every other mutation on a re-deactivated prim is still rejected.
+    usdbee_lib::stage::request_set_prim_metadata(
+        &state.sender,
+        "/World/Ball",
+        "active",
+        &payload("bool", serde_json::json!(false)),
+    )
+    .expect("deactivate again");
+    let error = usdbee_lib::stage::request_set_prim_metadata(
+        &state.sender,
+        "/World/Ball",
+        "kind",
+        &payload("token", serde_json::json!("prop")),
+    )
+    .expect_err("non-reactivation metadata on an inactive prim must fail");
+    assert!(error.contains("inactive"), "got: {}", error);
 }

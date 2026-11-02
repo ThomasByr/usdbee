@@ -11,6 +11,7 @@
   import RenderingTab from "$lib/components/RenderingTab.svelte";
   import SettingsTab from "$lib/components/SettingsTab.svelte";
   import ExportModal from "$lib/components/ExportModal.svelte";
+  import SaveDialog from "$lib/components/SaveDialog.svelte";
   import { runExport } from "$lib/three/VideoExporter";
   import {
     viewerSettings,
@@ -23,6 +24,7 @@
     saveControlPreferences,
   } from "$lib/state/controlsState.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
+  import { editState } from "$lib/state/editState.svelte";
   import {
     advanceStageTime,
     renderState,
@@ -78,6 +80,7 @@
   let stageModalLines = $state<string[] | null>(null);
   let stageModalDismissed = $state<boolean>(false);
   let showExportModal = $state<boolean>(false);
+  let showSaveModal = $state<boolean>(false);
   let isExporting = $state<boolean>(false);
   let exportProgress = $state<number>(0);
   let exportStage = $state<string>("Exporting...");
@@ -371,6 +374,14 @@
       viewer.enableDamping = savedDamping === "true";
     }
 
+    // Open the confirm-per-save dialog: only its confirm button ever writes
+    // USD content to disk. The dialog refreshes the dirty-layer list on open.
+    async function openSaveDialog() {
+      if (!stageState.stageInfo) return;
+      showSaveModal = true;
+      await editState.refresh();
+    }
+
     // Global keyboard shortcuts
     const handleGlobalKeydown = (e: KeyboardEvent) => {
       if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA")
@@ -379,6 +390,10 @@
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
         e.preventDefault();
         openUsdFile();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void openSaveDialog();
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "e") {
         e.preventDefault();
@@ -418,6 +433,9 @@
         console.log("RECEIVED open-export-modal from Rust!");
         showExportModal = true;
       }),
+      listen("open-save-dialog", () => {
+        void openSaveDialog();
+      }),
       listen<string>("usd-load-error", (event) => {
         loadingProgress = null;
         openErrorModal("Failed to extract or load USD: " + event.payload);
@@ -439,6 +457,10 @@
         void handleSceneLoaded(event.payload);
       }),
     ];
+
+    // Editing state: subscribes to usd-stage-changed (dirty-layer refresh)
+    // and primes the edit-target/dirty-layer snapshot.
+    unlisteners.push(editState.init());
 
     // The viewport scene load: compose the scene from the Rust manifest
     // (no zip, no Three.js USD parsing).
@@ -1245,6 +1267,10 @@
   <ErrorModal error={modalError} onClose={closeErrorModal} />
 {:else if stageModalLines !== null && !stageModalDismissed}
   <ErrorModal lines={stageModalLines} onClose={closeStageModal} />
+{/if}
+
+{#if showSaveModal}
+  <SaveDialog onClose={() => (showSaveModal = false)} />
 {/if}
 
 {#if showExportModal}
