@@ -290,10 +290,12 @@ fn referenced_children_appear_under_referencing_prim() {
     assert_eq!(tree.len(), 1);
     let car = node(&tree[0].children, "/Scene/Car");
     assert_eq!(car.type_name, "Xform");
-    assert_eq!(car.children.len(), 1);
+    assert_eq!(car.children.len(), 2);
     let wheel = &car.children[0];
     assert_eq!(wheel.path, "/Scene/Car/Wheel");
     assert_eq!(wheel.type_name, "Sphere");
+    assert_eq!(car.children[1].path, "/Scene/Car/WheelMesh");
+    assert_eq!(car.children[1].type_name, "Mesh");
 }
 
 #[test]

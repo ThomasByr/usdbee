@@ -76,12 +76,20 @@ def Xform "World"
                 float2 inputs:st.connect = </World/Looks/Textured/StReader.outputs:result>
                 float3 outputs:rgb
             }
+            def Shader "ScalarMap"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./checker.png@
+                float outputs:r
+            }
             def Shader "PreviewSurface"
             {
                 uniform token info:id = "UsdPreviewSurface"
                 color3f inputs:diffuseColor.connect = </World/Looks/Textured/Albedo.outputs:rgb>
                 normal3f inputs:normal.connect = </World/Looks/Textured/NormalMap.outputs:rgb>
-                float inputs:opacity = 0.5
+                float inputs:roughness.connect = </World/Looks/Textured/ScalarMap.outputs:r>
+                float inputs:metallic.connect = </World/Looks/Textured/ScalarMap.outputs:r>
+                float inputs:opacity.connect = </World/Looks/Textured/ScalarMap.outputs:r>
                 token outputs:surface
             }
         }

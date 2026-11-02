@@ -28,10 +28,15 @@ fn open_via_owner(state: &StageState, name: &str) {
         .expect("stage should open");
 }
 
-fn node<'a>(nodes: &'a [RenderNode], path: &str) -> &'a RenderNode {
+fn find_node<'a>(nodes: &'a [RenderNode], path: &str) -> Option<&'a RenderNode> {
     nodes
         .iter()
         .find(|n| n.path == path)
+        .or_else(|| nodes.iter().find_map(|n| find_node(&n.children, path)))
+}
+
+fn node<'a>(nodes: &'a [RenderNode], path: &str) -> &'a RenderNode {
+    find_node(nodes, path)
         .unwrap_or_else(|| panic!("expected prim {} in manifest {:?}", path, nodes))
 }
 
@@ -105,6 +110,42 @@ fn geometry_round_trip_via_owner_matches_task1_golden_values() {
     );
     assert_eq!(f32_le(&bytes, 20), -1.0, "first position x");
     assert_eq!(f32_le(&bytes, 28), 0.0, "first position z");
+}
+
+#[test]
+fn variants_sphere_is_renderable_end_to_end_with_red_vertex_colors() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "variants.usda");
+    let manifest = request_scene_manifest(&state.sender, None).expect("variant manifest");
+    let shape = node(&manifest, "/Prop/Shape");
+    assert_eq!(shape.type_name, "Sphere");
+    assert!(shape.has_geometry);
+
+    let bytes = request_geometry_data(&state.sender, "/Prop/Shape", None)
+        .expect("sphere geometry should pack");
+    let vertices = u32_le(&bytes, 8) as usize;
+    assert!(vertices > 0);
+    assert!(u32_le(&bytes, 12) > 0);
+    assert_eq!(u32_le(&bytes, 16) & 0b100, 0b100);
+    let colors = 20 + vertices * 32;
+    assert_eq!(f32_le(&bytes, colors), 1.0);
+    assert_eq!(f32_le(&bytes, colors + 4), 0.0);
+    assert_eq!(f32_le(&bytes, colors + 8), 0.0);
+}
+
+#[test]
+fn native_instance_sphere_is_renderable_end_to_end() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "instanced.usda");
+    let manifest = request_scene_manifest(&state.sender, None).expect("instance manifest");
+    let shape = node(&manifest, "/Scene/WheelA/Wheel");
+    assert_eq!(shape.type_name, "Sphere");
+    assert!(shape.has_geometry);
+
+    let bytes = request_geometry_data(&state.sender, "/Scene/WheelA/Wheel", None)
+        .expect("instanced sphere geometry should pack");
+    assert!(u32_le(&bytes, 8) > 0);
+    assert!(u32_le(&bytes, 12) > 0);
 }
 
 #[test]

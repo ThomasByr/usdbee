@@ -86,6 +86,25 @@ fn manifest_excludes_proxy_and_guide_purpose_prims() {
 }
 
 #[test]
+fn manifest_visits_default_purpose_below_excluded_parent() {
+    let nodes = manifest();
+
+    assert_absent(&nodes, "/World/ProxyParent");
+    let child = expect(&nodes, "/World/ProxyParent/DefaultChild");
+    assert!(child.has_geometry);
+}
+
+#[test]
+fn broken_material_binding_only_drops_that_material() {
+    let nodes = manifest();
+
+    let broken = expect(&nodes, "/World/BrokenBinding");
+    assert!(broken.has_geometry);
+    assert_eq!(broken.material, None);
+    assert!(expect(&nodes, "/World/DefaultCube").has_geometry);
+}
+
+#[test]
 fn manifest_pins_visibility_inheritance() {
     let nodes = manifest();
 
@@ -197,6 +216,41 @@ fn geometry_and_material_arms_resolve_synthetic_prototype_paths() {
 }
 
 #[test]
+fn nested_prototype_geometry_uses_the_real_prim() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "purpose_scene.usda");
+
+    let synthetic =
+        request_geometry_data(&state.sender, "/World/GroupInstancer/__proto_0/Shape", None)
+            .expect("nested synthetic prototype path should resolve");
+    let direct = request_geometry_data(
+        &state.sender,
+        "/World/GroupInstancer/GroupProto/Shape",
+        None,
+    )
+    .expect("real prototype child should tessellate");
+    assert_eq!(synthetic, direct);
+}
+
+#[test]
+fn native_instance_geometry_uses_the_shared_prototype_prim() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "instanced.usda");
+    let (stage, _) = open_stage(&fixture("instanced.usda")).expect("stage should open");
+    let prototype = stage.prototypes().expect("prototype discovery")[0].clone();
+    let direct_path = prototype
+        .append_path("WheelMesh")
+        .expect("prototype mesh path")
+        .to_string();
+
+    let instance = request_geometry_data(&state.sender, "/Scene/WheelA/WheelMesh", None)
+        .expect("instance proxy path should resolve");
+    let direct = request_geometry_data(&state.sender, &direct_path, None)
+        .expect("shared prototype mesh should tessellate");
+    assert_eq!(instance, direct);
+}
+
+#[test]
 fn out_of_range_prototype_index_is_a_readable_error() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "purpose_scene.usda");
@@ -213,6 +267,54 @@ fn out_of_range_prototype_index_is_a_readable_error() {
         "got: {}",
         error
     );
+}
+
+#[test]
+fn manifest_expands_xform_prototype_renderable_subtree() {
+    let nodes = manifest();
+
+    let prototype = expect(&nodes, "/World/GroupInstancer/__proto_0");
+    assert_eq!(prototype.type_name, "Xform");
+    assert!(!prototype.has_geometry);
+    assert_eq!(prototype.instances.len(), 1);
+    let shape = expect(&nodes, "/World/GroupInstancer/__proto_0/Shape");
+    assert_eq!(shape.type_name, "Mesh");
+    assert!(shape.has_geometry);
+}
+
+#[test]
+fn manifest_omits_prototypes_without_instances() {
+    let nodes = manifest();
+
+    let instancer = expect(&nodes, "/World/EmptyInstancer");
+    assert!(instancer.children.is_empty());
+    assert_absent(&nodes, "/World/EmptyInstancer/__proto_0");
+}
+
+#[test]
+fn manifest_filters_invisible_instance_ids_at_the_queried_time() {
+    let (stage, _) = open_stage(&fixture("purpose_scene.usda")).expect("stage should open");
+
+    let at_one = serialize_render_manifest(&stage, Some(1.0)).expect("manifest at time 1");
+    let visible = expect(&at_one, "/World/VisibilityInstancer/__proto_0");
+    assert_eq!(visible.instances.len(), 1);
+    assert_eq!(visible.instances[0][12], 0.0);
+
+    let at_two = serialize_render_manifest(&stage, Some(2.0)).expect("manifest at time 2");
+    assert_absent(&at_two, "/World/VisibilityInstancer/__proto_0");
+}
+
+#[test]
+fn manifest_expands_native_instance_prototype_children() {
+    let (stage, info) = open_stage(&fixture("instanced.usda")).expect("stage should open");
+    assert!(info.composition_errors.is_empty());
+    let nodes = serialize_render_manifest(&stage, None).expect("manifest should serialize");
+
+    for instance in ["/Scene/WheelA", "/Scene/WheelB"] {
+        let mesh = expect(&nodes, &format!("{instance}/WheelMesh"));
+        assert_eq!(mesh.type_name, "Mesh");
+        assert!(mesh.has_geometry);
+    }
 }
 
 #[test]

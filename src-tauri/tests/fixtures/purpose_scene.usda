@@ -29,6 +29,27 @@ def Xform "World"
         point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
     }
 
+    def Xform "ProxyParent"
+    {
+        uniform token purpose = "proxy"
+
+        def Mesh "DefaultChild"
+        {
+            uniform token purpose = "default"
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        }
+    }
+
+    def Mesh "BrokenBinding"
+    {
+        rel material:binding = </World/Looks/DoesNotExist>
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+    }
+
     # Invisible prim: composed with visible=false; its render-purpose child
     # inherits invisible unless it re-authors visibility.
     def Xform "Hidden"
@@ -83,6 +104,56 @@ def Xform "World"
         }
 
         def Mesh "SphereProto"
+        {
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        }
+    }
+
+    # An Xform-rooted prototype must retain its renderable descendants.
+    def PointInstancer "GroupInstancer"
+    {
+        point3f[] positions = [(0, 0, 0)]
+        int[] protoIndices = [0]
+        rel prototypes = [</World/GroupInstancer/GroupProto>]
+
+        def Xform "GroupProto"
+        {
+            def Mesh "Shape"
+            {
+                int[] faceVertexCounts = [3]
+                int[] faceVertexIndices = [0, 1, 2]
+                point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+            }
+        }
+    }
+
+    # No protoIndices means no drawable prototype node at the origin.
+    def PointInstancer "EmptyInstancer"
+    {
+        int[] protoIndices = []
+        rel prototypes = [</World/EmptyInstancer/EmptyProto>]
+
+        def Mesh "EmptyProto"
+        {
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        }
+    }
+
+    def PointInstancer "VisibilityInstancer"
+    {
+        point3f[] positions = [(0, 0, 0), (1, 0, 0)]
+        int[] protoIndices = [0, 0]
+        int64[] invisibleIds.timeSamples = {
+            1: [1],
+            2: [0, 1],
+        }
+        rel prototypes = [</World/VisibilityInstancer/VisibilityProto>]
+
+        def Mesh "VisibilityProto"
         {
             int[] faceVertexCounts = [3]
             int[] faceVertexIndices = [0, 1, 2]

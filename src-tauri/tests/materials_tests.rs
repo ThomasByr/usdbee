@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use usdbee_lib::materials::MaterialInfo;
-use usdbee_lib::stage::{request_material_data, spawn_stage_owner, StageRequest, StageState};
+use usdbee_lib::materials::{material_info, MaterialInfo};
+use usdbee_lib::stage::{
+    open_stage, request_material_data, spawn_stage_owner, StageRequest, StageState,
+};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -72,9 +74,32 @@ fn textured_surface_resolves_file_paths_and_primvar() {
         surface.diffuse_color, None,
         "diffuseColor is textured, not a constant"
     );
-    assert_eq!(surface.opacity, Some(0.5));
-    assert_eq!(surface.roughness, None, "unauthored channels stay None");
-    assert_eq!(surface.textures.len(), 2, "diffuseColor + normal textures");
+    assert_eq!(
+        surface.opacity, None,
+        "textured opacity has no scalar value"
+    );
+    assert_eq!(
+        surface.roughness, None,
+        "textured roughness has no scalar value"
+    );
+    assert_eq!(
+        surface.metallic, None,
+        "textured metallic has no scalar value"
+    );
+    assert_eq!(
+        surface.textures.len(),
+        5,
+        "diffuseColor + normal + roughness + metallic + opacity textures"
+    );
+    for channel in ["roughness", "metallic", "opacity"] {
+        assert!(
+            surface
+                .textures
+                .iter()
+                .any(|texture| texture.input == channel),
+            "{channel} texture input must reach the frontend"
+        );
+    }
 
     let checker = std::fs::canonicalize(fixture("checker.png")).expect("fixture texture");
     let albedo = surface
@@ -156,6 +181,99 @@ fn missing_prim_is_a_readable_error() {
 
     let error = request_material_data(&state.sender, "/World/Nope").unwrap_err();
     assert!(error.contains("prim not found"), "got: {}", error);
+}
+
+#[test]
+fn usdz_texture_resolves_inside_extracted_directory() {
+    use std::io::{Read, Write};
+
+    let source_dir = tempfile::tempdir().expect("source temp dir");
+    let source = source_dir.path().join("root.usda");
+    std::fs::write(
+        &source,
+        r#"#usda 1.0
+
+def Mesh "Mesh" {
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    rel material:binding = </Material>
+}
+def Material "Material" {
+    token outputs:surface.connect = </Material/Preview.outputs:surface>
+    def Shader "Texture" {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./textures/checker.png@
+        float3 outputs:rgb
+    }
+    def Shader "Preview" {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor.connect = </Material/Texture.outputs:rgb>
+        token outputs:surface
+    }
+}
+"#,
+    )
+    .expect("source stage should be written");
+    let layer = openusd::sdf::Layer::open(source.to_str().expect("UTF-8 source path"))
+        .expect("source layer should open");
+    let usdc = source_dir.path().join("root.usdc");
+    layer
+        .export(usdc.to_str().expect("UTF-8 usdc path"))
+        .expect("usdc export should succeed");
+
+    let archive_path = source_dir.path().join("textured.usdz");
+    let mut writer =
+        zip::ZipWriter::new(std::fs::File::create(&archive_path).expect("usdz create"));
+    writer
+        .start_file("root.usdc", zip::write::SimpleFileOptions::default())
+        .expect("root entry");
+    writer
+        .write_all(&std::fs::read(&usdc).expect("usdc bytes"))
+        .expect("root entry bytes");
+    writer
+        .start_file(
+            "textures/checker.png",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .expect("texture entry");
+    writer
+        .write_all(&std::fs::read(fixture("checker.png")).expect("texture bytes"))
+        .expect("texture entry bytes");
+    writer.finish().expect("usdz finish");
+
+    let extracted = usdbee_lib::get_usdbee_cache_dir()
+        .join("extracted")
+        .join(format!("usdz_texture_pin_{}", std::process::id()));
+    std::fs::create_dir_all(&extracted).expect("extracted root");
+    let mut archive = zip::ZipArchive::new(
+        std::fs::File::open(&archive_path).expect("generated usdz should open"),
+    )
+    .expect("generated usdz should parse");
+    for name in ["root.usdc", "textures/checker.png"] {
+        let mut entry = archive.by_name(name).expect("archive entry");
+        let destination = extracted.join(name);
+        std::fs::create_dir_all(destination.parent().expect("entry parent"))
+            .expect("entry parent should be created");
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).expect("entry should read");
+        std::fs::write(destination, bytes).expect("entry should extract");
+    }
+
+    let (stage, info) =
+        open_stage(&extracted.join("root.usdc")).expect("extracted usdz root should open");
+    assert!(info.composition_errors.is_empty());
+    let material = material_info(&stage, "/Mesh").expect("material should resolve");
+    let texture = &material.surface.expect("preview surface").textures[0];
+    let texture_path = Path::new(&texture.file_path);
+    assert!(texture_path.starts_with(&extracted));
+    assert!(
+        texture_path.is_file(),
+        "{} must exist",
+        texture_path.display()
+    );
+
+    std::fs::remove_dir_all(&extracted).expect("extracted pin cleanup");
 }
 
 #[test]

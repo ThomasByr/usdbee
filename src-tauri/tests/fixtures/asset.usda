@@ -9,4 +9,11 @@ def Xform "Model"
     {
         double radius = 0.5
     }
+
+    def Mesh "WheelMesh"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+    }
 }

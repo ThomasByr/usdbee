@@ -6,7 +6,8 @@
 //! `faceVertexIndices` and `faceVertexCounts` (holes and bridging are out
 //! of scope; subdivision meshes render their base hull). `BasisCurves`
 //! prims tessellate to open 6-sided tubes (no end caps) with constant
-//! widths; `Points` prims tessellate to a point cloud (indices empty).
+//! widths; `Points` prims tessellate to a point cloud (indices empty);
+//! `Sphere` prims tessellate analytically at a fixed 24×12 density.
 //! Authored `normals`, `primvars:st` and `primvars:displayColor` are read
 //! at the queried time code; for meshes unauthored normals are generated
 //! as per-vertex area-weighted face-normal averages.
@@ -74,7 +75,7 @@ fn context(path: &str, error: impl std::fmt::Display) -> String {
 }
 
 /// Tessellate one composed prim. `Ok(None)` for anything that is not
-/// renderable geometry (Mesh, BasisCurves, Points); `Err` names the prim
+/// renderable geometry (Mesh, BasisCurves, Points, Sphere); `Err` names the prim
 /// path when the geometry itself cannot be tessellated. `time: Some(t)`
 /// reads time-sampled attributes at `t`; `None` reads the default-time
 /// values.
@@ -92,6 +93,7 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
         Some("Mesh") => mesh_data(prim, time_code, &path),
         Some("BasisCurves") => curves_data(prim, time_code, &path),
         Some("Points") => points_data(prim, time_code, &path),
+        Some("Sphere") => sphere_data(prim, time_code, &path),
         _ => Ok(None),
     }
 }
@@ -117,9 +119,8 @@ fn mesh_data(
 
     // Non-finite positions cannot reach a GPU buffer: such vertices are
     // compacted away, surviving indices remap, and any face referencing a
-    // dropped (or out-of-range) vertex contributes nothing at all. Zero
-    // lengths and coincident vertices are NOT non-finite, so faces that use
-    // them stay.
+    // dropped (or out-of-range) vertex contributes nothing at all. Finite
+    // but zero-area fan triangles are filtered during triangulation below.
     let (positions, orig_to_new) = compact_points(&points);
     let vertex_count = points.len();
 
@@ -149,8 +150,18 @@ fn mesh_data(
             corners.push((v as u32, cursor - count + slot, face_id));
         }
         for i in 1..count - 1 {
-            for v in [face[0], face[i], face[i + 1]] {
-                indices.push(orig_to_new[v as usize].expect("face usability checked"));
+            let triangle = [face[0], face[i], face[i + 1]]
+                .map(|v| orig_to_new[v as usize].expect("face usability checked") as usize);
+            let (a, b, c) = (
+                positions[triangle[0]],
+                positions[triangle[1]],
+                positions[triangle[2]],
+            );
+            let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let area = cross3(ab, ac);
+            if area.iter().map(|value| value * value).sum::<f32>() > 0.0 {
+                indices.extend(triangle.map(|index| index as u32));
             }
         }
     }
@@ -177,6 +188,79 @@ fn mesh_data(
         positions,
         normals,
         uvs,
+        colors,
+        indices,
+    }))
+}
+
+fn sphere_data(
+    prim: &Prim,
+    time_code: Option<TimeCode>,
+    path: &str,
+) -> Result<Option<MeshData>, String> {
+    const U: usize = 24;
+    const V: usize = 12;
+    // shortcut: fixed density keeps transfer costs predictable; add adaptive
+    // density only if close-up sphere quality becomes a requirement.
+    let radius = prim
+        .attribute("radius")
+        .get_at::<f64>(time_code)
+        .map_err(|e| context(path, e))?
+        .map(|radius| radius as f32)
+        .filter(|radius| radius.is_finite() && *radius > 0.0)
+        .unwrap_or(1.0);
+
+    let mut positions = Vec::with_capacity((U + 1) * (V + 1));
+    let mut normals = Vec::with_capacity(positions.capacity());
+    let mut uvs = Vec::with_capacity(positions.capacity());
+    for v in 0..=V {
+        let phi = std::f32::consts::PI * v as f32 / V as f32;
+        let (sin_phi, cos_phi) = phi.sin_cos();
+        for u in 0..=U {
+            let theta = std::f32::consts::TAU * u as f32 / U as f32;
+            let (sin_theta, cos_theta) = theta.sin_cos();
+            let normal = [sin_phi * cos_theta, cos_phi, sin_phi * sin_theta];
+            positions.push(normal.map(|value| value * radius));
+            normals.push(normal);
+            uvs.push([u as f32 / U as f32, v as f32 / V as f32]);
+        }
+    }
+
+    let mut indices = Vec::with_capacity(U * (2 * V - 2) * 3);
+    for v in 0..V {
+        for u in 0..U {
+            let a = (v * (U + 1) + u) as u32;
+            let b = a + (U + 1) as u32;
+            let c = b + 1;
+            let d = a + 1;
+            if v == 0 {
+                indices.extend_from_slice(&[a, c, b]);
+            } else if v == V - 1 {
+                indices.extend_from_slice(&[a, d, b]);
+            } else {
+                indices.extend_from_slice(&[a, d, b, d, c, b]);
+            }
+        }
+    }
+
+    let colors = read_primvar::<Vec3f>(prim, "primvars:displayColor", time_code, path)?.and_then(
+        |(scope, values)| match scope {
+            Scope::Constant => values
+                .first()
+                .map(|color| vec![[color.x, color.y, color.z]; positions.len()]),
+            Scope::Vertex if values.len() == positions.len() => Some(
+                values
+                    .into_iter()
+                    .map(|color| [color.x, color.y, color.z])
+                    .collect(),
+            ),
+            _ => None,
+        },
+    );
+    Ok(Some(MeshData {
+        positions,
+        normals: Some(normals),
+        uvs: Some(uvs),
         colors,
         indices,
     }))
@@ -239,10 +323,8 @@ fn curves_data(
             continue;
         };
 
-        // One fixed reference frame per curve, derived from the first
-        // segment's tangent. shortcut: parallel transport would keep ring
-        // orientation continuous around corners; a shared frame is the
-        // accepted approximation (corner continuity out of scope).
+        // Seed a reference frame from the first tangent, then parallel
+        // transport it onto each segment's own tangent.
         let tangent = normalize3([
             curve[first + 1].x - curve[first].x,
             curve[first + 1].y - curve[first].y,
@@ -253,11 +335,28 @@ fn curves_data(
         } else {
             [0.0, 1.0, 0.0]
         };
-        let u = normalize3(cross3(tangent, helper));
-        let v = cross3(tangent, u);
+        let mut u = normalize3(cross3(tangent, helper));
 
         for i in usable_segments {
             let (a, b) = (curve[i], curve[i + 1]);
+            let tangent = normalize3([b.x - a.x, b.y - a.y, b.z - a.z]);
+            let projection = u[0] * tangent[0] + u[1] * tangent[1] + u[2] * tangent[2];
+            let transported = [
+                u[0] - tangent[0] * projection,
+                u[1] - tangent[1] * projection,
+                u[2] - tangent[2] * projection,
+            ];
+            u = if transported.iter().map(|value| value * value).sum::<f32>() > 1e-12 {
+                normalize3(transported)
+            } else {
+                let helper: [f32; 3] = if tangent[1].abs() > 0.9 {
+                    [1.0, 0.0, 0.0]
+                } else {
+                    [0.0, 1.0, 0.0]
+                };
+                normalize3(cross3(tangent, helper))
+            };
+            let v = cross3(tangent, u);
             let base = positions.len() as u32;
             for center in [a, b] {
                 for k in 0..CURVE_SIDES {

@@ -200,12 +200,132 @@ fn generated_normals_average_face_normals_per_vertex() {
 }
 
 #[test]
+fn sphere_tessellates_with_fixed_density_unit_normals_and_uvs() {
+    let (stage, _) = open_stage(&fixture("variants.usda")).expect("variants stage should open");
+    let sphere = tessellate(&stage, "/Prop/Shape").expect("Sphere should tessellate");
+
+    assert_eq!(sphere.positions.len(), 25 * 13);
+    assert_eq!(sphere.indices.len(), 24 * 22 * 3);
+    assert!(sphere.positions.iter().all(|position| {
+        let length = position
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        (length - 1.0).abs() < 1e-5
+    }));
+    let normals = sphere.normals.expect("analytic sphere normals");
+    assert_eq!(normals.len(), sphere.positions.len());
+    assert!(normals.iter().all(|normal| {
+        let length = normal.iter().map(|value| value * value).sum::<f32>().sqrt();
+        (length - 1.0).abs() < 1e-5
+    }));
+    let uvs = sphere.uvs.expect("sphere texture coordinates");
+    assert_eq!(uvs.len(), sphere.positions.len());
+    assert_eq!(uvs[0], [0.0, 0.0]);
+    assert_eq!(uvs[25], [0.0, 1.0 / 12.0]);
+}
+
+#[test]
+fn large_animated_mesh_tessellates_and_packs_at_both_time_samples() {
+    use std::fmt::Write as _;
+    use usdbee_lib::tessellation::pack_geometry;
+
+    const VERTICES: usize = 100_000;
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let path = dir.path().join("large_animated.usda");
+    let mut source = String::with_capacity(VERTICES * 45);
+    source.push_str("#usda 1.0\n\ndef Mesh \"Large\" {\n");
+    writeln!(source, "int[] faceVertexCounts = [{VERTICES}]").unwrap();
+    source.push_str("int[] faceVertexIndices = [");
+    for index in 0..VERTICES {
+        write!(source, "{index},").unwrap();
+    }
+    source.push_str("]\npoint3f[] points.timeSamples = {\n");
+    for (time, offset) in [(0, 0.0), (10, 1.0)] {
+        writeln!(source, "{time}: [").unwrap();
+        for index in 0..VERTICES {
+            write!(source, "({}, {}, 0),", index as f32 + offset, index % 2).unwrap();
+        }
+        source.push_str("],\n");
+    }
+    source.push_str("}\n}\n");
+    std::fs::write(&path, source).expect("large stage should be written");
+
+    let (stage, _) = open_stage(&path).expect("large stage should open");
+    let large = prim(&stage, "/Large").expect("large prim should resolve");
+    let first = tessellate_prim(&large, Some(0.0))
+        .expect("time 0 should tessellate")
+        .expect("mesh data at time 0");
+    let second = tessellate_prim(&large, Some(10.0))
+        .expect("time 10 should tessellate")
+        .expect("mesh data at time 10");
+
+    for mesh in [&first, &second] {
+        assert_eq!(mesh.positions.len(), VERTICES);
+        assert_eq!(mesh.indices.len(), (VERTICES - 2) * 3);
+        let packed = pack_geometry(mesh);
+        assert_eq!(
+            u32::from_le_bytes(packed[8..12].try_into().unwrap()),
+            VERTICES as u32
+        );
+        assert_eq!(
+            u32::from_le_bytes(packed[12..16].try_into().unwrap()),
+            (VERTICES - 2) as u32 * 3
+        );
+    }
+    assert_ne!(first.positions[1], second.positions[1]);
+}
+
+#[test]
 fn non_geometry_prim_tessellates_to_none() {
     let (stage, _info) = open_stage(&fixture("basic.usda")).expect("basic stage should open");
 
     let world = prim(&stage, "/World").expect("World should resolve");
     let none = tessellate_prim(&world, Some(1.0)).expect("xform must not fail");
     assert!(none.is_none(), "an Xform is not geometry");
+}
+
+#[test]
+fn authored_empty_face_counts_produce_no_indices() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let path = dir.path().join("empty_topology.usda");
+    std::fs::write(
+        &path,
+        concat!(
+            "#usda 1.0\n\ndef Mesh \"Empty\" {\n",
+            "int[] faceVertexCounts = []\n",
+            "int[] faceVertexIndices = []\n",
+            "point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]\n",
+            "}\n",
+        ),
+    )
+    .expect("test stage should be written");
+    let (stage, _) = open_stage(&path).expect("stage should open");
+
+    let mesh = tessellate(&stage, "/Empty").expect("empty topology should tessellate");
+    assert!(mesh.indices.is_empty());
+}
+
+#[test]
+fn zero_area_fan_triangles_are_skipped() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let path = dir.path().join("zero_area.usda");
+    std::fs::write(
+        &path,
+        concat!(
+            "#usda 1.0\n\ndef Mesh \"Degenerate\" {\n",
+            "int[] faceVertexCounts = [3, 3, 3]\n",
+            "int[] faceVertexIndices = [0, 1, 2, 3, 3, 4, 0, 2, 4]\n",
+            "point3f[] points = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (5, 0, 0), (0, 1, 0)]\n",
+            "}\n",
+        ),
+    )
+    .expect("test stage should be written");
+    let (stage, _) = open_stage(&path).expect("stage should open");
+
+    let mesh = tessellate(&stage, "/Degenerate").expect("degenerate faces must not fail");
+    assert_eq!(mesh.indices, [0, 2, 4]);
 }
 
 #[test]
@@ -283,6 +403,29 @@ fn curve_ring_vertices_sit_at_radius_from_their_segment_endpoints() {
         assert!(
             (distance_sq - radius * radius).abs() < 1e-6,
             "vertex {vertex} at {position:?} is not at radius from center {center:?}"
+        );
+    }
+}
+
+#[test]
+fn bent_curve_second_ring_is_perpendicular_to_its_own_tangent() {
+    let (stage, _info) = tessellate_stage("curves_points.usda");
+    let mesh = tessellate(&stage, "/Scene/Stroke").expect("curve should tessellate");
+
+    // Segment 1 runs from (1,0,0) to (1,1,0): its tangent is +Y, unlike
+    // segment 0's +X. Every radial vector in both of its rings must be
+    // perpendicular to +Y.
+    for (offset, position) in mesh.positions[12..24].iter().enumerate() {
+        let center = if offset < 6 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [1.0, 1.0, 0.0]
+        };
+        let radial_y = position[1] - center[1];
+        assert!(
+            radial_y.abs() < 1e-6,
+            "ring vertex {:?} uses the wrong frame",
+            position
         );
     }
 }
