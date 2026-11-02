@@ -1442,7 +1442,7 @@
         >
           <span>Scale</span>
         </button>
-        {#if gizmoMessage}<span class="gizmo-status" title={gizmoMessage}>{gizmoMessage}</span>{/if}
+        {#if gizmoMessage}<span class="gizmo-status" title={gizmoMessage}>⚠</span>{/if}
 
         <div class="triangle-count" style="gap: 4px;">
           <svg
