@@ -1180,18 +1180,21 @@ mod tests {
         let prim = stage
             .prim("/World/TripletZYXAngles")
             .unwrap_or_else(|e| panic!("/World/TripletZYXAngles resolvable: {e}"));
-        // rotateZYX (0, 90, 90): the vec's X component rotates about X and
-        // its Z component about Z (axis-NAME pairing, the USD rotateABC
+        // rotateZYX (10, 40, 70): the vec's X component rotates about X,
+        // Y about Y and Z about Z (axis-NAME pairing, the USD rotateABC
         // contract), multiplied in letter order with the first-named letter
-        // leftmost: Rz(90)·Ry(90)·Rx(0), hand-computed row-major. A
-        // positional pairing (Z->v0, X->v2) would compose a different
-        // matrix, and the TS mirror in xformOps.ts depends on this one.
+        // leftmost: Rz(70)·Ry(40)·Rx(10), hand-computed row-major. Distinct
+        // angles DISCRIMINATE the pairings — with the old coincidental
+        // (0, 90, 90) the positional pairing (Z->v0, X->v2) composes the very
+        // same matrix, so only (10, 40, 70) truly pins the convention. The
+        // TS mirror in xformOps.ts depends on this one.
         let matrix = local_transform(&prim, None)
             .unwrap()
             .expect("the distinct-angle triplet evaluates");
         assert_close(
             &[
-                0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                0.262003, 0.963592, -0.05333, 0.0, -0.719846, 0.231937, 0.654237, 0.0, 0.642788,
+                -0.133022, 0.754407, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
             &matrix.0,
         );

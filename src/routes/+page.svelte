@@ -2,6 +2,7 @@
   import "./page.css";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
   import { formatKeyName } from "$lib/utils/format";
   import ErrorModal from "$lib/components/ErrorModal.svelte";
@@ -25,6 +26,7 @@
   } from "$lib/state/controlsState.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
   import { editState } from "$lib/state/editState.svelte";
+  import { confirmCloseNeeded } from "$lib/state/closeGuard";
   import {
     advanceStageTime,
     renderState,
@@ -90,6 +92,10 @@
   let stageModalDismissed = $state<boolean>(false);
   let showExportModal = $state<boolean>(false);
   let showSaveModal = $state<boolean>(false);
+  // Task 5: the OS close request is intercepted while any layer carries
+  // unsaved edits; the modal's confirm is the only path that destroys the
+  // window.
+  let showCloseConfirm = $state<boolean>(false);
   let isExporting = $state<boolean>(false);
   let exportProgress = $state<number>(0);
   let exportStage = $state<string>("Exporting...");
@@ -507,6 +513,19 @@
         e.preventDefault();
         showExportModal = true;
       }
+      // Task 5: undo/redo. Ctrl+Z undoes; Ctrl+Shift+Z / Ctrl+Y redoes.
+      // The INPUT/TEXTAREA guard above keeps text-field edits intact.
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        void editState.undo();
+      }
+      if (
+        ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z") ||
+        ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y")
+      ) {
+        e.preventDefault();
+        void editState.redo();
+      }
     };
     const handleGlobalKeyup = (e: KeyboardEvent) => {
       viewer.keysPressed.delete(e.key.toLowerCase());
@@ -574,9 +593,22 @@
       }),
     ];
 
-    // Editing state: subscribes to usd-stage-changed (dirty-layer refresh)
-    // and primes the edit-target/dirty-layer snapshot.
+    // Editing state: subscribes to usd-stage-changed (dirty-layer and
+    // undo-state refresh) and primes the edit-target/dirty-layer snapshot.
     unlisteners.push(editState.init());
+
+    // Task 5: intercept the OS close request while any layer has unsaved
+    // edits — the confirm modal's button is the only thing that destroys
+    // the window then. The need-to-confirm logic itself is pure code in
+    // closeGuard.ts (Vitest-pinned).
+    unlisteners.push(
+      getCurrentWindow().onCloseRequested((event) => {
+        if (confirmCloseNeeded(editState.dirtyLayers.length)) {
+          event.preventDefault();
+          showCloseConfirm = true;
+        }
+      }),
+    );
 
     // The viewport scene load: compose the scene from the Rust manifest
     // (no zip, no Three.js USD parsing).
@@ -1095,7 +1127,15 @@
   <!-- Sidebar for Dependency Tree -->
   <aside class="sidebar" style="width: {sidebarWidth}px;">
     <div class="sidebar-header">
-      <h2>USDA / Asset Graph</h2>
+      <h2>
+        USDA / Asset Graph
+        {#if editState.dirtyLayers.length > 0}
+          <span
+            class="dirty-dot"
+            title="{editState.dirtyLayers.length} layer(s) with unsaved changes — Ctrl+S to save"
+          ></span>
+        {/if}
+      </h2>
       <div class="header-actions">
         <button class="primary-btn" onclick={openUsdFile} title="Open USD File">
           <svg
@@ -1443,6 +1483,29 @@
 
 {#if showSaveModal}
   <SaveDialog onClose={() => (showSaveModal = false)} />
+{/if}
+
+{#if showCloseConfirm}
+  <div class="modal-overlay" role="dialog" aria-modal="true">
+    <div class="modal-content close-confirm-box">
+      <h3>Unsaved changes</h3>
+      <p>
+        {editState.dirtyLayers.length} layer(s) have unsaved edits. Close anyway and lose
+        them?
+      </p>
+      <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;">
+        <button class="tool-btn" onclick={() => (showCloseConfirm = false)}>Cancel</button>
+        <button
+          class="primary-btn"
+          style="background: #a33;"
+          onclick={() => {
+            showCloseConfirm = false;
+            void getCurrentWindow().destroy();
+          }}>Close anyway</button
+        >
+      </div>
+    </div>
+  </div>
 {/if}
 
 {#if showExportModal}

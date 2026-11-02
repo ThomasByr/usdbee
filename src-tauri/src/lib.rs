@@ -103,6 +103,9 @@ pub fn run() {
             stage::set_edit_target,
             stage::list_dirty_layers,
             stage::save_layers,
+            stage::undo_stage_edit,
+            stage::redo_stage_edit,
+            stage::get_undo_state,
             omniverse::set_omniverse_url,
             omniverse::get_omniverse_url
         ])

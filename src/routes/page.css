@@ -82,6 +82,18 @@ body,
   color: #ccc;
 }
 
+/* Task 5: unsaved-changes indicator in the sidebar header. */
+.dirty-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-left: 8px;
+  vertical-align: middle;
+  border-radius: 50%;
+  background: #e2a03e;
+  box-shadow: 0 0 4px rgba(226, 160, 62, 0.8);
+}
+
 .primary-btn {
   background: #0e639c;
   color: white;

@@ -25,6 +25,12 @@ export interface LayerSaveRequest {
   path: string;
 }
 
+// Rust stage.rs::UndoState — undo/redo availability (Phase 3 Task 5).
+export interface UndoState {
+  can_undo: boolean;
+  can_redo: boolean;
+}
+
 export interface StageInfo {
   root_layer: string;
   time_codes_per_second: number;

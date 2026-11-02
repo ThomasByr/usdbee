@@ -16,7 +16,7 @@ def Xform "World"
 
     def Xform "TripletZYXAngles"
     {
-        double3 xformOp:rotateZYX = (0, 90, 90)
+        double3 xformOp:rotateZYX = (10, 40, 70)
         uniform token[] xformOpOrder = ["xformOp:rotateZYX"]
     }
 

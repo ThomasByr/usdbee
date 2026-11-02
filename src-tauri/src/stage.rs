@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -12,8 +12,8 @@ use openusd::ar::DefaultResolver;
 use openusd::gf;
 use openusd::sdf::{self, ValueTypeName};
 use openusd::usd::{
-    EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, SchemaBase, Stage, TimeCode,
-    UndoStage,
+    ApplyMode, Diff, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, ReplayStage,
+    SchemaBase, Stage, TimeCode, UndoStage,
 };
 use openusd_schemas::geom::{
     Imageable, ImageableExt, PointInstancer, PointInstancerSchema, Purpose, Visibility,
@@ -105,6 +105,109 @@ pub enum StageRequest {
         requests: Vec<LayerSaveRequest>,
         reply: mpsc::Sender<Result<(), String>>,
     },
+    Undo {
+        reply: mpsc::Sender<Result<bool, String>>,
+    },
+    Redo {
+        reply: mpsc::Sender<Result<bool, String>>,
+    },
+    GetUndoState {
+        reply: mpsc::Sender<Result<UndoState, String>>,
+    },
+}
+
+/// Undo/redo availability over IPC (snake_case mirrors in
+/// src/lib/stage/types.ts).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoState {
+    pub can_undo: bool,
+    pub can_redo: bool,
+}
+
+/// The undo depth both sides agree on: the UndoStage's own bound (its
+/// default capacity) — beyond it the oldest transaction becomes permanent,
+/// and the owner journal mirrors the same eviction.
+const UNDO_DEPTH: usize = 128;
+
+/// One user mutation as the undo system sees it: the edit-target layer it
+/// was authored on, the ReplayStage forward diffs that reproduce it (the
+/// redo journal), and the composed prim path it touched (the
+/// usd-stage-changed emission on undo/redo — the same path the original
+/// mutation arm emitted).
+struct MutationEntry {
+    layer: String,
+    diffs: Vec<Diff>,
+    path: String,
+}
+
+/// Per-layer unsaved-edit bookkeeping: `applied` counts the mutations
+/// currently applied to the layer (mutations minus undones, plus redones);
+/// `saved` is the applied count at the last save. A layer is dirty exactly
+/// when the two differ, which is what makes undo restore dirty state
+/// coherently: undoing back to the saved content cleans the layer, undoing
+/// past the save point re-dirties it. Entries persist while clean (the
+/// counts are still needed for later undos).
+struct LayerLedger {
+    entries: Vec<LayerCounts>,
+}
+
+struct LayerCounts {
+    identifier: String,
+    applied: usize,
+    saved: usize,
+}
+
+impl LayerLedger {
+    fn new() -> Self {
+        LayerLedger { entries: Vec::new() }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn counts_of(&mut self, identifier: &str) -> &mut LayerCounts {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.identifier == identifier)
+        {
+            return &mut self.entries[index];
+        }
+        self.entries.push(LayerCounts {
+            identifier: identifier.to_owned(),
+            applied: 0,
+            saved: 0,
+        });
+        self.entries.last_mut().expect("just pushed")
+    }
+
+    /// A mutation (or redo) applied one more unsaved change to the layer.
+    fn record_mutation(&mut self, identifier: &str) {
+        self.counts_of(identifier).applied += 1;
+    }
+
+    /// An undo reverted the newest applied change on the layer.
+    fn record_undo(&mut self, identifier: &str) {
+        let counts = self.counts_of(identifier);
+        counts.applied = counts.applied.saturating_sub(1);
+    }
+
+    /// A successful save persisted exactly the currently applied changes.
+    fn record_saved(&mut self, identifier: &str) {
+        let counts = self.counts_of(identifier);
+        counts.saved = counts.applied;
+    }
+
+    /// The layers with applied changes the files on disk lack, in
+    /// first-edit order.
+    fn dirty(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.applied != entry.saved)
+            .map(|entry| entry.identifier.clone())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,19 +258,31 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
     let tessellations = Arc::new(AtomicUsize::new(0));
     let owner_counter = tessellations.clone();
     thread::spawn(move || {
-        // The stage lives wrapped in openusd's UndoStage (Task 5 wires the
-        // undo commands; recording starts now). Every read goes through its
-        // `Deref<Target = Stage>`.
+        // The stage lives wrapped in openusd's capture recorders: the
+        // UndoStage (inverse diffs, bounded UNDO_DEPTH) and the ReplayStage
+        // (forward diffs) both install their sinks on the one underlying
+        // stage — the sinks compose (verified against the 0.8.0 source:
+        // CaptureStage installs per-wrapper sinks via add_sink on the
+        // shared Rc stage, pinned by the undo/redo tests). Every read and
+        // mutation goes through their `Deref<Target = Stage>`.
         let mut current_stage: Option<UndoStage> = None;
+        let mut current_replay: Option<ReplayStage> = None;
         let mut mesh_cache = MeshCache::with_counter(owner_counter.clone());
         // The time-independent manifest skeleton, built by the first manifest
         // call after an open; cleared on Open (like the geometry MeshCache).
         let mut manifest_skeleton: Option<ManifestSkeleton> = None;
-        // Edit-target layer identifiers with unsaved edits, in first-edit
-        // order; cleared on Open, drained by successful SaveLayers. openusd's
-        // `Layer::is_dirty` only reports in-flight overlay edits (it drains at
-        // every commit), so "unsaved on disk" is owner-side bookkeeping.
-        let mut dirty_layers: Vec<String> = Vec::new();
+        // One entry per committed user mutation, mirroring the UndoStage's
+        // bounded stack (both cap at UNDO_DEPTH; the crate evicts the oldest
+        // transaction, the journal pops its front). `redo_stack` holds the
+        // entries undo popped, newest-undo-first.
+        let mut undo_journal: VecDeque<MutationEntry> = VecDeque::new();
+        let mut redo_stack: Vec<MutationEntry> = Vec::new();
+        // Edit-target layers with unsaved edits, as per-layer applied/saved
+        // counts so undo/redo restore the dirty set coherently; cleared on
+        // Open. openusd's `Layer::is_dirty` only reports in-flight overlay
+        // edits (it drains at every commit), so "unsaved on disk" is
+        // owner-side bookkeeping.
+        let mut dirty_ledger = LayerLedger::new();
         // Stamped at Open from the request's usdz-origin flag OR the opened
         // path's suffix; a usdz-opened stage cannot save layers (Task 7
         // adds the Save As usdz path).
@@ -186,7 +301,14 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                 } => {
                     let response = catch_unwind(AssertUnwindSafe(|| {
                         let (stage, info) = open_stage(&path)?;
-                        current_stage = Some(UndoStage::from(stage));
+                        // Both wrappers install their sinks on the one
+                        // stage before either replaces the old slots, so a
+                        // panic between the wraps cannot strand recorders
+                        // on a stage the owner then discards.
+                        let replay = ReplayStage::from(stage.clone());
+                        let undo = UndoStage::with_capacity(stage, UNDO_DEPTH);
+                        current_stage = Some(undo);
+                        current_replay = Some(replay);
                         Ok(info)
                     }))
                     .unwrap_or_else(panic_reply);
@@ -199,7 +321,9 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                     mesh_cache.clear();
                     manifest_skeleton = None;
                     resolve_memo.clear();
-                    dirty_layers.clear();
+                    dirty_ledger.clear();
+                    undo_journal.clear();
+                    redo_stack.clear();
                     owner_counter.store(0, Ordering::Relaxed);
                     let _ = reply.send(response);
                 }
@@ -307,14 +431,22 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                         None => Err("no stage open".to_string()),
                     };
                     if response.is_ok() {
-                        if let Some(ref stage) = current_stage {
-                            after_mutation(
+                        if let (Some(ref stage), Some(ref replay)) =
+                            (&current_stage, &current_replay)
+                        {
+                            record_user_mutation(
                                 stage,
+                                replay,
+                                &mut undo_journal,
+                                &mut redo_stack,
+                                &mut dirty_ledger,
+                                &path,
+                            );
+                            after_mutation(
                                 &sink,
                                 &mut mesh_cache,
                                 &mut manifest_skeleton,
                                 &mut resolve_memo,
-                                &mut dirty_layers,
                                 &path,
                             );
                         }
@@ -335,14 +467,22 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                         None => Err("no stage open".to_string()),
                     };
                     if response.is_ok() {
-                        if let Some(ref stage) = current_stage {
-                            after_mutation(
+                        if let (Some(ref stage), Some(ref replay)) =
+                            (&current_stage, &current_replay)
+                        {
+                            record_user_mutation(
                                 stage,
+                                replay,
+                                &mut undo_journal,
+                                &mut redo_stack,
+                                &mut dirty_ledger,
+                                &path,
+                            );
+                            after_mutation(
                                 &sink,
                                 &mut mesh_cache,
                                 &mut manifest_skeleton,
                                 &mut resolve_memo,
-                                &mut dirty_layers,
                                 &path,
                             );
                         }
@@ -368,14 +508,22 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                         None => Err("no stage open".to_string()),
                     };
                     if response.is_ok() {
-                        if let Some(ref stage) = current_stage {
-                            after_mutation(
+                        if let (Some(ref stage), Some(ref replay)) =
+                            (&current_stage, &current_replay)
+                        {
+                            record_user_mutation(
                                 stage,
+                                replay,
+                                &mut undo_journal,
+                                &mut redo_stack,
+                                &mut dirty_ledger,
+                                &path,
+                            );
+                            after_mutation(
                                 &sink,
                                 &mut mesh_cache,
                                 &mut manifest_skeleton,
                                 &mut resolve_memo,
-                                &mut dirty_layers,
                                 &path,
                             );
                         }
@@ -408,7 +556,7 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                 StageRequest::ListDirtyLayers { reply } => {
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
-                            dirty_layers_info(stage, &dirty_layers)
+                            dirty_layers_info(stage, &dirty_ledger.dirty())
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -422,12 +570,130 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
                             save_requested_layers(stage, stage_is_usdz, &requests)?;
-                            dirty_layers.retain(|id| {
-                                !requests.iter().any(|request| &request.identifier == id)
-                            });
+                            for request in &requests {
+                                dirty_ledger.record_saved(&request.identifier);
+                            }
                             Ok(())
                         }))
                         .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::Undo { reply } => {
+                    let response = match (&current_stage, &current_replay) {
+                        (Some(undo_stage), Some(_)) => catch_unwind(AssertUnwindSafe(|| {
+                            undo_stage
+                                .undo()
+                                .map_err(|e| format!("failed to undo: {}", e))
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        _ => Err("no stage open".to_string()),
+                    };
+                    if response == Ok(true) {
+                        if let (Some(_), Some(replay)) = (&current_stage, &current_replay) {
+                            // The undo's own commit reached the ReplayStage's
+                            // sink too (only the UndoStage suspends recording
+                            // during its replay); the revert diffs it logged
+                            // re-derive from the journal's forward ones, so
+                            // drain and drop.
+                            let _ = replay.diff();
+                            replay.clear();
+                        }
+                        match undo_journal.pop_back() {
+                            Some(entry) => {
+                                dirty_ledger.record_undo(&entry.layer);
+                                let path = entry.path.clone();
+                                redo_stack.push(entry);
+                                after_mutation(
+                                    &sink,
+                                    &mut mesh_cache,
+                                    &mut manifest_skeleton,
+                                    &mut resolve_memo,
+                                    &path,
+                                );
+                            }
+                            None => {
+                                // The UndoStage reverted a transaction the
+                                // journal does not know (an asymmetric
+                                // commit); refresh coarsely rather than
+                                // leave stale caches.
+                                eprintln!(
+                                    "usdbee: undo journal desync — emitting a root refresh"
+                                );
+                                after_mutation(
+                                    &sink,
+                                    &mut mesh_cache,
+                                    &mut manifest_skeleton,
+                                    &mut resolve_memo,
+                                    "/",
+                                );
+                            }
+                        }
+                    }
+                    let _ = reply.send(response);
+                }
+                StageRequest::Redo { reply } => {
+                    let response = match (&current_stage, &current_replay) {
+                        (Some(_), Some(_)) if redo_stack.is_empty() => Ok(false),
+                        (Some(stage), Some(replay)) => {
+                            // Pop first; a failed or panicking apply pushes
+                            // the entry back so it stays redoable. One entry
+                            // never spans more than its single target layer,
+                            // so a failed redo applies nothing (atomic).
+                            let entry = redo_stack
+                                .pop()
+                                .expect("the empty case matched above");
+                            let layer = entry.layer.clone();
+                            let diffs = entry.diffs.clone();
+                            let result = catch_unwind(AssertUnwindSafe(|| {
+                                for diff in &diffs {
+                                    stage
+                                        .apply_diff(diff, ApplyMode::ExactLayer(&layer))
+                                        .map_err(|e| {
+                                            format!("failed to redo {}: {}", entry.path, e)
+                                        })?;
+                                }
+                                Ok(true)
+                            }))
+                            .unwrap_or_else(panic_reply);
+                            if result == Ok(true) {
+                                // The re-applied edit's commit re-entered both
+                                // recorders: the UndoStage holds it as a
+                                // fresh undo entry and the journal mirrors
+                                // that exactly.
+                                let _ = replay.diff();
+                                replay.clear();
+                                dirty_ledger.record_mutation(&entry.layer);
+                                let path = entry.path.clone();
+                                push_bounded(&mut undo_journal, entry);
+                                after_mutation(
+                                    &sink,
+                                    &mut mesh_cache,
+                                    &mut manifest_skeleton,
+                                    &mut resolve_memo,
+                                    &path,
+                                );
+                            } else {
+                                redo_stack.push(entry);
+                            }
+                            result
+                        }
+                        _ => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::GetUndoState { reply } => {
+                    let response = match current_stage {
+                        Some(ref stage) => {
+                            catch_unwind(AssertUnwindSafe(|| {
+                                Ok(UndoState {
+                                    can_undo: stage.can_undo(),
+                                    can_redo: !redo_stack.is_empty(),
+                                })
+                            }))
+                            .unwrap_or_else(panic_reply)
+                        }
                         None => Err("no stage open".to_string()),
                     };
                     let _ = reply.send(response);
@@ -682,12 +948,15 @@ fn author_attribute_value(
                 .path()
                 .append_property(name)
                 .map_err(|e| format!("invalid attribute path {}.{}: {}", path, name, e))?;
-            let attribute = stage
-                .create_attribute(attribute_path, payload_type_name(payload)?)
-                .map_err(|e| format!("failed to create {} on {}: {}", name, path, e))?;
-            attribute
+            // One builder edit: the spec AND its value commit as a single
+            // transaction, so one undo reverts the whole creation — a
+            // separate create_attribute call would make the creation two
+            // undo steps.
+            stage
+                .attribute_builder(attribute_path, payload_type_name(payload)?)
                 .set_at(value, time)
-                .map_err(|e| format!("failed to set {} on {}: {}", name, path, e))?;
+                .build()
+                .map_err(|e| format!("failed to create {} on {}: {}", name, path, e))?;
         }
     }
     Ok(())
@@ -738,16 +1007,15 @@ fn author_prim_metadata(
 }
 
 /// Post-success bookkeeping every mutation arm shares: the coarse cache
-/// clears (tessellations, manifest skeleton, resolve memo), the owner-side
-/// dirty mark for the edit target's layer, and the `usd-stage-changed`
-/// emission for the edited path.
+/// clears (tessellations, manifest skeleton, resolve memo) and the
+/// `usd-stage-changed` emission for the edited path. The dirty mark and the
+/// undo journal live in `record_user_mutation` (mutation arms) or the
+/// undo/redo arms' own ledger updates.
 fn after_mutation(
-    stage: &Stage,
     sink: &Option<StageChangeSink>,
     mesh_cache: &mut MeshCache,
     manifest_skeleton: &mut Option<ManifestSkeleton>,
     resolve_memo: &mut ResolveMemo,
-    dirty_layers: &mut Vec<String>,
     path: &str,
 ) {
     // shortcut: coarse clear — any edit invalidates every cached
@@ -758,10 +1026,53 @@ fn after_mutation(
     // fine until edits become frequent
     *manifest_skeleton = None;
     resolve_memo.clear();
-    mark_dirty(dirty_layers, stage);
     if let Some(sink) = sink {
         let edited = path.to_string();
         sink(std::slice::from_ref(&edited));
+    }
+}
+
+/// Post-commit bookkeeping for one successful user mutation: the forward
+/// diffs the ReplayStage recorded become one bounded journal entry (the
+/// redo source once undone), the edit target's layer gains one unsaved
+/// change in the dirty ledger, and the redo stack dies (a new mutation
+/// invalidates it). An edit that produced no diff ops authored nothing, so
+/// it left no UndoStage entry either — nothing joins the journal (the
+/// ledger still counts it, matching the pre-undo behavior of marking the
+/// edit target dirty on every successful arm).
+fn record_user_mutation(
+    stage: &Stage,
+    replay: &ReplayStage,
+    journal: &mut VecDeque<MutationEntry>,
+    redo: &mut Vec<MutationEntry>,
+    ledger: &mut LayerLedger,
+    path: &str,
+) {
+    let diffs = replay.diff();
+    replay.clear();
+    let layer = stage.edit_target().layer_identifier().to_string();
+    ledger.record_mutation(&layer);
+    if diffs.is_empty() {
+        return;
+    }
+    push_bounded(
+        journal,
+        MutationEntry {
+            layer,
+            diffs,
+            path: path.to_owned(),
+        },
+    );
+    redo.clear();
+}
+
+/// Append one journal entry, evicting the oldest when the bound the
+/// UndoStage enforces on its own stack is hit (the evicted edit becomes
+/// permanent, exactly as the crate's bounded undo stack treats it).
+fn push_bounded(journal: &mut VecDeque<MutationEntry>, entry: MutationEntry) {
+    journal.push_back(entry);
+    while journal.len() > UNDO_DEPTH {
+        journal.pop_front();
     }
 }
 
@@ -871,14 +1182,6 @@ fn same_layer(stage: &Stage, a: &str, b: &str) -> bool {
     match (stage.layer(a), stage.layer(b)) {
         (Some(a), Some(b)) => a.identifier() == b.identifier(),
         _ => false,
-    }
-}
-
-/// Record the current edit target's layer as carrying unsaved edits.
-fn mark_dirty(dirty: &mut Vec<String>, stage: &Stage) {
-    let identifier = stage.edit_target().layer_identifier().to_string();
-    if !dirty.contains(&identifier) {
-        dirty.push(identifier);
     }
 }
 
@@ -2389,6 +2692,60 @@ pub fn request_save_layers(
             requests: requests.to_vec(),
             reply,
         })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn undo_stage_edit(state: tauri::State<'_, StageState>) -> Result<bool, String> {
+    request_undo(&state.sender)
+}
+
+/// Revert the most recent mutation. `Ok(false)` = nothing to undo.
+pub fn request_undo(sender: &mpsc::Sender<StageRequest>) -> Result<bool, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::Undo { reply })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn redo_stage_edit(state: tauri::State<'_, StageState>) -> Result<bool, String> {
+    request_redo(&state.sender)
+}
+
+/// Re-apply the newest undone mutation. `Ok(false)` = nothing to redo.
+pub fn request_redo(sender: &mpsc::Sender<StageRequest>) -> Result<bool, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::Redo { reply })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn get_undo_state(state: tauri::State<'_, StageState>) -> Result<UndoState, String> {
+    request_undo_state(&state.sender)
+}
+
+/// Whether an undo/redo is available (`UndoState { can_undo, can_redo }`).
+pub fn request_undo_state(sender: &mpsc::Sender<StageRequest>) -> Result<UndoState, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::GetUndoState { reply })
         .map_err(|_| "stage service unavailable".to_string())?;
     response
         .recv()

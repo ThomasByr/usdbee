@@ -234,8 +234,10 @@ export function composeOpUpdate(input: {
   // Snap float noise (6e-17, -0, 119.99999999996) so authored values
   // stay readable.
   const snap = (v: number) => {
+    // Normalize -0 and genuine float noise only — a small-but-real
+    // component (0.23) is NOT zero and must survive authoring.
+    if (Math.abs(v) < 1e-9) return 0;
     const near = Math.round(v);
-    if (near === 0) return 0; // normalize -0
     return Math.abs(v - near) < 1e-9 ? near : v;
   };
   let data: number[];

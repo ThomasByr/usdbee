@@ -198,34 +198,47 @@ describe("composeOpUpdate", () => {
   });
 
   it("pairs non-XYZ triplet components by axis name, matching the Rust evaluator", () => {
-    // xformOp:rotateZYX (0, 90, 90): the Y component rotates about Y and
-    // the Z component about Z — USD pairs vec3 components with axes by
-    // NAME, not by position in the op spelling. The Rust evaluator's
-    // row-vector product Rz(90)·Ry(90)·Rx(0), hand-computed row-major
-    // (same 16 numbers as the three.js column-major array):
-    const local = [0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1];
+    // xformOp:rotateZYX (10, 40, 70): each axis takes ITS OWN vec3 component
+    // (X->10, Y->40, Z->70 — the USD rotateABC contract, not the positional
+    // slots), multiplied in letter order with the first-named letter leftmost
+    // (row-vector): Rz(70)·Ry(40)·Rx(10), hand-computed row-major (the same
+    // 16 numbers as the three.js column-major array, mirrored by the Rust
+    // fixture pin in values.rs on the same angles):
+    const local = [
+      0.262003, 0.963592, -0.05333, 0, -0.719846, 0.231937, 0.654237, 0, 0.642788,
+      -0.133022, 0.754407, 0, 0, 0, 0, 1,
+    ];
+    // The angles DISCRIMINATE the pairings: with the old coincidental
+    // (0, 90, 90) the positional pairing (Z->v0, X->v2) composes the exact
+    // same matrix (a cyclic-permutation coincidence), so only distinct
+    // angles truly pin the convention — a wrong pairing now composes a
+    // different matrix and the divergence guard below refuses.
     const target = compose([translation(0, 1, 0), new THREE.Matrix4().fromArray(local)]);
     const result = composeOpUpdate({
       mode: "translate",
       order: ["xformOp:rotateZYX"],
-      attrs: [attr("xformOp:rotateZYX", "float3", "vec3f", vec([0, 90, 90]))],
+      attrs: [attr("xformOp:rotateZYX", "float3", "vec3f", vec([10, 40, 70]))],
       localMatrix: local,
       targetLocalMatrix: target,
     });
 
-    // A wrong pairing would compose a different matrix and the divergence
-    // guard would refuse; passing at all pins the mirror. The created
-    // translate lands in inv(R)·(0,1,0) = (1,0,0).
-    expect(result).toEqual({
-      ok: true,
-      writes: [
-        { name: "xformOp:translate", type: "double3", data: [1, 0, 0] },
-        {
-          name: "xformOpOrder",
-          type: "token_array",
-          data: ["xformOp:rotateZYX", "xformOp:translate"],
-        },
-      ],
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.writes).toHaveLength(2);
+    // The created translate is most-local: t = R^-1·(0,1,0), which the
+    // axis-name pairing pins as (0.963592, 0.231937, -0.133022) (float
+    // noise rounded for the comparison).
+    expect(result.writes[0]).toMatchObject({
+      name: "xformOp:translate",
+      type: "double3",
+    });
+    expect(result.writes[0].data.map((v) => +Number(v).toFixed(6))).toEqual([
+      0.963592, 0.231937, -0.133022,
+    ]);
+    expect(result.writes[1]).toEqual({
+      name: "xformOpOrder",
+      type: "token_array",
+      data: ["xformOp:rotateZYX", "xformOp:translate"],
     });
   });
 

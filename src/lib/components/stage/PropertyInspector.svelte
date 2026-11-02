@@ -89,7 +89,16 @@
                   <span class="attr-value" class:fallback={!attr.authored}>
                     <AttributeEditor
                       value={attr.value}
-                      oncommit={(value) => stageState.setAttributeValue(attr.name, value)}
+                      oncommit={(value) =>
+                        stageState.setAttributeValue(
+                          attr.name,
+                          value,
+                          // Uniform attributes (xformOpOrder, purpose, ...)
+                          // author their default — never a time sample at
+                          // the viewer's current time code.
+                          attr.variability === "uniform" ? null : undefined,
+                        )
+                      }
                     />
                   </span>
                 </div>
