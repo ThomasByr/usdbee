@@ -6,7 +6,7 @@
 import * as THREE from "three";
 import type { MaterialInfo, PreviewSurface } from "../stage/types";
 
-export type MaterialTextureLoader = (file_path: string) => THREE.Texture | null;
+export type MaterialTextureLoader = (file_path: string, onError: () => void) => THREE.Texture | null;
 
 export function convertMaterial(
   info: MaterialInfo,
@@ -19,7 +19,7 @@ export function convertMaterial(
   const surface = info.surface;
   let hasMap = false;
   if (surface) {
-    applyTextures(material, surface, loadTexture);
+    applyTextures(material, surface, loadTexture, fallbackColor);
     hasMap = material.map !== null;
     applyConstantColor(material, surface);
     if (surface.roughness !== null) material.roughness = surface.roughness;
@@ -38,22 +38,35 @@ function applyTextures(
   material: THREE.MeshPhysicalMaterial,
   surface: PreviewSurface,
   loadTexture: MaterialTextureLoader,
+  fallbackColor: string | null,
 ): void {
   for (const texture of surface.textures) {
-    const loaded = loadTexture(texture.file_path);
-    if (!loaded) continue;
-    if (texture.input === "diffuseColor") material.map = loaded;
-    else if (texture.input === "normal") material.normalMap = loaded;
-    // unknown inputs are skipped per the brief
+    const slot = {
+      diffuseColor: "map",
+      normal: "normalMap",
+      roughness: "roughnessMap",
+      metallic: "metalnessMap",
+      opacity: "alphaMap",
+    }[texture.input] as "map" | "normalMap" | "roughnessMap" | "metalnessMap" | "alphaMap" | undefined;
+    if (!slot) continue;
+    const loaded = loadTexture(texture.file_path, () => {
+      if (!loaded) return;
+      loaded.dispose();
+      if (material[slot] !== loaded) return;
+      material[slot] = null;
+      if (slot === "map") {
+        applyConstantColor(material, surface);
+        applyFallbackColor(material, { name: material.name, surface }, surface, false, fallbackColor);
+      }
+      material.needsUpdate = true;
+    });
+    if (loaded) material[slot] = loaded;
   }
 }
 
 // USD colors are linear and three.js stores working-space values linear, so
 // the payload numbers map straight onto THREE.Color.
-function applyConstantColor(
-  material: THREE.MeshPhysicalMaterial,
-  surface: PreviewSurface,
-): void {
+function applyConstantColor(material: THREE.MeshPhysicalMaterial, surface: PreviewSurface): void {
   if (material.map !== null) return;
   const color = surface.diffuse_color;
   if (color && Array.isArray(color.data) && color.data.length === 3) {

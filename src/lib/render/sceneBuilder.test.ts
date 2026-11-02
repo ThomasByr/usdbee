@@ -5,7 +5,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three";
-import { buildScene } from "./sceneBuilder";
+import { buildScene, disposeScene } from "./sceneBuilder";
 import * as materialConverter from "./materialConverter";
 import type { RenderNode } from "../stage/types";
 
@@ -74,11 +74,23 @@ describe("buildScene", () => {
     expect(world.children.map((child) => child.name)).toEqual(["/World/Ball"]);
 
     // The USD row-major row-vector matrix maps straight onto three.js
-    // Matrix4.fromArray, so decomposed position is the translation row.
-    expect(world.position.toArray()).toEqual([0, 0, 0]);
+    // Matrix4.fromArray, including its translation row.
+    expect(world.matrix.elements.slice(12, 15)).toEqual([0, 0, 0]);
     const ball = world.getObjectByName("/World/Ball")!;
     expect(ball).toBeTruthy();
-    expect(ball.position.toArray()).toEqual([3, 4, 5]);
+    expect(ball.matrix.elements.slice(12, 15)).toEqual([3, 4, 5]);
+  });
+
+  it("preserves a shear-bearing manifest matrix instead of reducing it to TRS", async () => {
+    const shear = [1, 0, 0, 0, 0.5, 1, 0, 0, 0, 0, 1, 0, 3, 4, 5, 1];
+    const group = await buildScene(
+      [node({ path: "/World/Sheared", name: "Sheared", transform: shear })],
+      fetchers(),
+    );
+
+    const object = group.getObjectByName("/World/Sheared")!;
+    expect(object.matrixAutoUpdate).toBe(false);
+    expect(object.matrix.elements).toEqual(shear);
   });
 
   it("builds one InstancedMesh per prototype child with count and matrices from instances", async () => {
@@ -173,6 +185,46 @@ describe("buildScene", () => {
     const mesh = group.getObjectByName("/World/Stroke")!.children[0] as THREE.Mesh;
     expect(mesh.isMesh).toBe(true);
     expect((mesh.material as THREE.MeshPhysicalMaterial).type).toBe("MeshPhysicalMaterial");
+  });
+
+  it("applies saved dependency fallback colors while building materials", async () => {
+    const manifest = [node({ path: "/World/Floor", name: "Floor", type_name: "Mesh", has_geometry: true })];
+    const group = await buildScene(
+      manifest,
+      fetchers({
+        getMaterial: vi.fn(async () => ({
+          name: "CheckerFloor",
+          surface: {
+            diffuse_color: null,
+            roughness: null,
+            metallic: null,
+            opacity: null,
+            normal: null,
+            textures: [{ input: "diffuseColor", file_path: "/cache/checker.png", st_primvar: "st" }],
+          },
+        })),
+      }),
+      { "/cache/checker.png": { fallback_color: "#ff0000" } },
+    );
+
+    const mesh = group.getObjectByName("/World/Floor")!.children[0] as THREE.Mesh;
+    expect((mesh.material as THREE.MeshPhysicalMaterial).color.g).toBe(0);
+  });
+
+  it("disposes every material-owned texture with the scene", () => {
+    const textures = [new THREE.Texture(), new THREE.Texture(), new THREE.Texture()];
+    const spies = textures.map((texture) => vi.spyOn(texture, "dispose"));
+    const material = new THREE.MeshPhysicalMaterial({
+      map: textures[0],
+      roughnessMap: textures[1],
+      alphaMap: textures[2],
+    });
+    const root = new THREE.Group();
+    root.add(new THREE.Mesh(new THREE.BufferGeometry(), material));
+
+    disposeScene(root);
+
+    expect(spies.every((spy) => spy.mock.calls.length === 1)).toBe(true);
   });
 
   it("disposes the fetched material and its textures that Points nodes drop", async () => {

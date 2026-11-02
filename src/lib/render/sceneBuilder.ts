@@ -12,8 +12,14 @@ import type { MaterialInfo, RenderNode } from "../stage/types";
 import { decodeGeometry } from "./geometryDecoder";
 import { convertMaterial, type MaterialTextureLoader } from "./materialConverter";
 
+export interface FallbackDependency {
+  fallback_color?: string | null;
+}
+
+export type FallbackDependencies = Record<string, FallbackDependency>;
+
 export interface SceneFetchers {
-  getGeometry: (path: string) => Promise<ArrayBuffer>;
+  getGeometry: (path: string, time?: number | null) => Promise<ArrayBuffer>;
   // null = fetch failed; the builder falls back to a plain material.
   getMaterial: (path: string) => Promise<MaterialInfo | null>;
   loadTexture: MaterialTextureLoader;
@@ -24,8 +30,9 @@ export interface SceneFetchers {
 // indices 12-14), so fromArray is a direct copy. Exported for renderState's
 // in-place time updates (Task 6).
 export function applyTransform(object: THREE.Object3D, matrix: number[]): void {
-  const m = new THREE.Matrix4().fromArray(matrix);
-  m.decompose(object.position, object.quaternion, object.scale);
+  object.matrixAutoUpdate = false;
+  object.matrix.fromArray(matrix);
+  object.matrixWorldNeedsUpdate = true;
 }
 
 // Exported for renderState's in-place geometry rebuilds (Task 6).
@@ -52,12 +59,36 @@ async function fetchGeometry(
   }
 }
 
-async function fetchMaterial(node: RenderNode, fetchers: SceneFetchers): Promise<THREE.MeshPhysicalMaterial> {
-  const info = await fetchers.getMaterial(node.path).catch(() => null);
-  return convertMaterial(info ?? { name: node.name, surface: null }, null, fetchers.loadTexture);
+function fallbackColorFor(info: MaterialInfo, dependencies: FallbackDependencies): string | null {
+  const entries = Object.entries(dependencies).filter((entry) => entry[1].fallback_color);
+  const materialName = info.name.toLowerCase();
+  const stem = (path: string) => (path.split(/[\\/]/).pop() ?? "").split(".")[0]?.toLowerCase() ?? "";
+  const match = entries.find(([path]) => {
+    const dependencyStem = stem(path);
+    return (
+      dependencyStem !== "" &&
+      (materialName.includes(dependencyStem) ||
+        (info.surface?.textures ?? []).some((texture) => stem(texture.file_path) === dependencyStem))
+    );
+  });
+  return (match ?? entries[0])?.[1].fallback_color ?? null;
 }
 
-async function buildNode(node: RenderNode, fetchers: SceneFetchers): Promise<THREE.Object3D> {
+async function fetchMaterial(
+  node: RenderNode,
+  fetchers: SceneFetchers,
+  dependencies: FallbackDependencies,
+): Promise<THREE.MeshPhysicalMaterial> {
+  const info = await fetchers.getMaterial(node.path).catch(() => null);
+  const materialInfo = info ?? { name: node.name, surface: null };
+  return convertMaterial(materialInfo, fallbackColorFor(materialInfo, dependencies), fetchers.loadTexture);
+}
+
+async function buildNode(
+  node: RenderNode,
+  fetchers: SceneFetchers,
+  dependencies: FallbackDependencies,
+): Promise<THREE.Object3D> {
   const object = new THREE.Group();
   object.name = node.path;
   applyTransform(object, node.transform);
@@ -70,7 +101,7 @@ async function buildNode(node: RenderNode, fetchers: SceneFetchers): Promise<THR
         // Point clouds: a size-based PointsMaterial colored by the vertex
         // colors when present, else the bound material's diffuse/fallback
         // color.
-        const material = await fetchMaterial(node, fetchers);
+        const material = await fetchMaterial(node, fetchers, dependencies);
         const vertexColors = geometry.getAttribute("color") != null;
         const points = new THREE.Points(
           geometry,
@@ -84,13 +115,10 @@ async function buildNode(node: RenderNode, fetchers: SceneFetchers): Promise<THR
         points.name = node.path;
         // The fetched material is only used for its color here; Material
         // dispose() does not cascade to textures, so drop those too.
-        for (const value of Object.values(material)) {
-          if (value instanceof THREE.Texture) value.dispose();
-        }
-        material.dispose();
+        disposeMaterial(material);
         object.add(points);
       } else {
-        const material = await fetchMaterial(node, fetchers);
+        const material = await fetchMaterial(node, fetchers, dependencies);
         let mesh: THREE.Mesh | THREE.InstancedMesh;
         if (node.instances.length > 0) {
           const instanced = new THREE.InstancedMesh(geometry, material, node.instances.length);
@@ -112,17 +140,28 @@ async function buildNode(node: RenderNode, fetchers: SceneFetchers): Promise<THR
   }
 
   for (const child of node.children) {
-    object.add(await buildNode(child, fetchers));
+    object.add(await buildNode(child, fetchers, dependencies));
   }
   return object;
 }
 
-export async function buildScene(manifest: RenderNode[], fetchers: SceneFetchers): Promise<THREE.Group> {
+export async function buildScene(
+  manifest: RenderNode[],
+  fetchers: SceneFetchers,
+  dependencies: FallbackDependencies = {},
+): Promise<THREE.Group> {
   const root = new THREE.Group();
   for (const node of manifest) {
-    root.add(await buildNode(node, fetchers));
+    root.add(await buildNode(node, fetchers, dependencies));
   }
   return root;
+}
+
+function disposeMaterial(material: THREE.Material): void {
+  for (const value of Object.values(material)) {
+    if (value instanceof THREE.Texture) value.dispose();
+  }
+  material.dispose();
 }
 
 // Disposes a scene built by buildScene (geometry, materials, instanced
@@ -133,7 +172,7 @@ export function disposeScene(root: THREE.Object3D): void {
     if (mesh.isMesh || (mesh as THREE.InstancedMesh).isInstancedMesh || mesh.isPoints) {
       mesh.geometry?.dispose();
       const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      for (const material of materials) material?.dispose();
+      for (const material of materials) if (material) disposeMaterial(material);
     }
   });
   root.clear();

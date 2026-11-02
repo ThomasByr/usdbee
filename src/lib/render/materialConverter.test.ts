@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three";
 import { convertMaterial } from "./materialConverter";
 import type { MaterialInfo, PreviewSurface, TextureInput } from "../stage/types";
@@ -66,7 +66,33 @@ describe("convertMaterial", () => {
     expect(material.opacity).toBe(defaults.opacity);
   });
 
-  it("wires diffuse and normal textures", () => {
+  it("clears a failed async diffuse texture and restores fallback color", () => {
+    const texture = new THREE.Texture();
+    const dispose = vi.spyOn(texture, "dispose");
+    let onError: (() => void) | undefined;
+    const material = convertMaterial(
+      {
+        name: "Brick",
+        surface: surface({ textures: [textureInput()] }),
+      },
+      "#ff0000",
+      ((_path: string, error: () => void) => {
+        onError = error;
+        return texture;
+      }) as any,
+    );
+    expect(material.color.g).toBeCloseTo(1.0);
+
+    expect(onError).toBeTypeOf("function");
+    onError!();
+
+    expect(material.map).toBeNull();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(material.color.r).toBeCloseTo(1.0);
+    expect(material.color.g).toBe(0);
+  });
+
+  it("wires diffuse, normal, roughness, metallic, and opacity textures", () => {
     const material = convertMaterial(
       {
         name: "Textured",
@@ -74,6 +100,9 @@ describe("convertMaterial", () => {
           textures: [
             textureInput(),
             textureInput({ input: "normal", file_path: "/cache/normal.png" }),
+            textureInput({ input: "roughness", file_path: "/cache/roughness.png" }),
+            textureInput({ input: "metallic", file_path: "/cache/metallic.png" }),
+            textureInput({ input: "opacity", file_path: "/cache/opacity.png" }),
           ],
         }),
       },
@@ -83,6 +112,9 @@ describe("convertMaterial", () => {
 
     expect(material.map).toBeInstanceOf(THREE.Texture);
     expect(material.normalMap).toBeInstanceOf(THREE.Texture);
+    expect(material.roughnessMap).toBeInstanceOf(THREE.Texture);
+    expect(material.metalnessMap).toBeInstanceOf(THREE.Texture);
+    expect(material.alphaMap).toBeInstanceOf(THREE.Texture);
     expect(material.color.r).toBeCloseTo(1.0, 5); // untouched white base color
   });
 
@@ -124,19 +156,11 @@ describe("convertMaterial", () => {
   });
 
   it("marks opacity below one as transparent", () => {
-    const material = convertMaterial(
-      { name: "Glass", surface: surface({ opacity: 0.5 }) },
-      null,
-      loader,
-    );
+    const material = convertMaterial({ name: "Glass", surface: surface({ opacity: 0.5 }) }, null, loader);
     expect(material.opacity).toBe(0.5);
     expect(material.transparent).toBe(true);
 
-    const opaque = convertMaterial(
-      { name: "Glass", surface: surface({ opacity: 1.0 }) },
-      null,
-      loader,
-    );
+    const opaque = convertMaterial({ name: "Glass", surface: surface({ opacity: 1.0 }) }, null, loader);
     expect(opaque.transparent).toBe(false);
   });
 });
