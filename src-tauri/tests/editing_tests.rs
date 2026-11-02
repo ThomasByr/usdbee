@@ -1161,3 +1161,53 @@ fn set_value_authors_xform_op_vectors_and_order() {
     );
     assert!(bad.is_err());
 }
+
+#[test]
+fn set_value_creates_the_first_op_and_order_on_a_plain_prim() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+
+    // /World/Ball authors no xform ops at all: identity local transform,
+    // never None (the gizmo gate keeps plain prims editable).
+    let before = details_via_owner(&state, "/World/Ball", None);
+    let identity = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    assert_eq!(before.local_transform, Some(identity));
+
+    // The create-op flow: author the op, then xformOpOrder from scratch.
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "xformOp:translate",
+        payload("double3", serde_json::json!([2, 0, 0])),
+        None,
+    )
+    .expect("creating the first translate should succeed");
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "xformOpOrder",
+        payload("token_array", serde_json::json!(["xformOp:translate"])),
+        None,
+    )
+    .expect("authoring the order from scratch should succeed");
+
+    let details = details_via_owner(&state, "/World/Ball", None);
+    assert_eq!(
+        attribute(&details, "xformOpOrder").value.data,
+        serde_json::json!(["xformOp:translate"])
+    );
+    let local = details.local_transform.expect("the created op composes");
+    let expected = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0,
+    ];
+    for (got, want) in local.iter().zip(expected) {
+        assert!(
+            (got - want).abs() < 1e-9,
+            "local transform {:?} != {:?}",
+            local,
+            expected
+        );
+    }
+}

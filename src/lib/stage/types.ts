@@ -149,7 +149,8 @@ export interface PrimDetails {
   metadata: [string, ValuePayload][];
   variant_sets: VariantSetInfo[];
   composition_arcs: string[];
-  // Rust [f64; 16], row-major 4x4; null when no xformOpOrder is authored.
+  // Rust [f64; 16], row-major 4x4; identity for a prim without an authored
+  // xformOpOrder; null only when an op in the chain cannot be evaluated.
   local_transform: number[] | null;
   world_transform: number[] | null;
 }

@@ -147,6 +147,44 @@ describe("stageState", () => {
     expect(error).toBe("prim not found: /A");
   });
 
+  it("setAttributeValue forwards the time argument, including null", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    await stageState.selectPrim("/A");
+    mockedInvoke.mockResolvedValue(undefined);
+    const value = { type: "double3", data: [1, 2, 3] };
+
+    // Default: the viewer's current time code.
+    renderState.time = 7;
+    await stageState.setAttributeValue("xformOp:translate", value as never);
+    expect(mockedInvoke).toHaveBeenLastCalledWith("set_attribute_value", {
+      path: "/A",
+      name: "xformOp:translate",
+      value,
+      time: 7,
+    });
+
+    // Explicit time codes reach the backend unchanged.
+    await stageState.setAttributeValue("xformOp:translate", value as never, 42);
+    expect(mockedInvoke).toHaveBeenLastCalledWith("set_attribute_value", {
+      path: "/A",
+      name: "xformOp:translate",
+      value,
+      time: 42,
+    });
+
+    // null authors the default (uniform attributes like xformOpOrder must
+    // never receive a time sample); Tauri's serde maps JSON null -> None.
+    const order = { type: "token_array", data: ["xformOp:translate"] };
+    await stageState.setAttributeValue("xformOpOrder", order as never, null);
+    expect(mockedInvoke).toHaveBeenLastCalledWith("set_attribute_value", {
+      path: "/A",
+      name: "xformOpOrder",
+      value: order,
+      time: null,
+    });
+  });
+
   it("refreshAfterEdit refetches the tree and re-selects the prim", async () => {
     mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
     await stageState.loadStage("/a.usda");

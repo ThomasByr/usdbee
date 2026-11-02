@@ -33,7 +33,7 @@
   } from "$lib/render/renderState.svelte";
   import { disposeScene } from "$lib/render/sceneBuilder";
   import { TransformGizmo, type GizmoCommit } from "$lib/render/transformGizmo";
-  import { composeOpUpdate, matricesClose, type GizmoMode } from "$lib/render/xformOps";
+  import { composeOpUpdate, evaluateGizmoGate, matricesClose, type GizmoMode } from "$lib/render/xformOps";
   import type { StageInfo } from "$lib/stage/types";
   import { stageModalErrorLines } from "$lib/stage/modalErrors";
   import { upAxisRotation } from "$lib/stage/upAxis";
@@ -206,33 +206,11 @@
 
   // --- Transform gizmo (Phase 3, Task 4) -------------------------------
 
-  // A gizmo needs a world matrix to anchor to and a local stack it can
-  // author into. Instance selections and stacks the Phase 1 evaluator
-  // refuses (orient, unsupported pivots, no authored ops) disable it with
-  // a readable status — no data beats wrong data.
-  const gizmoGate = $derived.by(() => {
-    const details = stageState.details;
-    if (!stageState.selectedPath || !details) return { attachable: false, message: null };
-    if (!details.is_active) {
-      return {
-        attachable: false,
-        message: "prim is inactive; reactivate it before editing",
-      };
-    }
-    if (details.is_instance) {
-      return {
-        attachable: false,
-        message: `instance — edit the prototype at ${details.instance_of ?? "?"}`,
-      };
-    }
-    if (!details.local_transform || !details.world_transform) {
-      return {
-        attachable: false,
-        message: "transform stack not editable (unsupported or unauthored ops)",
-      };
-    }
-    return { attachable: true, message: null };
-  });
+  // The gate logic is pure code in xformOps.ts (Vitest-pinned): a prim
+  // with no authored xformOpOrder reports identity transforms and stays
+  // editable, so the create-op path can author the op AND xformOpOrder
+  // from scratch; only genuinely unsupported stacks disable the gizmo.
+  const gizmoGate = $derived(evaluateGizmoGate(stageState.selectedPath, stageState.details));
 
   const gizmoMessage = $derived(gizmoError ?? gizmoGate.message);
 
@@ -301,6 +279,7 @@
       gizmo?.attach(gizmoWorldMatrix() ?? commit.endWorld);
       return;
     }
+    let failed = false;
     for (const write of result.writes) {
       // xformOpOrder is uniform: it authors its default, never a time
       // sample; the op values author at the viewer's current time code.
@@ -311,10 +290,17 @@
       );
       if (error !== null) {
         gizmoError = error;
+        failed = true;
         break;
       }
     }
-    gizmo?.attach(gizmoWorldMatrix() ?? commit.endWorld);
+    // A successful commit anchors at the drag's end pose until the
+    // usd-stage-changed refresh re-anchors from fresh details — the stale
+    // details would snap the proxy back between commit and refresh (and a
+    // second drag in that window would compute L' from a stale L). A
+    // failed commit leaves details unchanged, so re-anchoring from them
+    // undoes the drag.
+    gizmo?.attach(failed ? (gizmoWorldMatrix() ?? commit.endWorld) : commit.endWorld);
   }
 
   $effect(() => {

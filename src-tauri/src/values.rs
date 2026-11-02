@@ -54,8 +54,10 @@ pub struct VariantSetInfo {
 /// list of (field, value) pairs — serialized as a JSON array of two-element
 /// arrays so fields keep authoring order; the frontend mirror lives in
 /// src/lib/stage/types.ts. Transforms are row-major 4x4 arrays (USD
-/// convention: translation in the last row); `None` when no xformOpOrder
-/// is authored anywhere up the chain.
+/// convention: translation in the last row); a prim without an authored
+/// `xformOpOrder` contributes the identity, and `None` is reserved for a
+/// stack (this prim, or an ancestor for the world matrix) whose ops cannot
+/// be evaluated — no data beats wrong data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrimDetails {
     pub path: String,
@@ -717,8 +719,9 @@ fn composition_arcs(stage: &Stage, prim: &Prim) -> Vec<String> {
 }
 
 /// The prim's local transform from its `xformOpOrder` at `time`
-/// (`None` = default time). `None` when the prim authors no xformOpOrder,
-/// or when an op cannot be evaluated (no data beats wrong data).
+/// (`None` = default time). The identity when the prim authors no
+/// xformOpOrder (a plain prim is at the origin, so it stays editable);
+/// `None` when an op cannot be evaluated (no data beats wrong data).
 /// openusd 0.8 core ships no xform cache (that is openusd-schemas
 /// territory), so the ops are evaluated here: matrices are row-major and
 /// row-vector (`v' = v * M`), so each op in xformOpOrder pre-multiplies the
@@ -726,7 +729,8 @@ fn composition_arcs(stage: &Stage, prim: &Prim) -> Vec<String> {
 /// last.
 pub fn local_transform(prim: &Prim, time: Option<f64>) -> Result<Option<gf::Matrix4d>, String> {
     Ok(match compose_xform(prim, time)? {
-        ComposedXform::NoOps | ComposedXform::Unsupported => None,
+        ComposedXform::NoOps => Some(gf::Matrix4d::IDENTITY),
+        ComposedXform::Unsupported => None,
         ComposedXform::Matrix(matrix) => Some(matrix),
     })
 }
@@ -887,8 +891,10 @@ fn op_transform(prim: &Prim, op: &str, time: Option<f64>) -> Result<OpOutcome, S
 /// The prim's world transform: its local transform composed with every
 /// ancestor's (identity for ancestors without xformOpOrder), stopping at a
 /// prim that resets the xform stack (it does not inherit ancestor
-/// transforms). `None` when no prim in the chain authors an xformOpOrder or
-/// an op in the chain cannot be evaluated.
+/// transforms). The identity when no prim in the chain authors an
+/// xformOpOrder (a plain prim is still somewhere trustworthy in the world);
+/// `None` when an op in the chain cannot be evaluated — the gizmo gate
+/// reads that as a genuinely unsupported stack.
 fn world_transform(prim: &Prim, time: Option<f64>) -> Result<Option<[f64; 16]>, String> {
     let mut chain = Vec::new();
     let mut current = Some(prim.clone());
@@ -901,19 +907,15 @@ fn world_transform(prim: &Prim, time: Option<f64>) -> Result<Option<[f64; 16]>, 
         }
     }
     let mut acc = gf::Matrix4d::IDENTITY;
-    let mut authored = false;
     for ancestor in chain.iter().rev() {
         match compose_xform(ancestor, time)? {
             ComposedXform::NoOps => {}
-            ComposedXform::Matrix(matrix) => {
-                acc = matrix * acc;
-                authored = true;
-            }
+            ComposedXform::Matrix(matrix) => acc = matrix * acc,
             // An unevaluable ancestor would make the composed world wrong.
             ComposedXform::Unsupported => return Ok(None),
         }
     }
-    Ok(authored.then_some(acc.0))
+    Ok(Some(acc.0))
 }
 
 #[cfg(test)]
@@ -1167,6 +1169,29 @@ mod tests {
         assert_close(
             &[
                 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            &matrix.0,
+        );
+    }
+
+    #[test]
+    fn op_transform_pairs_rotate_abc_components_by_axis_name() {
+        let stage = xforms_stage();
+        let prim = stage
+            .prim("/World/TripletZYXAngles")
+            .unwrap_or_else(|e| panic!("/World/TripletZYXAngles resolvable: {e}"));
+        // rotateZYX (0, 90, 90): the vec's X component rotates about X and
+        // its Z component about Z (axis-NAME pairing, the USD rotateABC
+        // contract), multiplied in letter order with the first-named letter
+        // leftmost: Rz(90)·Ry(90)·Rx(0), hand-computed row-major. A
+        // positional pairing (Z->v0, X->v2) would compose a different
+        // matrix, and the TS mirror in xformOps.ts depends on this one.
+        let matrix = local_transform(&prim, None)
+            .unwrap()
+            .expect("the distinct-angle triplet evaluates");
+        assert_close(
+            &[
+                0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
             &matrix.0,
         );

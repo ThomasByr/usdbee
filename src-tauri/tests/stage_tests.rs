@@ -697,6 +697,38 @@ fn details_unsupported_xform_ops_yield_no_transform() {
 }
 
 #[test]
+fn details_plain_prim_without_ops_reports_identity_local_and_parent_world() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "basic.usda");
+    let details = details_via_owner(&state, "/World/Ball", None);
+
+    // A plain Mesh authors no xformOpOrder: it reports the identity LOCAL
+    // transform (identity, not None, so the gizmo gate keeps it editable —
+    // None is reserved for ops that cannot be evaluated) ...
+    let local = details
+        .local_transform
+        .expect("no authored ops means identity, not None");
+    assert_matrix_close(
+        &[
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+        &local,
+    );
+
+    // ... and the WORLD transform still composes the parent /World
+    // translate (1, 2, 3), so the gizmo can anchor to a real world pose.
+    let world = details
+        .world_transform
+        .expect("the world composes the parent chain");
+    assert_matrix_close(
+        &[
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 2.0, 3.0, 1.0,
+        ],
+        &world,
+    );
+}
+
+#[test]
 fn details_reference_prim_lists_composition_arc() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "scene_with_ref.usda");

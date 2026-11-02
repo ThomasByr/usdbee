@@ -14,7 +14,7 @@
 // no data beats wrong data.
 
 import * as THREE from "three";
-import type { AttributeInfo } from "../stage/types";
+import type { AttributeInfo, PrimDetails } from "../stage/types";
 
 export type GizmoMode = "translate" | "rotate" | "scale";
 
@@ -104,8 +104,6 @@ function opMatrix(entry: string, attrs: AttributeInfo[]): { matrix: THREE.Matrix
     }
     matrix = axisRotation(base.slice(-1) as "X" | "Y" | "Z", data);
   } else if (/^rotate[XYZ]{3}$/.test(base)) {
-    // shortcut: rotateABC triplets decompose back to their own letter
-    // order; a drag only ever authors XYZ (rotateXYZ).
     const vec = number3(data, attr.value.type);
     if (!vec) return { error: `${entry} has no readable vec3 value` };
     const letters = base.slice("rotate".length).split("") as [
@@ -113,10 +111,18 @@ function opMatrix(entry: string, attrs: AttributeInfo[]): { matrix: THREE.Matrix
       "X" | "Y" | "Z",
       "X" | "Y" | "Z",
     ];
-    // USD: rotateABC = RotA(a)·RotB(b)·RotC(c) row-vector; transposed into
-    // three.js terms the LAST-named letter applies first.
+    // Mirror the Rust evaluator exactly (values.rs op_transform): each
+    // component pairs with its axis by NAME (X->v0, Y->v1, Z->v2 — the USD
+    // rotateABC contract, regardless of the op's letter order), and the
+    // row-vector product multiplies in letter order with the first-named
+    // letter leftmost. Transposed into three.js the LAST-named letter
+    // applies first. A wrong mirror would trip the divergence guard below
+    // and refuse every non-XYZ stack, so supported stacks stay uneditable.
+    const angle = { X: vec[0], Y: vec[1], Z: vec[2] };
     const [A, B, C] = letters;
-    matrix = axisRotation(C, vec[2]).multiply(axisRotation(B, vec[1])).multiply(axisRotation(A, vec[0]));
+    matrix = axisRotation(C, angle[C])
+      .multiply(axisRotation(B, angle[B]))
+      .multiply(axisRotation(A, angle[A]));
   } else {
     // orient, transform, and anything unknown: refuse rather than guess.
     return { error: `gizmo does not support ${entry}` };
@@ -133,13 +139,48 @@ export function matricesClose(a: number[], b: number[]): boolean {
   return true;
 }
 
+// The gizmo gate (pure so Vitest can pin it): a gizmo needs a world
+// matrix to anchor to and a local stack it can author into. Instances and
+// stacks the Rust evaluator refuses (None transforms: orient, unsupported
+// ops, an unevaluable ancestor somewhere in the chain) disable it with a
+// readable status — no data beats wrong data. A prim with no authored
+// xformOpOrder reports identity transforms and stays EDITABLE: the
+// create-op path authors both the op and the order from scratch.
+export function evaluateGizmoGate(
+  selectedPath: string | null,
+  details: PrimDetails | null,
+): { attachable: boolean; message: string | null } {
+  if (!selectedPath || !details) return { attachable: false, message: null };
+  if (!details.is_active) {
+    return {
+      attachable: false,
+      message: "prim is inactive; reactivate it before editing",
+    };
+  }
+  if (details.is_instance) {
+    return {
+      attachable: false,
+      message: `instance — edit the prototype at ${details.instance_of ?? "?"}`,
+    };
+  }
+  if (!details.local_transform || !details.world_transform) {
+    return {
+      attachable: false,
+      message: "transform stack not editable (unsupported op in this prim or an ancestor)",
+    };
+  }
+  return { attachable: true, message: null };
+}
+
 // The op the gizmo flow must author for one drag. `targetLocalMatrix` is
 // the desired composed local transform after the drag (the caller derives
 // it from the gizmo proxy's world matrices — the parent/world chain
 // cancels out). Existing target op: the value is recomputed in place.
 // Missing target op: created with the UsdGeom default spelling and
 // appended at the END of xformOpOrder (most-local position, per the
-// task's authoring ruling).
+// task's authoring ruling). A prim with NO authored xformOpOrder (empty
+// `order`, identity `localMatrix`) goes through the same create-op path
+// and authors the order from scratch as `[<op>]`.
 export function composeOpUpdate(input: {
   mode: GizmoMode;
   order: string[];
@@ -147,8 +188,6 @@ export function composeOpUpdate(input: {
   localMatrix: number[];
   targetLocalMatrix: number[];
 }): ComposeResult {
-  if (input.order.length === 0) return fail("prim has no authored xformOpOrder");
-
   const ops: THREE.Matrix4[] = [];
   for (const [index, entry] of input.order.entries()) {
     if (entry === RESET_TOKEN) {

@@ -7,8 +7,8 @@
 
 import { describe, expect, it } from "vitest";
 import * as THREE from "three";
-import type { AttributeInfo } from "../stage/types";
-import { composeOpUpdate, matricesClose } from "./xformOps";
+import type { AttributeInfo, PrimDetails } from "../stage/types";
+import { composeOpUpdate, evaluateGizmoGate, matricesClose } from "./xformOps";
 
 function attr(name: string, declared: string, vecType: string, data: unknown): AttributeInfo {
   return {
@@ -175,6 +175,60 @@ describe("composeOpUpdate", () => {
     });
   });
 
+  it("creates the first op and authors xformOpOrder from scratch on a plain prim", () => {
+    // No authored xformOpOrder at all: the evaluator reports the identity
+    // local transform, and the create-op path must also author
+    // xformOpOrder = [<op>] (not just append to an existing one).
+    const target = compose([translation(2, 0, 0)]);
+    const result = composeOpUpdate({
+      mode: "translate",
+      order: [],
+      attrs: [],
+      localMatrix: IDENTITY,
+      targetLocalMatrix: target,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      writes: [
+        { name: "xformOp:translate", type: "double3", data: [2, 0, 0] },
+        { name: "xformOpOrder", type: "token_array", data: ["xformOp:translate"] },
+      ],
+    });
+  });
+
+  it("pairs non-XYZ triplet components by axis name, matching the Rust evaluator", () => {
+    // xformOp:rotateZYX (0, 90, 90): the Y component rotates about Y and
+    // the Z component about Z — USD pairs vec3 components with axes by
+    // NAME, not by position in the op spelling. The Rust evaluator's
+    // row-vector product Rz(90)·Ry(90)·Rx(0), hand-computed row-major
+    // (same 16 numbers as the three.js column-major array):
+    const local = [0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1];
+    const target = compose([translation(0, 1, 0), new THREE.Matrix4().fromArray(local)]);
+    const result = composeOpUpdate({
+      mode: "translate",
+      order: ["xformOp:rotateZYX"],
+      attrs: [attr("xformOp:rotateZYX", "float3", "vec3f", vec([0, 90, 90]))],
+      localMatrix: local,
+      targetLocalMatrix: target,
+    });
+
+    // A wrong pairing would compose a different matrix and the divergence
+    // guard would refuse; passing at all pins the mirror. The created
+    // translate lands in inv(R)·(0,1,0) = (1,0,0).
+    expect(result).toEqual({
+      ok: true,
+      writes: [
+        { name: "xformOp:translate", type: "double3", data: [1, 0, 0] },
+        {
+          name: "xformOpOrder",
+          type: "token_array",
+          data: ["xformOp:rotateZYX", "xformOp:translate"],
+        },
+      ],
+    });
+  });
+
   it("refuses stacks it cannot evaluate (orient, missing values, mid-stack reset, mismatch)", () => {
     const orient = compose([new THREE.Matrix4()]); // orient never composes here
     expect(
@@ -220,6 +274,50 @@ describe("composeOpUpdate", () => {
         targetLocalMatrix: IDENTITY,
       }),
     ).toMatchObject({ ok: false });
+  });
+});
+
+describe("evaluateGizmoGate", () => {
+  function details(overrides: Record<string, unknown>): PrimDetails {
+    return {
+      is_active: true,
+      is_instance: false,
+      instance_of: null,
+      local_transform: IDENTITY,
+      world_transform: IDENTITY,
+      ...overrides,
+    } as PrimDetails;
+  }
+
+  it("enables a plain prim with no authored xformOpOrder", () => {
+    // The ruling: a prim with NO order reports identity transforms and the
+    // gate must ENABLE it (the create-op path authors the order too).
+    expect(evaluateGizmoGate("/World/Ball", details({ local_transform: IDENTITY }))).toEqual({
+      attachable: true,
+      message: null,
+    });
+    expect(evaluateGizmoGate(null, details({}))).toEqual({ attachable: false, message: null });
+    expect(evaluateGizmoGate("/World/Ball", null)).toEqual({ attachable: false, message: null });
+  });
+
+  it("disables only genuinely unsupported stacks, instances and inactive prims", () => {
+    expect(evaluateGizmoGate("/A", details({ local_transform: null }))).toMatchObject({
+      attachable: false,
+    });
+    expect(evaluateGizmoGate("/A", details({ world_transform: null }))).toMatchObject({
+      attachable: false,
+    });
+    const disabled = evaluateGizmoGate("/A", details({ local_transform: null }));
+    expect(disabled.message).toContain("not editable");
+
+    expect(evaluateGizmoGate("/A", details({ is_active: false, local_transform: null })).message).toContain(
+      "inactive",
+    );
+    const instance = evaluateGizmoGate(
+      "/A",
+      details({ is_instance: true, instance_of: "/Proto", local_transform: null }),
+    );
+    expect(instance.message).toContain("/Proto");
   });
 });
 

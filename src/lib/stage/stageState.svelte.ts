@@ -110,7 +110,7 @@ export const stageState = $state({
         path: this.selectedPath,
         name,
         value,
-        time: renderState.time,
+        time,
       });
       return null;
     } catch (e) {

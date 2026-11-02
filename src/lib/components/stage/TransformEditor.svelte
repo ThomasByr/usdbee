@@ -11,14 +11,25 @@
 
   const EDITABLE_OPS = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"] as const;
 
+  // Only ops the prim's xformOpOrder actually lists take effect in the
+  // composed transform; an authored-but-not-in-order op would commit with
+  // no visible change, so it gets no editor row.
+  const order = $derived.by(() => {
+    const attr = attributes.find((a) => a.name === "xformOpOrder");
+    return attr && Array.isArray(attr.value.data) ? (attr.value.data as string[]) : null;
+  });
+
   const ops = $derived(
-    EDITABLE_OPS.map((name) => attributes.find((a) => a.name === name)).filter(
-      (a): a is AttributeInfo =>
-        !!a &&
-        Array.isArray(a.value.data) &&
-        a.value.data.length === 3 &&
-        a.value.data.every((v) => typeof v === "number"),
-    ),
+    order === null
+      ? []
+      : EDITABLE_OPS.map((name) => attributes.find((a) => a.name === name)).filter(
+          (a): a is AttributeInfo =>
+            !!a &&
+            order.includes(a.name) &&
+            Array.isArray(a.value.data) &&
+            a.value.data.length === 3 &&
+            a.value.data.every((v) => typeof v === "number"),
+        ),
   );
 
   let drafts = $state<Record<string, [string, string, string]>>({});
