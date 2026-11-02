@@ -24,7 +24,7 @@ fn owner_with_events() -> (StageState, mpsc::Receiver<Vec<String>>) {
 }
 
 fn open_path_via_owner(state: &StageState, path: &Path) -> usdbee_lib::stage::StageInfo {
-    request_stage_open(path, &state.sender).expect("stage should open")
+    request_stage_open(path, false, &state.sender).expect("stage should open")
 }
 
 fn open_via_owner(state: &StageState, name: &str) {
@@ -644,6 +644,197 @@ fn usdz_opened_stage_is_flagged_and_rejects_saves() {
     )
     .expect_err("usdz-opened stages cannot save layers");
     assert!(error.contains("usdz"), "got: {}", error);
+}
+
+/// Package basic.usda into a real usdz, extract it into the cache the way
+/// `unpack_usdz` lays it out, and open the extracted .usdc carrying the
+/// usdz origin flag — the exact shape of the File > Open dialog flow.
+fn extract_usdz_like_the_dialog() -> PathBuf {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usdc = dir.path().join("root.usdc");
+    let layer = openusd::sdf::Layer::open(fixture("basic.usda").to_string_lossy().as_ref())
+        .expect("basic.usda opens as a layer");
+    layer
+        .export(usdc.to_string_lossy().as_ref())
+        .expect("usdc export works");
+
+    let archive_path = dir.path().join("packed.usdz");
+    let mut writer =
+        zip::ZipWriter::new(std::fs::File::create(&archive_path).expect("usdz create"));
+    writer
+        .start_file("root.usdc", zip::write::SimpleFileOptions::default())
+        .expect("root entry");
+    writer
+        .write_all(&std::fs::read(&usdc).expect("usdc bytes"))
+        .expect("root entry bytes");
+    writer.finish().expect("usdz finish");
+
+    let extracted = usdbee_lib::get_usdbee_cache_dir()
+        .join("extracted")
+        .join(format!("usdz_dialog_pin_{}", std::process::id()));
+    std::fs::create_dir_all(&extracted).expect("extracted root");
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&archive_path).expect("usdz opens"))
+        .expect("usdz parses");
+    let mut entry = archive.by_name("root.usdc").expect("root entry");
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut entry, &mut bytes).expect("entry reads");
+    let extracted_root = extracted.join("root.usdc");
+    std::fs::write(&extracted_root, bytes).expect("entry extracts");
+    extracted_root
+}
+
+#[test]
+fn usdz_opened_via_extraction_flow_is_flagged_and_rejects_saves() {
+    let (state, _events) = owner_with_events();
+
+    // The dialog flow: .usdz extracted to the cache, .usdc opened with the
+    // usdz origin flag — the suffix alone must not un-flag the stage.
+    let extracted_root = extract_usdz_like_the_dialog();
+    let info = request_stage_open(&extracted_root, true, &state.sender)
+        .expect("extracted usdz root should open");
+
+    let target = edit_target(&state);
+    assert!(
+        target.is_usdz_stage,
+        "a stage opened from an extracted usdz must be flagged: {}",
+        extracted_root.display()
+    );
+    assert_eq!(
+        info.root_layer,
+        extracted_root.to_string_lossy().to_string()
+    );
+
+    // Saving anything from this stage is refused — the save must never
+    // write over the cache extraction while the user's .usdz sits unchanged.
+    let error = request_save_layers(
+        &state.sender,
+        &[LayerSaveRequest {
+            identifier: info.root_layer.clone(),
+            path: extracted_root
+                .parent()
+                .unwrap()
+                .join("sneaky.usda")
+                .to_string_lossy()
+                .to_string(),
+        }],
+    )
+    .expect_err("usdz-origin stages cannot save layers");
+    assert!(error.contains("usdz"), "got: {}", error);
+
+    // Direct .usdz opens (suffix derivation) stay flagged too.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usdz = dir.path().join("direct.usdz");
+    let layer = openusd::sdf::Layer::open(fixture("basic.usda").to_string_lossy().as_ref())
+        .expect("basic.usda opens as a layer");
+    layer
+        .export(usdz.to_string_lossy().as_ref())
+        .expect("usdz export works");
+    request_stage_open(&usdz, false, &state.sender).expect("direct usdz opens");
+    assert!(
+        edit_target(&state).is_usdz_stage,
+        "direct opens derive the flag"
+    );
+
+    // And a plain .usda open is not flagged.
+    request_stage_open(&fixture("basic.usda"), false, &state.sender).expect("plain usda opens");
+    assert!(
+        !edit_target(&state).is_usdz_stage,
+        "plain opens stay savable"
+    );
+
+    std::fs::remove_dir_all(extracted_root.parent().expect("extracted parent"))
+        .expect("extracted pin cleanup");
+}
+
+#[test]
+fn save_layers_is_all_or_nothing_when_a_later_request_is_invalid() {
+    let (state, _events) = owner_with_events();
+    let info = open_path_via_owner(&state, &fixture("basic.usda"));
+
+    // Two dirty layers: session and root.
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(1.5)),
+        None,
+    )
+    .expect("session edit should succeed");
+    request_set_edit_target(&state.sender, Some(&info.root_layer)).expect("switch to root");
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(2.5)),
+        None,
+    )
+    .expect("root edit should succeed");
+    let dirty_before = request_list_dirty_layers(&state.sender).expect("dirty layers list");
+    assert_eq!(dirty_before.len(), 2, "both layers start dirty");
+
+    // First request is valid, second fails validation: nothing may be
+    // written and the dirty state must stay untouched.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let first = dir.path().join("first.usda");
+    let error = request_save_layers(
+        &state.sender,
+        &[
+            LayerSaveRequest {
+                identifier: info.root_layer.clone(),
+                path: first.to_string_lossy().to_string(),
+            },
+            LayerSaveRequest {
+                identifier: info.root_layer.clone(),
+                path: "/tmp/sneaky.exe".to_string(),
+            },
+        ],
+    )
+    .expect_err("the invalid second request must fail the whole batch");
+    assert!(error.contains("exe"), "got: {}", error);
+    assert!(
+        !first.exists(),
+        "the valid first request must not be written"
+    );
+    let dirty_after = request_list_dirty_layers(&state.sender).expect("dirty layers list");
+    let ids = |layers: &[usdbee_lib::stage::LayerInfo]| {
+        layers
+            .iter()
+            .map(|l| l.identifier.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(&dirty_before),
+        ids(&dirty_after),
+        "the dirty state is unchanged after the refused batch"
+    );
+
+    // The same batch with the bad request fixed saves both layers.
+    let second = dir.path().join("second.usda");
+    let session_id = dirty_before
+        .iter()
+        .find(|l| l.is_session)
+        .expect("session entry")
+        .identifier
+        .clone();
+    request_save_layers(
+        &state.sender,
+        &[
+            LayerSaveRequest {
+                identifier: info.root_layer.clone(),
+                path: first.to_string_lossy().to_string(),
+            },
+            LayerSaveRequest {
+                identifier: session_id,
+                path: second.to_string_lossy().to_string(),
+            },
+        ],
+    )
+    .expect("a fully valid batch saves everything");
+    assert!(first.exists() && second.exists(), "both files are written");
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
+    assert!(dirty.is_empty(), "both layers are clean: {:?}", dirty);
 }
 
 #[test]

@@ -216,6 +216,7 @@ fn open_via_owner(state: &StageState, name: &str) {
         .sender
         .send(StageRequest::Open {
             path: fixture(name),
+            is_usdz: false,
             reply: reply_tx,
         })
         .expect("stage owner should accept an open request");
@@ -358,6 +359,7 @@ fn stage_owner_opens_stages_and_survives_open_errors() {
         .sender
         .send(StageRequest::Open {
             path: fixture("basic.usda"),
+            is_usdz: false,
             reply: reply_tx,
         })
         .expect("stage owner should accept an open request");
@@ -375,6 +377,7 @@ fn stage_owner_opens_stages_and_survives_open_errors() {
         .sender
         .send(StageRequest::Open {
             path: fixture("does-not-exist.usda"),
+            is_usdz: false,
             reply: reply_tx,
         })
         .expect("stage owner should still accept requests");

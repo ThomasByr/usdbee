@@ -30,6 +30,11 @@ use crate::values::{
 pub enum StageRequest {
     Open {
         path: PathBuf,
+        // usdz origin carried by the caller: the File > Open flow extracts
+        // .usdz archives to the cache and opens the extracted .usdc, whose
+        // suffix cannot reveal the origin. Plain path opens pass false; the
+        // Open arm still derives direct .usdz opens from the suffix.
+        is_usdz: bool,
         reply: mpsc::Sender<Result<StageInfo, String>>,
     },
     GetTree {
@@ -155,8 +160,9 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
         // `Layer::is_dirty` only reports in-flight overlay edits (it drains at
         // every commit), so "unsaved on disk" is owner-side bookkeeping.
         let mut dirty_layers: Vec<String> = Vec::new();
-        // Stamped at Open from the opened path's suffix; a usdz-opened stage
-        // cannot save layers (Task 7 adds the Save As usdz path).
+        // Stamped at Open from the request's usdz-origin flag OR the opened
+        // path's suffix; a usdz-opened stage cannot save layers (Task 7
+        // adds the Save As usdz path).
         let mut stage_is_usdz = false;
         // Requested-render-path -> geometry-cache-key resolutions, shared by
         // the geometry/material arms; cleared on Open. Prototype resolution
@@ -165,7 +171,11 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
         let mut resolve_memo = ResolveMemo::new();
         while let Ok(request) = receiver.recv() {
             match request {
-                StageRequest::Open { path, reply } => {
+                StageRequest::Open {
+                    path,
+                    is_usdz,
+                    reply,
+                } => {
                     let response = catch_unwind(AssertUnwindSafe(|| {
                         let (stage, info) = open_stage(&path)?;
                         current_stage = Some(UndoStage::from(stage));
@@ -173,10 +183,11 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                     }))
                     .unwrap_or_else(panic_reply);
                     stage_is_usdz = response.is_ok()
-                        && path
-                            .extension()
-                            .and_then(|extension| extension.to_str())
-                            .is_some_and(|extension| extension.eq_ignore_ascii_case("usdz"));
+                        && (is_usdz
+                            || path
+                                .extension()
+                                .and_then(|extension| extension.to_str())
+                                .is_some_and(|extension| extension.eq_ignore_ascii_case("usdz")));
                     mesh_cache.clear();
                     manifest_skeleton = None;
                     resolve_memo.clear();
@@ -787,8 +798,9 @@ fn paths_match(a: &str, b: &str) -> bool {
 /// layer's identifier is unchanged, so composition and caches are
 /// untouched. Rules: usdz-opened stages refuse entirely; extensions are
 /// whitelisted; session layers only ever save to a NEW `.usda` path, never
-/// over any file the stage composes from. The caller (the owner arm) marks
-/// the saved layers clean.
+/// over any file the stage composes from. Every request is validated
+/// before any file is written (all-or-nothing). The caller (the owner arm)
+/// marks the saved layers clean.
 fn save_requested_layers(
     stage: &Stage,
     is_usdz_stage: bool,
@@ -805,6 +817,10 @@ fn save_requested_layers(
     }
     let session = session_identifier(stage);
     let stack = stage.layer_stack();
+    // Validate every request before writing any file: a batch with one bad
+    // request must leave every file and the dirty state untouched (the
+    // caller clears dirty ids only on a fully successful save).
+    let mut validated = Vec::with_capacity(requests.len());
     for request in requests {
         let layer = stage
             .layer(&request.identifier)
@@ -834,6 +850,9 @@ fn save_requested_layers(
                 ));
             }
         }
+        validated.push((layer, request));
+    }
+    for (layer, request) in validated {
         layer.export(&request.path).map_err(|e| {
             format!(
                 "failed to save {} to '{}': {}",
@@ -2054,17 +2073,22 @@ pub async fn open_usd_path(
     path: String,
     state: tauri::State<'_, StageState>,
 ) -> Result<StageInfo, String> {
-    request_stage_open(&PathBuf::from(path), &state.sender)
+    request_stage_open(&PathBuf::from(path), false, &state.sender)
 }
 
+/// `is_usdz` carries the archive origin the dialog flow knows (it opens the
+/// extracted cache copy, not the archive); plain callers pass false and rely
+/// on the Open arm's suffix derivation for direct `.usdz` opens.
 pub fn request_stage_open(
     path: &Path,
+    is_usdz: bool,
     sender: &mpsc::Sender<StageRequest>,
 ) -> Result<StageInfo, String> {
     let (reply, response) = mpsc::channel();
     sender
         .send(StageRequest::Open {
             path: path.to_path_buf(),
+            is_usdz,
             reply,
         })
         .map_err(|_| "stage service unavailable".to_string())?;

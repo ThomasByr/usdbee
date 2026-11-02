@@ -225,6 +225,7 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
                     resolve_remote_dependencies(&mut scan, &server_url)?;
                     let stage_info = crate::stage::request_stage_open(
                         Path::new(&p_str),
+                        is_usdz,
                         &stage_app.state::<crate::stage::StageState>().sender,
                     )?;
                     Ok((scan, stage_info))
