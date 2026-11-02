@@ -257,6 +257,81 @@ describe("renderState.setStageTime", () => {
     expect(renderState.time).toBe(9);
   });
 
+  it("hides vanished instancer prototypes and restores their latest instance counts", async () => {
+    const prototype = (count: number) =>
+      node({
+        path: "/Scene/Instancer/__proto_0",
+        name: "__proto_0",
+        type_name: "Mesh",
+        has_geometry: true,
+        animated: true,
+        instances: Array.from({ length: count }, () => IDENTITY),
+      });
+    const instancer = (children: RenderNode[]) =>
+      node({ path: "/Scene/Instancer", name: "Instancer", type_name: "PointInstancer", children });
+    const group = await loadScene(() => [instancer([prototype(1)])]);
+    const original = findMesh(group) as THREE.InstancedMesh;
+    expect(original.count).toBe(1);
+
+    mockIpc(() => [instancer([])]);
+    await renderState.setStageTime(1);
+    expect(original.parent!.visible).toBe(false);
+
+    mockIpc(() => [instancer([prototype(2)])]);
+    await renderState.setStageTime(2);
+    const restored = findMesh(group) as THREE.InstancedMesh;
+    expect(restored.parent!.visible).toBe(true);
+    expect(restored.count).toBe(2);
+  });
+
+  it("builds an instancer prototype that becomes visible after starting empty", async () => {
+    const prototype = node({
+      path: "/Scene/Instancer/__proto_0",
+      name: "__proto_0",
+      type_name: "Mesh",
+      has_geometry: true,
+      animated: true,
+      instances: [IDENTITY],
+    });
+    const instancer = (children: RenderNode[]) =>
+      node({ path: "/Scene/Instancer", name: "Instancer", type_name: "PointInstancer", children });
+    const group = await loadScene(() => [instancer([])]);
+
+    mockIpc(() => [instancer([prototype])]);
+    await renderState.setStageTime(1);
+
+    const appeared = findMesh(group) as THREE.InstancedMesh;
+    expect(appeared).toBeTruthy();
+    expect(appeared.count).toBe(1);
+  });
+
+  it("keeps queued time-step promises pending until the coalesced refresh finishes", async () => {
+    const wobble = node({ path: "/Scene/Wobble", name: "Wobble" });
+    await loadScene(() => [wobble]);
+    const active = deferred<RenderNode[]>();
+    const latest = deferred<RenderNode[]>();
+    let calls = 0;
+    mockIpc(() => {
+      calls += 1;
+      return calls === 1 ? active.promise : latest.promise;
+    });
+
+    const activeStep = renderState.setStageTime(5);
+    const queuedStep = renderState.setStageTime(6);
+    let queuedDone = false;
+    const tracked = queuedStep.then(() => {
+      queuedDone = true;
+    });
+    await Promise.resolve();
+    const doneBeforeRefresh = queuedDone;
+    active.resolve([wobble]);
+    latest.resolve([wobble]);
+    await Promise.all([activeStep, tracked]);
+
+    expect(doneBeforeRefresh).toBe(false);
+    expect(queuedDone).toBe(true);
+  });
+
   it("applies the latest queued transform after the active manifest completes", async () => {
     const wobble = node({
       path: "/Scene/Wobble",

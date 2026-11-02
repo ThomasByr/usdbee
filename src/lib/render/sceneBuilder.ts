@@ -50,9 +50,10 @@ export function toBufferGeometry(buffer: ArrayBuffer): THREE.BufferGeometry {
 async function fetchGeometry(
   node: RenderNode,
   fetchers: SceneFetchers,
+  time?: number | null,
 ): Promise<THREE.BufferGeometry | null> {
   try {
-    return toBufferGeometry(await fetchers.getGeometry(node.path));
+    return toBufferGeometry(await fetchers.getGeometry(node.path, time));
   } catch (e) {
     console.warn(`usdbee: skipping geometry at ${node.path}:`, e);
     return null;
@@ -88,6 +89,7 @@ async function buildNode(
   node: RenderNode,
   fetchers: SceneFetchers,
   dependencies: FallbackDependencies,
+  time?: number | null,
 ): Promise<THREE.Object3D> {
   const object = new THREE.Group();
   object.name = node.path;
@@ -95,7 +97,7 @@ async function buildNode(
   object.visible = node.visible;
 
   if (node.has_geometry) {
-    const geometry = await fetchGeometry(node, fetchers);
+    const geometry = await fetchGeometry(node, fetchers, time);
     if (geometry) {
       if (node.type_name === "Points") {
         // Point clouds: a size-based PointsMaterial colored by the vertex
@@ -140,7 +142,7 @@ async function buildNode(
   }
 
   for (const child of node.children) {
-    object.add(await buildNode(child, fetchers, dependencies));
+    object.add(await buildNode(child, fetchers, dependencies, time));
   }
   return object;
 }
@@ -149,10 +151,11 @@ export async function buildScene(
   manifest: RenderNode[],
   fetchers: SceneFetchers,
   dependencies: FallbackDependencies = {},
+  time?: number | null,
 ): Promise<THREE.Group> {
   const root = new THREE.Group();
   for (const node of manifest) {
-    root.add(await buildNode(node, fetchers, dependencies));
+    root.add(await buildNode(node, fetchers, dependencies, time));
   }
   return root;
 }

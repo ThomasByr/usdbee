@@ -22,6 +22,7 @@ import {
 let loadGeneration = 0;
 let sceneLoading = false;
 let timeStepInFlight = false;
+let activeTimeStep: Promise<void> | null = null;
 let queuedTime: number | null = null;
 
 // The group + path->object index of the last successfully built scene.
@@ -29,6 +30,7 @@ let queuedTime: number | null = null;
 // the viewport); setStageTime mutates that same group in place.
 let currentGroup: THREE.Group | null = null;
 let currentPaths = new Map<string, THREE.Object3D>();
+let currentFallbacks: FallbackDependencies = {};
 
 // One shared loader; convertMaterial clears failed maps through onError.
 const textureLoader = new THREE.TextureLoader();
@@ -91,15 +93,9 @@ function indexByPath(group: THREE.Group): Map<string, THREE.Object3D> {
   return byPath;
 }
 
-// Applies the manifest's time state to the integrated scene:
-// transform + visibility for every present node, and for animated nodes
-// a geometry rebuild (the simpler correct option: dispose the old
-// BufferGeometry and assign a fresh one — counts and attribute sets may
-// change across time, and in-place attribute surgery cannot). Nodes the
-// scene does not have (topology appearing only at this time) are skipped.
-// `isStale` is checked per node — before each geometry fetch and again
-// before applying — so a superseded time step cannot land older geometry
-// over a newer step's result (scrub storms interleave the per-node awaits).
+// Applies the manifest's time state to the integrated scene. Animated
+// geometry is rebuilt; instanced prototypes can appear, disappear, or
+// change count as invisibleIds changes. Every await is generation-guarded.
 async function updateNodes(
   nodes: RenderNode[],
   byPath: Map<string, THREE.Object3D>,
@@ -108,7 +104,25 @@ async function updateNodes(
 ): Promise<void> {
   for (const node of nodes) {
     if (isStale()) return;
-    const object = byPath.get(node.path);
+    let object = byPath.get(node.path);
+    if (!object && node.instances.length > 0) {
+      const parent = byPath.get(node.path.split("/").slice(0, -1).join("/"));
+      if (parent) {
+        const built = await buildScene([node], fetchers, currentFallbacks, time);
+        if (isStale()) {
+          disposeScene(built);
+          return;
+        }
+        object = built.children[0];
+        if (object) {
+          parent.add(object);
+          object.traverse((child) => {
+            if (child.name) byPath.set(child.name, child);
+          });
+        }
+      }
+      continue;
+    }
     if (object) {
       const drawable = object as THREE.Mesh | THREE.Points;
       const isDrawable = object instanceof THREE.Mesh || (drawable as THREE.Points).isPoints;
@@ -125,8 +139,24 @@ async function updateNodes(
         } catch (e) {
           console.warn(`usdbee: keeping last geometry at ${node.path}:`, e);
         }
-        const instanced = drawable as THREE.InstancedMesh;
-        if (instanced.isInstancedMesh && instanced.count === node.instances.length) {
+        let instanced = drawable as THREE.InstancedMesh;
+        if (instanced.isInstancedMesh) {
+          if (node.instances.length > instanced.instanceMatrix.count) {
+            const replacement = new THREE.InstancedMesh(
+              instanced.geometry,
+              instanced.material,
+              node.instances.length,
+            );
+            replacement.name = instanced.name;
+            replacement.castShadow = instanced.castShadow;
+            replacement.receiveShadow = instanced.receiveShadow;
+            wrapper.add(replacement);
+            wrapper.remove(instanced);
+            instanced.dispose();
+            byPath.set(node.path, replacement);
+            instanced = replacement;
+          }
+          instanced.count = node.instances.length;
           const matrix = new THREE.Matrix4();
           node.instances.forEach((instance, i) => instanced.setMatrixAt(i, matrix.fromArray(instance)));
           instanced.instanceMatrix.needsUpdate = true;
@@ -134,6 +164,24 @@ async function updateNodes(
       }
     }
     await updateNodes(node.children, byPath, time, isStale);
+  }
+}
+
+async function updateScene(nodes: RenderNode[], time: number, isStale: () => boolean): Promise<void> {
+  const present = new Set<string>();
+  const collect = (entries: RenderNode[]) => {
+    for (const node of entries) {
+      present.add(node.path);
+      collect(node.children);
+    }
+  };
+  collect(nodes);
+  await updateNodes(nodes, currentPaths, time, isStale);
+  if (isStale()) return;
+  for (const [path, object] of currentPaths) {
+    if ((object as THREE.InstancedMesh).isInstancedMesh && !present.has(path)) {
+      object.parent!.visible = false;
+    }
   }
 }
 
@@ -167,7 +215,8 @@ export const renderState = $state({
       });
       if (generation !== loadGeneration) return null;
       this.hasAnimated = anyAnimated(manifest);
-      const group = await buildScene(manifest, fetchers, fallbackColors);
+      currentFallbacks = fallbackColors;
+      const group = await buildScene(manifest, fetchers, fallbackColors, startTime);
       if (generation !== loadGeneration) {
         disposeScene(group);
         return null;
@@ -194,39 +243,42 @@ export const renderState = $state({
   // scene in place: one manifest fetch, then per-animated-node geometry
   // fetches. One step runs at a time; rapid requests coalesce to the
   // latest queued time. Loads still supersede active work via loadGeneration.
-  async setStageTime(time: number): Promise<void> {
+  setStageTime(time: number): Promise<void> {
     this.time = time;
     this.onTimeChange?.(time);
-    if (sceneLoading || timeStepInFlight) {
+    if (sceneLoading) {
       queuedTime = time;
-      return;
+      return activeTimeStep ?? Promise.resolve();
+    }
+    if (timeStepInFlight) {
+      queuedTime = time;
+      return activeTimeStep ?? Promise.resolve();
     }
     const generation = ++loadGeneration;
     const group = currentGroup;
-    if (!group) return;
+    if (!group) return Promise.resolve();
     timeStepInFlight = true;
-    try {
-      const manifest = await invoke<RenderNode[]>("get_scene_manifest", { time });
-      if (generation !== loadGeneration || currentGroup !== group) return;
-      await updateNodes(
-        manifest,
-        currentPaths,
-        time,
-        () => generation !== loadGeneration || currentGroup !== group,
-      );
-    } catch (e) {
-      if (generation === loadGeneration) {
-        // Keep the last good scene on screen; surface why.
-        this.error = typeof e === "string" ? e : String(e);
+    activeTimeStep = (async () => {
+      try {
+        const manifest = await invoke<RenderNode[]>("get_scene_manifest", { time });
+        if (generation !== loadGeneration || currentGroup !== group) return;
+        await updateScene(manifest, time, () => generation !== loadGeneration || currentGroup !== group);
+      } catch (e) {
+        if (generation === loadGeneration) {
+          // Keep the last good scene on screen; surface why.
+          this.error = typeof e === "string" ? e : String(e);
+        }
+      } finally {
+        timeStepInFlight = false;
+        activeTimeStep = null;
+        if (!sceneLoading) {
+          const pendingTime = queuedTime;
+          queuedTime = null;
+          if (pendingTime !== null) await this.setStageTime(pendingTime);
+        }
       }
-    } finally {
-      timeStepInFlight = false;
-      if (!sceneLoading) {
-        const pendingTime = queuedTime;
-        queuedTime = null;
-        if (pendingTime !== null) await this.setStageTime(pendingTime);
-      }
-    }
+    })();
+    return activeTimeStep;
   },
 
   // Animated content refresh: a full re-load at the current time.
