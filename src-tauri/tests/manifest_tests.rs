@@ -1,6 +1,9 @@
 // Phase 2, Task 4: the render manifest walk (purpose filtering, visibility
 // inheritance, PointInstancer prototype children, material bindings) and the
 // synthetic `__proto_<i>` path rewrite in the geometry/material arms.
+//
+// Phase 2.5 Task 2 adds the two cache pins at the bottom: the owner-thread
+// manifest cache must serve repeated calls without freezing per-time data.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -8,8 +11,8 @@ use std::sync::mpsc;
 use openusd::gf;
 
 use usdbee_lib::stage::{
-    open_stage, request_geometry_data, request_material_data, serialize_render_manifest,
-    spawn_stage_owner, RenderNode, StageRequest, StageState,
+    open_stage, request_geometry_data, request_material_data, request_scene_manifest,
+    serialize_render_manifest, spawn_stage_owner, RenderNode, StageRequest, StageState,
 };
 
 fn open_fixture_manifest(name: &str, time: Option<f64>) -> Vec<RenderNode> {
@@ -414,4 +417,84 @@ fn manifest_counts_curves_and_points_as_geometry() {
         assert!(node.has_geometry, "{name} renders geometry");
         assert_eq!(node.material, None, "no binding authored on {name}");
     }
+}
+
+// Task 2 cache pins: manifest calls routed through the stage owner exercise
+// the per-stage-open skeleton cache (warm on every call after the first).
+
+fn assert_static_skeleton_equal(expected: &[RenderNode], actual: &[RenderNode]) {
+    assert_eq!(
+        expected.len(),
+        actual.len(),
+        "time-independent node count changed between calls"
+    );
+    for (expected, actual) in expected.iter().zip(actual) {
+        assert_eq!(expected.path, actual.path);
+        assert_eq!(expected.name, actual.name);
+        assert_eq!(expected.type_name, actual.type_name);
+        assert_eq!(expected.has_geometry, actual.has_geometry);
+        assert_eq!(expected.animated, actual.animated);
+        assert_eq!(expected.geometry_animated, actual.geometry_animated);
+        assert_eq!(expected.material, actual.material);
+        assert_static_skeleton_equal(&expected.children, &actual.children);
+    }
+}
+
+fn assert_manifest_json_equal(expected: &[RenderNode], actual: &[RenderNode]) {
+    let expected = serde_json::to_vec(expected).expect("manifest should serialize");
+    let actual = serde_json::to_vec(actual).expect("manifest should serialize");
+    assert_eq!(expected, actual, "manifest JSON must be byte-identical");
+}
+
+#[test]
+fn cached_manifest_calls_stay_structure_equal_and_resample_the_queried_time() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+
+    // Cold (cache build), warm at another time, warm back at the first time.
+    let at_zero = request_scene_manifest(&state.sender, Some(0.0))
+        .expect("manifest at t=0 should serialize");
+    let at_ten = request_scene_manifest(&state.sender, Some(10.0))
+        .expect("manifest at t=10 should serialize");
+    let back_to_zero = request_scene_manifest(&state.sender, Some(0.0))
+        .expect("manifest back at t=0 should serialize");
+
+    // The time-independent fields are the same on every call: a frozen or
+    // half-frozen cache breaks either comparison.
+    assert_static_skeleton_equal(&at_zero, &at_ten);
+    assert_static_skeleton_equal(&at_zero, &back_to_zero);
+
+    // Warm calls sample their own time: Pulse's translate interpolates
+    // between the t=1 and t=24 samples.
+    let pulse_at_zero = expect(&at_zero, "/Scene/Pulse").transform[12];
+    let pulse_at_ten = expect(&at_ten, "/Scene/Pulse").transform[12];
+    assert_ne!(
+        pulse_at_zero, pulse_at_ten,
+        "the warm call must carry its own requested time"
+    );
+
+    // A later call at the first time is byte-equal to the first: the t=10
+    // call must not bleed into the cache.
+    assert_manifest_json_equal(&at_zero, &back_to_zero);
+}
+
+#[test]
+fn cached_manifest_calls_do_not_freeze_time_dependent_structure() {
+    // invisibleIds time samples hide every instance at t=2, so the synthetic
+    // prototype child exists at t=1, is gone at t=2, and is back at t=1: a
+    // cache that freezes the walk's structure at its first time is wrong.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "purpose_scene.usda");
+
+    let at_one = request_scene_manifest(&state.sender, Some(1.0))
+        .expect("manifest at t=1 should serialize");
+    expect(&at_one, "/World/VisibilityInstancer/__proto_0");
+
+    let at_two = request_scene_manifest(&state.sender, Some(2.0))
+        .expect("manifest at t=2 should serialize");
+    assert_absent(&at_two, "/World/VisibilityInstancer/__proto_0");
+
+    let back_to_one = request_scene_manifest(&state.sender, Some(1.0))
+        .expect("manifest back at t=1 should serialize");
+    assert_manifest_json_equal(&at_one, &back_to_one);
 }

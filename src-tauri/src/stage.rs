@@ -58,6 +58,9 @@ pub fn spawn_stage_owner() -> StageState {
     thread::spawn(move || {
         let mut current_stage = None;
         let mut mesh_cache = MeshCache::new();
+        // The time-independent manifest skeleton, built by the first manifest
+        // call after an open; cleared on Open (like the geometry MeshCache).
+        let mut manifest_skeleton: Option<ManifestSkeleton> = None;
         while let Ok(request) = receiver.recv() {
             match request {
                 StageRequest::Open { path, reply } => {
@@ -68,6 +71,7 @@ pub fn spawn_stage_owner() -> StageState {
                     }))
                     .unwrap_or_else(panic_reply);
                     mesh_cache.clear();
+                    manifest_skeleton = None;
                     let _ = reply.send(response);
                 }
                 StageRequest::GetTree { reply } => {
@@ -91,7 +95,20 @@ pub fn spawn_stage_owner() -> StageState {
                 StageRequest::GetManifest { time, reply } => {
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
-                            serialize_render_manifest(stage, time)
+                            if manifest_skeleton.is_none() {
+                                manifest_skeleton = Some(ManifestSkeleton::build(stage)?);
+                            }
+                            let skeleton = manifest_skeleton
+                                .as_ref()
+                                .ok_or_else(|| "manifest skeleton build failed".to_string())?;
+                            let mut prototype_memo = PrototypeMemo::new();
+                            render_children(
+                                skeleton,
+                                &skeleton.root_children,
+                                time,
+                                false,
+                                &mut prototype_memo,
+                            )
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -340,31 +357,170 @@ pub struct RenderNode {
 /// `<instancer>/__proto_<i>` addresses prototype `i`'s geometry.
 const PROTO_PREFIX: &str = "__proto_";
 
-/// Purpose/visibility state for one prim, per USD semantics (schema
-/// `ImageableExt` walks): non-imageable prims are kept visible (their
-/// children compute their own inherited state); imageable prims are
-/// excluded when the computed purpose is proxy/guide, and their computed
-/// visibility (inherited down, stoppable by re-authoring) sets `visible`.
-enum Renderable {
-    Keep { visible: bool },
-    Exclude,
+/// Per-prim manifest facts that never depend on the queried time. Verified
+/// time-independent in the Task 1 profile: type names, computed purpose
+/// (no time parameter), material bindings (relationships), the geometry flag
+/// and the authored time-samples audit (`samples_scene_motion`) re-derive
+/// identically for every call at every time. Visibility values, transform
+/// evaluation and the PointInstancer instance arrays are NOT here — they
+/// sample the requested time and stay per-call.
+struct SkeletonFacts {
+    prim: openusd::usd::Prim,
+    type_name: String,
+    renders_geometry: bool,
+    /// Computed purpose is proxy/guide: the walk flattens the node's
+    /// transform-possessed children up (decision is time-independent).
+    excluded: bool,
+    /// Has an Imageable view: only imageable prims get the per-call
+    /// visibility read; non-imageable prims stay visible (fail-soft).
+    imageable: bool,
+    self_moves: bool,
+    self_deforms: bool,
+    /// Direct `material:binding` target, loaded for geometry prims exactly
+    /// where the per-call walk used to look it up.
+    material: Option<String>,
+    /// Composed children in walk order, abstract prims excluded (the
+    /// per-call `children()` enumeration and `is_abstract` filter, once).
+    children: Vec<String>,
+    kind: SkeletonKind,
 }
 
-fn renderable_state(prim: &openusd::usd::Prim, time: Option<f64>) -> Result<Renderable, String> {
-    let Some(imageable) = Imageable::from_prim(prim.clone()).map_err(stage_err)? else {
-        return Ok(Renderable::Keep { visible: true });
-    };
-    if matches!(
-        imageable.compute_purpose().map_err(stage_err)?,
-        Purpose::Proxy | Purpose::Guide
-    ) {
-        return Ok(Renderable::Exclude);
+/// Which child-producing branch the walk takes for this prim, decided at
+/// build time from the prim's own composition (type instance state is not
+/// time-sampleable): a PointInstancer's synthetic children, a native
+/// instance's prototype expansion, or plain recursion.
+enum SkeletonKind {
+    Plain,
+    NativeInstance { prototype: Option<sdf::Path> },
+    PointInstancer { prototypes: Vec<sdf::Path> },
+}
+
+/// The stage-open manifest cache: every time-independent manifest fact,
+/// built once, held in the stage-owner loop state, cleared on `Open` like
+/// the MeshCache. Each manifest call samples ONLY the per-time data
+/// (transforms, visibility, instancer arrays) against the cached skeleton.
+struct ManifestSkeleton {
+    /// Facts for every prim reachable from the pseudo-root plus every
+    /// prototype subtree discovered along the way (native prototype roots
+    /// live outside the pseudo-root namespace, so a flat map keyed by path
+    /// reaches both). Values are keyed by their composed path spelling.
+    facts: HashMap<String, SkeletonFacts>,
+    root_children: Vec<String>,
+}
+
+impl ManifestSkeleton {
+    fn build(stage: &Stage) -> Result<ManifestSkeleton, String> {
+        let mut skeleton = ManifestSkeleton {
+            facts: HashMap::new(),
+            root_children: Vec::new(),
+        };
+        let mut pending: Vec<sdf::Path> = Vec::new();
+        let pseudo_root = stage
+            .prim(sdf::Path::abs_root())
+            .map_err(|e| format!("invalid pseudo-root path: {}", e))?;
+        skeleton.root_children = build_facts(stage, &pseudo_root, &mut skeleton, &mut pending)?;
+        // Native prototype roots (and any prototype target outside the
+        // walked tree) only exist as prims once their instances composed,
+        // which the walk above just did — build their facts now, feeding
+        // prototypes discovered inside prototype subtrees back into the
+        // same queue.
+        while let Some(path) = pending.pop() {
+            let key = path.to_string();
+            if skeleton.facts.contains_key(&key) {
+                continue;
+            }
+            let prim = stage
+                .prim(path.clone())
+                .map_err(|e| format!("invalid prototype path '{}': {}", path, e))?;
+            if !prim.is_valid().map_err(stage_err)? {
+                continue;
+            }
+            build_facts(stage, &prim, &mut skeleton, &mut pending)?;
+        }
+        Ok(skeleton)
     }
-    let visible = imageable
-        .compute_visibility(time.map(TimeCode::new))
+}
+
+/// Facts for one prim and (recursively) its whole subtree, inserted keyed by
+/// the composed path; returns the prim's children keys in walk order, so the
+/// caller can link them. Discoveries that name prims outside the walked
+/// namespace accumulate in `pending` for the post-walk fixpoint.
+fn build_facts(
+    stage: &Stage,
+    prim: &openusd::usd::Prim,
+    skeleton: &mut ManifestSkeleton,
+    pending: &mut Vec<sdf::Path>,
+) -> Result<Vec<String>, String> {
+    let type_name = prim
+        .type_name()
         .map_err(stage_err)?
-        != Visibility::Invisible;
-    Ok(Renderable::Keep { visible })
+        .map(|t| t.to_string())
+        .unwrap_or_default();
+    let renders = renders_geometry(&type_name);
+    let kind = if type_name == "PointInstancer" {
+        // Same branch priority the per-call dispatcher had: the instancer
+        // arm wins over native-instance expansion of the same prim.
+        let prototypes = PointInstancer::from_prim_unchecked(prim.clone())
+            .prototypes_rel()
+            .forwarded_targets()
+            .map_err(stage_err)?;
+        pending.append(&mut prototypes.clone());
+        SkeletonKind::PointInstancer { prototypes }
+    } else if prim.is_instance().map_err(stage_err)? {
+        // Native prototype roots live outside the walked namespace, so their
+        // facts come from the post-walk fixpoint.
+        let prototype = prim.prototype().map_err(stage_err)?;
+        if let Some(path) = &prototype {
+            pending.push(path.clone());
+        }
+        SkeletonKind::NativeInstance { prototype }
+    } else {
+        SkeletonKind::Plain
+    };
+
+    // Only plain prims recurse into prim children: an instance's prim
+    // children are instance proxies (rendered via its prototype expansion,
+    // never walked per instance) and a PointInstancer renders synthetic
+    // children only. This keeps the build linear in walked prims, mirroring
+    // what the per-call walk actually visits.
+    let mut children = Vec::new();
+    if matches!(kind, SkeletonKind::Plain) {
+        for child in visible_children(prim)? {
+            let child_key = child.path().to_string();
+            build_facts(stage, &child, skeleton, pending)?;
+            children.push(child_key);
+        }
+    }
+
+    let (imageable, excluded) = match Imageable::from_prim(prim.clone()).map_err(stage_err)? {
+        None => (false, false),
+        Some(imageable) => (
+            true,
+            matches!(
+                imageable.compute_purpose().map_err(stage_err)?,
+                Purpose::Proxy | Purpose::Guide
+            ),
+        ),
+    };
+    let (self_moves, self_deforms) = samples_scene_motion(prim, renders)?;
+
+    let path = prim.path().to_string();
+    skeleton.facts.insert(
+        path,
+        SkeletonFacts {
+            prim: prim.clone(),
+            type_name,
+            renders_geometry: renders,
+            excluded,
+            imageable,
+            self_moves,
+            self_deforms,
+            material: if renders { direct_material(stage, prim) } else { None },
+            children: children.clone(),
+            kind,
+        },
+    );
+    Ok(children)
 }
 
 /// The direct `material:binding` target path, the same resolution
@@ -480,18 +636,15 @@ fn samples_scene_motion(
 /// node's own `transform` carries the instancer's local xform, which the
 /// frontend applies least locally.
 fn prototype_children(
-    stage: &Stage,
+    skeleton: &ManifestSkeleton,
     prim: &openusd::usd::Prim,
+    prototypes: &[sdf::Path],
     time: Option<f64>,
     instancer_moves: bool,
     prototype_memo: &mut PrototypeMemo,
 ) -> Result<Vec<RenderNode>, String> {
     let instancer = PointInstancer::from_prim_unchecked(prim.clone());
     let time_code = time.map(TimeCode::new);
-    let prototypes = instancer
-        .prototypes_rel()
-        .forwarded_targets()
-        .map_err(stage_err)?;
     let proto_indices = instancer
         .proto_indices_at(time_code)
         .map_err(stage_err)?
@@ -520,33 +673,30 @@ fn prototype_children(
 
     let mut children = Vec::new();
     for (index, prototype_path) in prototypes.iter().enumerate() {
-        let prototype = stage
-            .prim(prototype_path.clone())
-            .map_err(|e| format!("invalid prototype path '{}': {}", prototype_path, e))?;
-        if !prototype.is_valid().map_err(stage_err)? {
+        // A prototype target that composed no prototype renders nothing (the
+        // walk used to skip it through an is_valid check); skeleton build
+        // leaves such paths without facts.
+        let Some(prototype) = skeleton.facts.get(&prototype_path.to_string()) else {
             continue;
-        }
+        };
         // An excluded prototype ROOT still emits its synthetic node (with
         // its own geometry suppressed): descendants traverse with their own
         // computed purpose deciding, mirroring render_children's Exclude
         // arm for ordinary parents. The root's geometry must not draw, so
-        // has_geometry clears when the root is excluded.
-        let (excluded, visible) = match renderable_state(&prototype, time)? {
-            Renderable::Exclude => (true, true),
-            Renderable::Keep { visible } => (false, visible),
+        // has_geometry clears when the root is excluded. Purpose is a
+        // cached fact; visibility samples the requested time.
+        let (excluded, visible) = if prototype.excluded {
+            (true, true)
+        } else {
+            (false, visibility_at(prototype, time)?)
         };
-        let type_name = prototype
-            .type_name()
-            .map_err(stage_err)?
-            .map(|token| token.to_string())
-            .unwrap_or_default();
-        let proto_xform = local_transform(&prototype, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
+        let type_name = prototype.type_name.clone();
+        let proto_xform = local_transform(&prototype.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
         // The prototype root's own xform is folded into every
         // instance matrix, so sampled proto xformOps animate the
         // child as much as the instancer's own arrays do.
-        let proto_renders_geometry = renders_geometry(&type_name);
-        let (proto_moves, proto_deforms) =
-            samples_scene_motion(&prototype, proto_renders_geometry)?;
+        let proto_renders_geometry = prototype.renders_geometry;
+        let (proto_moves, proto_deforms) = (prototype.self_moves, prototype.self_deforms);
         let animated = instancer_moves || proto_moves || (proto_renders_geometry && proto_deforms);
         // The synthetic node fetches the prototype ROOT's geometry (the
         // one cache entry keyed by its resolved path), so only the root's
@@ -580,17 +730,17 @@ fn prototype_children(
         }
         let synthetic_path = format!("{}/{}{}", prim.path(), PROTO_PREFIX, index);
         let mut prototype_children =
-            render_children(stage, &prototype, time, animated, prototype_memo)?;
+            render_children(skeleton, &prototype.children, time, animated, prototype_memo)?;
         rebase_render_paths(
             &mut prototype_children,
-            prototype.path(),
+            prototype_path,
             &sdf::try_into_path(synthetic_path.as_str())
                 .map_err(|e| format!("invalid synthetic prototype path: {}", e))?,
         )?;
         children.push(RenderNode {
             path: synthetic_path,
             name: format!("{}{}", PROTO_PREFIX, index),
-            material: direct_material(stage, &prototype),
+            material: direct_material(prim.stage(), &prototype.prim),
             instances,
             // The instance matrices are already in instancer-local
             // space; the prototype's own xform is folded into them.
@@ -630,119 +780,165 @@ fn rebase_render_paths(
 type PrototypeMemo = HashMap<(sdf::Path, bool), Vec<RenderNode>>;
 
 fn native_prototype_children(
-    stage: &Stage,
+    skeleton: &ManifestSkeleton,
     instance: &openusd::usd::Prim,
+    prototype: Option<&sdf::Path>,
     time: Option<f64>,
     ancestor_moves: bool,
     prototype_memo: &mut PrototypeMemo,
 ) -> Result<Vec<RenderNode>, String> {
-    let Some(prototype_path) = instance.prototype().map_err(stage_err)? else {
+    let Some(prototype_path) = prototype else {
         return Ok(Vec::new());
     };
     // The prototype subtree is identical for every instance sharing one
     // prototype (pcp mints the prototype exactly when compositions agree),
     // so its rendered tree is walked once per (prototype, ancestor-moves)
-    // and cloned per instance — only the path rebase differs.
+    // and cloned per instance — only the path rebase differs. The memo is
+    // per-call state: its entries hold sampled transforms and visibility,
+    // so they must not outlive the manifest call that built them.
     let memo_key = (prototype_path.clone(), ancestor_moves);
     let mut raw = match prototype_memo.get(&memo_key) {
         Some(children) => children.clone(),
         None => {
-            let prototype = stage
-                .prim(memo_key.0.clone())
-                .map_err(|e| format!("invalid native prototype for {}: {}", instance.path(), e))?;
-            let moves = ancestor_moves || samples_scene_motion(&prototype, false)?.0;
-            let children = render_children(stage, &prototype, time, moves, prototype_memo)?;
+            let prototype = skeleton
+                .facts
+                .get(&prototype_path.to_string())
+                .ok_or_else(|| {
+                    format!(
+                        "cached manifest facts missing for prototype {}",
+                        prototype_path
+                    )
+                })?;
+            let moves = ancestor_moves || prototype.self_moves;
+            let children =
+                render_children(skeleton, &prototype.children, time, moves, prototype_memo)?;
             prototype_memo.insert(memo_key.clone(), children.clone());
             children
         }
     };
-    rebase_render_paths(&mut raw, &prototype_path, instance.path())?;
+    rebase_render_paths(&mut raw, prototype_path, instance.path())?;
     Ok(raw)
 }
 
 fn render_node_children(
-    stage: &Stage,
-    prim: &openusd::usd::Prim,
-    type_name: &str,
-    is_instance: bool,
+    skeleton: &ManifestSkeleton,
+    facts: &SkeletonFacts,
     time: Option<f64>,
     ancestor_moves: bool,
     prototype_memo: &mut PrototypeMemo,
 ) -> Result<Vec<RenderNode>, String> {
-    if type_name == "PointInstancer" {
-        prototype_children(stage, prim, time, ancestor_moves, prototype_memo)
-    } else if is_instance {
-        native_prototype_children(stage, prim, time, ancestor_moves, prototype_memo)
-    } else {
-        render_children(stage, prim, time, ancestor_moves, prototype_memo)
+    match &facts.kind {
+        SkeletonKind::PointInstancer { prototypes } => prototype_children(
+            skeleton,
+            &facts.prim,
+            prototypes,
+            time,
+            ancestor_moves,
+            prototype_memo,
+        ),
+        SkeletonKind::NativeInstance { prototype } => native_prototype_children(
+            skeleton,
+            &facts.prim,
+            prototype.as_ref(),
+            time,
+            ancestor_moves,
+            prototype_memo,
+        ),
+        SkeletonKind::Plain => {
+            render_children(skeleton, &facts.children, time, ancestor_moves, prototype_memo)
+        }
     }
 }
 
 fn render_children(
-    stage: &Stage,
-    prim: &openusd::usd::Prim,
+    skeleton: &ManifestSkeleton,
+    children: &[String],
     time: Option<f64>,
     ancestor_moves: bool,
     prototype_memo: &mut PrototypeMemo,
 ) -> Result<Vec<RenderNode>, String> {
     let mut nodes = Vec::new();
-    for child in visible_children(prim)? {
-        let is_instance = child.is_instance().map_err(stage_err)?;
-        let type_name = child
-            .type_name()
-            .map_err(stage_err)?
-            .map(|t| t.to_string())
-            .unwrap_or_default();
-        let renders = renders_geometry(&type_name);
-        let (self_moves, self_deforms) = samples_scene_motion(&child, renders)?;
-        let deforms = renders && self_deforms;
-        let moves = ancestor_moves || self_moves;
-        let transform = local_transform(&child, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
-        let visible = match renderable_state(&child, time)? {
-            Renderable::Exclude => {
-                let mut descendants =
-                    render_node_children(stage, &child, &type_name, is_instance, time, moves, prototype_memo)?;
-                for descendant in &mut descendants {
-                    descendant.transform = (transform * gf::Matrix4d(descendant.transform)).0;
-                }
-                nodes.extend(descendants);
-                continue;
+    for child in children {
+        let facts = skeleton
+            .facts
+            .get(child)
+            .ok_or_else(|| format!("cached manifest facts missing for prim {}", child))?;
+        let deforms = facts.renders_geometry && facts.self_deforms;
+        let moves = ancestor_moves || facts.self_moves;
+        let transform = local_transform(&facts.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
+        if facts.excluded {
+            // Purpose proxy/guide is a cached fact: the prim itself emits
+            // nothing and its descendants flatten up with its transform
+            // composed in — but they still need this call's sampling.
+            let mut descendants =
+                render_node_children(skeleton, facts, time, moves, prototype_memo)?;
+            for descendant in &mut descendants {
+                descendant.transform = (transform * gf::Matrix4d(descendant.transform)).0;
             }
-            Renderable::Keep { visible } => visible,
-        };
-        let children =
-            render_node_children(stage, &child, &type_name, is_instance, time, moves, prototype_memo)?;
+            nodes.extend(descendants);
+            continue;
+        }
+        // Visibility is time-dependent by USD semantics — computed per call,
+        // never cached across manifest calls (Task 1 ruling).
+        let visible = visibility_at(facts, time)?;
+        let node_children = render_node_children(skeleton, facts, time, moves, prototype_memo)?;
         let node = RenderNode {
-            material: if renders_geometry(&type_name) {
-                direct_material(stage, &child)
-            } else {
-                None
-            },
-            path: child.path().to_string(),
-            name: child.path().name().unwrap_or_default().to_string(),
-            has_geometry: renders_geometry(&type_name),
-            type_name,
+            material: facts.material.clone(),
+            path: child.clone(),
+            name: facts.prim.path().name().unwrap_or_default().to_string(),
+            has_geometry: facts.renders_geometry,
+            type_name: facts.type_name.clone(),
             animated: deforms || moves,
             geometry_animated: deforms,
             instances: Vec::new(),
             transform: transform.0,
             visible,
-            children,
+            children: node_children,
         };
         nodes.push(node);
     }
     Ok(nodes)
 }
 
+/// Computed visibility at the requested time — the one per-time imageable
+/// query the walk keeps (Task 1: compute_visibility must stay per-time and
+/// is NOT cached; non-imageable prims stay visible, matching the old
+/// renderable_state semantics).
+fn visibility_at(facts: &SkeletonFacts, time: Option<f64>) -> Result<bool, String> {
+    if !facts.imageable {
+        return Ok(true);
+    }
+    let imageable = Imageable::from_prim(facts.prim.clone())
+        .map_err(stage_err)?
+        .ok_or_else(|| {
+            format!(
+                "imageable view missing for {} at manifest cache build",
+                facts.prim.path()
+            )
+        })?;
+    Ok(imageable
+        .compute_visibility(time.map(TimeCode::new))
+        .map_err(stage_err)?
+        != Visibility::Invisible)
+}
+
 pub fn serialize_render_manifest(
     stage: &Stage,
     time: Option<f64>,
 ) -> Result<Vec<RenderNode>, String> {
-    let pseudo_root = stage
-        .prim(sdf::Path::abs_root())
-        .map_err(|e| format!("invalid pseudo-root path: {}", e))?;
+    // The stage-owner thread builds the skeleton once per stage-open and
+    // reuses it; this free entry point (used by tests and any direct caller)
+    // rebuilds it per call so the walk stays self-contained. Output shape
+    // and semantics are unchanged either way — a pure perf refactor.
+    let skeleton = ManifestSkeleton::build(stage)?;
     let mut prototype_memo = PrototypeMemo::new();
-    render_children(stage, &pseudo_root, time, false, &mut prototype_memo)
+    render_children(
+        &skeleton,
+        &skeleton.root_children,
+        time,
+        false,
+        &mut prototype_memo,
+    )
 }
 
 /// Tessellation cache owned by the stage-owner thread: (prim path, time as
