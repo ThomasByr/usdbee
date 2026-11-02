@@ -15,6 +15,9 @@ export const controlsState = $state({
     turnRight: "e",
     up: " ",
     down: "shift",
+    gizmoTranslate: "1",
+    gizmoRotate: "2",
+    gizmoScale: "3",
   },
 });
 

@@ -533,6 +533,14 @@
         e.preventDefault();
         void editState.redo();
       }
+      // Configurable gizmo mode shortcuts (Settings > Keyboard; defaults 1/2/3).
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        const key = e.key.toLowerCase();
+        const kb = controlsState.keybindings;
+        if (key === kb.gizmoTranslate) gizmoMode = "translate";
+        else if (key === kb.gizmoRotate) gizmoMode = "rotate";
+        else if (key === kb.gizmoScale) gizmoMode = "scale";
+      }
     };
     const handleGlobalKeyup = (e: KeyboardEvent) => {
       viewer.keysPressed.delete(e.key.toLowerCase());
@@ -1302,6 +1310,23 @@
   <section class="viewport">
     {#if rootFile}
       <div class="top-toolbar">
+        <button
+          class="tool-btn"
+          disabled={!editState.canUndo}
+          onclick={() => void editState.undo()}
+          title="Undo (Ctrl+Z)"
+        >
+          <span>Undo</span>
+        </button>
+        <button
+          class="tool-btn"
+          disabled={!editState.canRedo}
+          onclick={() => void editState.redo()}
+          title="Redo (Ctrl+Y or Ctrl+Shift+Z)"
+        >
+          <span>Redo</span>
+        </button>
+        <div class="gizmo-sep"></div>
         <button class="tool-btn" onclick={() => viewer.resetCameraView()} title="Reset View">
           <svg
             width="14"
