@@ -946,6 +946,105 @@ fn usdz_opened_via_extraction_flow_is_flagged_and_rejects_saves() {
         .expect("extracted pin cleanup");
 }
 
+// --- Task 7: Save As usdz ---
+
+/// Package basic.usda into a real usdz archive and open it directly — the
+/// reusable fixture shape of the Task 2 usdz tests.
+fn open_usdz_via_owner(state: &StageState, dir: &Path) -> PathBuf {
+    let usdz = dir.join("packed.usdz");
+    let layer = openusd::sdf::Layer::open(fixture("basic.usda").to_string_lossy().as_ref())
+        .expect("basic.usda opens as a layer");
+    layer
+        .export(usdz.to_string_lossy().as_ref())
+        .expect("usdz export works");
+    let _ = open_path_via_owner(state, &usdz);
+    usdz
+}
+
+#[test]
+fn save_stage_as_usdz_repacks_session_edits_into_a_new_archive() {
+    let (state, events) = owner_with_events();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let usdz = open_usdz_via_owner(&state, dir.path());
+    assert!(edit_target(&state).is_usdz_stage, "the usdz flag is set");
+
+    // A session edit composes over the packaged stage (the session layer is
+    // the default edit target).
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(9.5)),
+        None,
+    )
+    .expect("session edit on a usdz stage should succeed");
+    let paths = events
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the edit fires usd-stage-changed");
+    assert_eq!(paths, vec!["/World/Ball".to_string()]);
+
+    let before = std::fs::read(&usdz).expect("original archive reads");
+    let out = dir.path().join("repacked.usdz");
+    usdbee_lib::stage::request_save_stage_as_usdz(
+        &state.sender,
+        out.to_string_lossy().as_ref(),
+    )
+    .expect("save as usdz should succeed");
+
+    // The original archive is never mutated.
+    assert_eq!(
+        std::fs::read(&usdz).expect("original archive re-reads"),
+        before,
+        "save as usdz must not touch the original archive"
+    );
+
+    // Not a layer save: no usd-stage-changed fired and the session layer
+    // stays dirty (a usdz export never marks layers clean).
+    assert!(
+        events
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err(),
+        "save as usdz must not emit usd-stage-changed"
+    );
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
+    assert_eq!(dirty.len(), 1, "the session layer stays dirty: {dirty:?}");
+
+    // Reopening the new archive shows the session edit composed in.
+    let reopened = openusd::usd::Stage::open(out.to_string_lossy().as_ref())
+        .expect("the repacked usdz opens");
+    let value = reopened
+        .attribute("/World/Ball.radius")
+        .expect("radius attribute")
+        .get_at::<openusd::sdf::Value>(openusd::usd::TimeCode::new(0.0))
+        .expect("radius value reads");
+    assert_eq!(
+        value,
+        Some(openusd::sdf::Value::Float(9.5)),
+        "the session edit must compose into the repacked archive"
+    );
+}
+
+#[test]
+fn save_stage_as_usdz_rejects_non_usdz_extensions() {
+    let (state, _events) = owner_with_events();
+    let dir = tempfile::tempdir().expect("temp dir");
+    open_usdz_via_owner(&state, dir.path());
+
+    for path in ["out.usda", "out.usdc", "out.txt"] {
+        let error = usdbee_lib::stage::request_save_stage_as_usdz(&state.sender, path)
+            .expect_err("only .usdz destinations are writable");
+        assert!(error.contains("usdz"), "got: {}", error);
+    }
+    let error = usdbee_lib::stage::request_save_stage_as_usdz(&state.sender, "noextension")
+        .expect_err("an extension-less destination is refused");
+    assert!(error.contains("usdz"), "got: {}", error);
+    assert_eq!(
+        std::fs::read_dir(dir.path()).expect("temp dir lists").count(),
+        1,
+        "only the packed.usdz fixture exists — no partial writes"
+    );
+}
+
 #[test]
 fn save_layers_is_all_or_nothing_when_a_later_request_is_invalid() {
     let (state, _events) = owner_with_events();

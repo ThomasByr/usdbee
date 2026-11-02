@@ -100,9 +100,18 @@ pub enum StageRequest {
         reply: mpsc::Sender<Result<Vec<LayerInfo>, String>>,
     },
     // The only command that writes USD content to disk; nothing else in
-    // USDBEE ever does.
+    // USDBEE ever does. SaveStageAsUsdz below also writes, but a NEW
+    // archive from the composed stage — never a layer file.
     SaveLayers {
         requests: Vec<LayerSaveRequest>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    // Save As usdz: repack the composed stage (session edits included) into
+    // a NEW .usdz archive. Not a layer save — it does not go through the
+    // save_layers rules, does not mark layers clean, and does not emit
+    // usd-stage-changed (the open stage's composition is unchanged).
+    SaveStageAsUsdz {
+        path: String,
         reply: mpsc::Sender<Result<(), String>>,
     },
     Undo {
@@ -592,6 +601,20 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                             Ok(())
                         }))
                         .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::SaveStageAsUsdz { path, reply } => {
+                    // A usdz export writes a NEW archive from the composed
+                    // stage; the open stage's composition is untouched, so no
+                    // caches clear, no layer goes clean, and
+                    // usd-stage-changed is NOT emitted.
+                    let response = match current_stage {
+                        Some(ref stage) => {
+                            catch_unwind(AssertUnwindSafe(|| export_stage_as_usdz(stage, &path)))
+                                .unwrap_or_else(panic_reply)
+                        }
                         None => Err("no stage open".to_string()),
                     };
                     let _ = reply.send(response);
@@ -1461,7 +1484,7 @@ fn save_requested_layers(
 ) -> Result<(), String> {
     if is_usdz_stage {
         return Err(
-            "cannot save layers of a stage opened from a .usdz package; Save As usdz arrives in a later task"
+            "cannot save layers of a stage opened from a .usdz package; use Save As usdz instead"
                 .to_string(),
         );
     }
@@ -1514,6 +1537,32 @@ fn save_requested_layers(
         })?;
     }
     Ok(())
+}
+
+/// Save As usdz: repack the composed stage into a NEW `.usdz` archive at
+/// `path`. `Stage::flatten` composes every opinion (the session layer's
+/// edits included) into one anonymous layer, and `Layer::export` writes a
+/// `.usdz` as a single crate-encoded entry — so the original archive is
+/// never touched and nothing about the open stage changes. Deliberately NOT
+/// a layer save: no save_layers rules, no clean markings, no event.
+fn export_stage_as_usdz(stage: &Stage, path: &str) -> Result<(), String> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+    if extension != "usdz" {
+        return Err(format!(
+            "cannot save the stage as '{}': only .usdz destinations are writable",
+            path
+        ));
+    }
+    let flattened = stage
+        .flatten()
+        .map_err(|e| format!("failed to compose the stage for '{}': {}", path, e))?;
+    flattened
+        .export(path)
+        .map_err(|e| format!("failed to save the stage as '{}': {}", path, e))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2866,6 +2915,35 @@ pub fn request_save_layers(
     sender
         .send(StageRequest::SaveLayers {
             requests: requests.to_vec(),
+            reply,
+        })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn save_stage_as_usdz(
+    path: String,
+    state: tauri::State<'_, StageState>,
+) -> Result<(), String> {
+    request_save_stage_as_usdz(&state.sender, &path)
+}
+
+/// Save As usdz: repack the composed stage into a NEW `.usdz` archive. The
+/// owner arm composes (session edits included) and writes a fresh package;
+/// the original archive and the open stage are untouched.
+pub fn request_save_stage_as_usdz(
+    sender: &mpsc::Sender<StageRequest>,
+    path: &str,
+) -> Result<(), String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::SaveStageAsUsdz {
+            path: path.to_string(),
             reply,
         })
         .map_err(|_| "stage service unavailable".to_string())?;

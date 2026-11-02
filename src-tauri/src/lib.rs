@@ -103,6 +103,7 @@ pub fn run() {
             stage::set_edit_target,
             stage::list_dirty_layers,
             stage::save_layers,
+            stage::save_stage_as_usdz,
             stage::undo_stage_edit,
             stage::redo_stage_edit,
             stage::get_undo_state,

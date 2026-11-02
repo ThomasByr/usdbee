@@ -139,6 +139,32 @@ describe("editState", () => {
     expect(editState.saving).toBe(false);
   });
 
+  it("saveAsUsdz sends the path and never refreshes on success", async () => {
+    mockedInvoke.mockResolvedValueOnce(undefined); // save_stage_as_usdz
+    editState.dirtyLayers = [sessionLayer];
+
+    const error = await editState.saveAsUsdz("/tmp/repacked.usdz");
+
+    expect(error).toBeNull();
+    expect(mockedInvoke).toHaveBeenCalledWith("save_stage_as_usdz", { path: "/tmp/repacked.usdz" });
+    expect(mockedInvoke).toHaveBeenCalledTimes(1);
+    // Not a layer save: the dirty layers stay dirty (no refresh happened).
+    expect(editState.dirtyLayers).toEqual([sessionLayer]);
+    expect(editState.saving).toBe(false);
+  });
+
+  it("saveAsUsdz surfaces backend errors", async () => {
+    mockedInvoke.mockRejectedValueOnce(
+      "cannot save the stage as '/tmp/out.usda': only .usdz destinations are writable",
+    );
+
+    const error = await editState.saveAsUsdz("/tmp/out.usda");
+
+    expect(error).toBe("cannot save the stage as '/tmp/out.usda': only .usdz destinations are writable");
+    expect(editState.saveError).toBe(error);
+    expect(editState.saving).toBe(false);
+  });
+
   it("undo invokes the backend and refreshes the undo state", async () => {
     mockedInvoke
       .mockResolvedValueOnce(true) // undo_stage_edit

@@ -8,8 +8,9 @@
 export interface EditTargetInfo {
   layer_identifier: string;
   is_session: boolean;
-  // True when the stage was opened from a .usdz path: saving layers is
-  // refused (Save As usdz arrives in a later task).
+  // True when the stage was opened from a .usdz package (direct or via the
+  // dialog extraction flow): saving layers is refused and the UI offers
+  // Save As usdz instead (the backend command itself accepts any stage).
   is_usdz_stage: boolean;
 }
 

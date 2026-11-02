@@ -64,6 +64,24 @@ export const editState = $state({
     }
   },
 
+  // Save As usdz: repack the composed stage (session edits included) into
+  // a NEW .usdz archive. Not a layer save — the backend never marks layers
+  // clean and emits no usd-stage-changed, so no refresh is needed on
+  // success (the dirty layers stay dirty).
+  async saveAsUsdz(path: string): Promise<string | null> {
+    this.saving = true;
+    this.saveError = null;
+    try {
+      await invoke("save_stage_as_usdz", { path });
+      return null;
+    } catch (e) {
+      this.saveError = typeof e === "string" ? e : String(e);
+      return this.saveError;
+    } finally {
+      this.saving = false;
+    }
+  },
+
   // Revert the most recent mutation. The backend emits usd-stage-changed for
   // the affected path, so the usual refresh listeners follow; the explicit
   // refresh keeps canUndo/canRedo and the dirty layers current even if the
