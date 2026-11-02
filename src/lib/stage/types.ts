@@ -9,6 +9,8 @@ export interface StageInfo {
   start_time_code: number;
   end_time_code: number;
   composition_errors: string[];
+  // "Y" or "Z"; the backend defaults anything unreadable to "Y".
+  up_axis: string;
 }
 
 export interface PrimNode {

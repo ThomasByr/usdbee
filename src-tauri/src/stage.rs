@@ -143,6 +143,46 @@ pub struct StageInfo {
     pub start_time_code: f64,
     pub end_time_code: f64,
     pub composition_errors: Vec<String>,
+    // "Y" or "Z"; anything the stage authors or we fail to read falls
+    // back to "Y", the USD spec default (fail-soft with a warn).
+    #[serde(default)]
+    pub up_axis: String,
+}
+
+fn normalized_up_axis(token: &str) -> String {
+    if token == "Y" || token == "Z" {
+        token.to_owned()
+    } else {
+        eprintln!(
+            "unrecognized stage upAxis '{}' — treating as USD default \"Y\"",
+            token
+        );
+        "Y".to_owned()
+    }
+}
+
+// Stage-level `upAxis` metadata; tokens arrive as `Value::Token` (usda
+// authors) or `Value::String` (binary/programmatic authors).
+fn stage_up_axis(stage: &Stage) -> String {
+    match stage.stage_metadata("upAxis") {
+        Ok(Some(sdf::Value::Token(token))) => normalized_up_axis(token.as_str()),
+        Ok(Some(sdf::Value::String(value))) => normalized_up_axis(&value),
+        Ok(Some(other)) => {
+            eprintln!(
+                "unexpected upAxis value type ({:?}) — treating as USD default \"Y\"",
+                other
+            );
+            "Y".to_owned()
+        }
+        Ok(None) => "Y".to_owned(),
+        Err(e) => {
+            eprintln!(
+                "failed to read stage upAxis ({}) — treating as USD default \"Y\"",
+                e
+            );
+            "Y".to_owned()
+        }
+    }
 }
 
 pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
@@ -176,6 +216,7 @@ pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
             .into_iter()
             .map(|e| e.to_string())
             .collect(),
+        up_axis: stage_up_axis(&stage),
     };
 
     Ok((stage, info))

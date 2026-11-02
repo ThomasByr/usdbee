@@ -32,6 +32,7 @@
   import { disposeScene } from "$lib/render/sceneBuilder";
   import type { StageInfo } from "$lib/stage/types";
   import { stageModalErrorLines } from "$lib/stage/modalErrors";
+  import { upAxisRotation } from "$lib/stage/upAxis";
   import * as THREE from "three";
   import { RendererKit } from "$lib/three/RendererKit.svelte";
 
@@ -488,6 +489,8 @@
   // meshes, no USD cameras).
   function integrateScene(group: THREE.Group) {
     viewer.loadedGroup = group;
+    // Stand Z-up stages upright (rotation must land before the fit below).
+    group.rotation.x = upAxisRotation(stageState.stageInfo?.up_axis ?? "Y");
     let tris = 0;
     group.traverse((obj) => {
       if ((obj as any).isInstancedMesh) {

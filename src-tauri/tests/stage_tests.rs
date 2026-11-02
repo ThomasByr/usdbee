@@ -16,6 +16,37 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 #[test]
+fn z_up_stage_reports_z_up_axis() {
+    // basic.usda authors upAxis = "Z".
+    let (_stage, info) = open_stage(&fixture("basic.usda")).expect("basic stage should open");
+    assert_eq!(info.up_axis, "Z");
+}
+
+#[test]
+fn y_up_stage_reports_y_up_axis() {
+    let (_stage, info) = open_stage(&fixture("yup.usda")).expect("yup stage should open");
+    assert_eq!(info.up_axis, "Y");
+}
+
+#[test]
+fn missing_up_axis_defaults_to_y() {
+    let (_stage, info) = open_stage(&fixture("no_upaxis.usda")).expect("stage should open");
+    assert_eq!(info.up_axis, "Y");
+}
+
+#[test]
+fn kitchen_set_asset_reports_z_up_axis() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/Kitchen_set/Kitchen_set_instanced.usd");
+    if !path.exists() {
+        eprintln!("skipping kitchen_set_asset_reports_z_up_axis: asset not present");
+        return;
+    }
+    let (_stage, info) = open_stage(&path).expect("kitchen set should open");
+    assert_eq!(info.up_axis, "Z");
+}
+
+#[test]
 fn fetched_remote_reference_composes_into_the_stage() {
     use std::io::{Read, Write};
 
@@ -615,15 +646,15 @@ fn details_maya_pivot_pattern_composes_pivot_relative_rotation() {
         let local = details_via_owner(&state, path, None)
             .local_transform
             .expect("the pivot pattern evaluates");
-    // Ops pre-multiply left-to-right: pivot(5,0,0), rotateZ(90), the pivot
-    // inverse, then translate(0,0,1), so the matrix fixes the pivot point
-    // under the rotation and shifts by (5, -5, 1).
-    assert_matrix_close(
-        &[
-            0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 5.0, -5.0, 1.0, 1.0,
-        ],
-        &local,
-    );
+        // Ops pre-multiply left-to-right: pivot(5,0,0), rotateZ(90), the pivot
+        // inverse, then translate(0,0,1), so the matrix fixes the pivot point
+        // under the rotation and shifts by (5, -5, 1).
+        assert_matrix_close(
+            &[
+                0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 5.0, -5.0, 1.0, 1.0,
+            ],
+            &local,
+        );
     }
 }
 
