@@ -28,6 +28,8 @@ export function convertMaterial(
       material.opacity = surface.opacity;
       material.transparent = surface.opacity < 1;
     }
+    // An opacity texture blends per-pixel, so the whole material must render in the transparent pass.
+    if (material.alphaMap !== null) material.transparent = true;
   }
 
   applyFallbackColor(material, info, surface, hasMap, fallbackColor);

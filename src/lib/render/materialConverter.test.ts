@@ -155,6 +155,19 @@ describe("convertMaterial", () => {
     expect(match.color.g).toBe(0);
   });
 
+  it("marks a material with an opacity texture as transparent", () => {
+    const material = convertMaterial(
+      {
+        name: "Foliage",
+        surface: surface({ textures: [textureInput({ input: "opacity", file_path: "/cache/opacity.png" })] }),
+      },
+      null,
+      loader,
+    );
+    expect(material.alphaMap).toBeInstanceOf(THREE.Texture);
+    expect(material.transparent).toBe(true);
+  });
+
   it("marks opacity below one as transparent", () => {
     const material = convertMaterial({ name: "Glass", surface: surface({ opacity: 0.5 }) }, null, loader);
     expect(material.opacity).toBe(0.5);
