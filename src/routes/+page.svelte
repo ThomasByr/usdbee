@@ -34,6 +34,7 @@
   import { editState } from "$lib/state/editState.svelte";
   import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
   import { initTheme } from "$lib/state/themeState.svelte";
+  import { loadPlaybackState } from "$lib/state/playbackState.svelte";
   import { windowCloseConfirmNeeded } from "$lib/state/closeGuard";
   import type { StageSummary } from "$lib/stage/types";
   import { layerTextState } from "$lib/state/layerTextState.svelte";
@@ -233,6 +234,7 @@
 
     loadControlPreferences();
     loadGraphicsPreferences();
+    loadPlaybackState();
     const stopThemeListener = initTheme();
     const savedWidth = localStorage.getItem("sidebarWidth");
     if (savedWidth) {

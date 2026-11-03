@@ -18,6 +18,7 @@
   import type { GizmoMode } from "$lib/render/xformOps";
   import type { RendererKit } from "$lib/three/RendererKit.svelte";
   import { controlsState } from "$lib/state/controlsState.svelte";
+  import { formatTimeline, playbackState } from "$lib/state/playbackState.svelte";
   import * as THREE from "three";
   import Toolbar from "./Toolbar.svelte";
 
@@ -47,6 +48,9 @@
   function startTimeCode(): number {
     return stageState.stageInfo?.start_time_code ?? 0;
   }
+
+  // The backend reports 24 when a stage has no authored rate.
+  const timeCodesPerSecond = $derived(stageState.stageInfo?.time_codes_per_second ?? 0);
 
   $effect(() => {
     if (viewer.scene) viewer.scene.background = new THREE.Color(viewer.backgroundColor);
@@ -198,8 +202,15 @@
         onmousedown={() => (viewer.isDraggingAnim = true)}
         onmouseup={() => (viewer.isDraggingAnim = false)}
       />
-      <span class="timeline-time"
-        >{viewer.animationProgress.toFixed(2)} / {viewer.animationDuration.toFixed(2)}</span
+      <span
+        class="timeline-time"
+        title={`${timeCodesPerSecond} fps`}>{formatTimeline(
+          viewer.animationProgress,
+          timeCodesPerSecond,
+          playbackState.timelineUnits,
+        )}
+        /
+        {formatTimeline(viewer.animationDuration, timeCodesPerSecond, playbackState.timelineUnits)}</span
       >
     </div>
   {/if}

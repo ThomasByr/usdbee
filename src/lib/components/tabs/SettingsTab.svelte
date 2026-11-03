@@ -1,5 +1,10 @@
 <script lang="ts">
   import { themeState, setThemePreference, type ThemePreference } from "$lib/state/themeState.svelte";
+  import {
+    playbackState,
+    setTimelineUnits,
+    type TimelineUnits,
+  } from "$lib/state/playbackState.svelte";
   import { recentFiles } from "$lib/state/recentFiles.svelte";
   import { tabsState } from "$lib/state/tabsState.svelte";
   import { openContainingFolder } from "$lib/utils/reveal";
@@ -50,6 +55,24 @@
       Currently {themeState.resolved === "light" ? "Light" : "Dark"}
       <Icon name={themeState.resolved === "light" ? "sun" : "moon"} />
     </div>
+  </div>
+
+  <div class="settings-group">
+    <h3>Playback</h3>
+    <label style="display: flex; align-items: center; justify-content: space-between; font-size: 13px;">
+      Timeline Units
+      <select
+        class="dropdown"
+        style="width: auto"
+        value={playbackState.timelineUnits}
+        onchange={(e) => setTimelineUnits(e.currentTarget.value as TimelineUnits)}
+      >
+        <option value="frames-seconds">Frames + Seconds</option>
+        <option value="frames">Frames</option>
+        <option value="seconds">Seconds</option>
+      </select>
+    </label>
+    <div class="theme-hint">How the viewport timeline labels the playhead.</div>
   </div>
 
   <div class="settings-group">
