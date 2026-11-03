@@ -463,6 +463,23 @@
   <SaveDialog onClose={() => (showSaveModal = false)} />
 {/if}
 
+{#if showExportModal}
+  <ExportModal
+    onClose={() => !isExporting && (showExportModal = false)}
+    renderer={viewer.renderer}
+    scene={viewer.scene}
+    camera={viewer.camera}
+    hasAnimation={viewer.hasAnimation}
+    animationDuration={viewer.animationDuration}
+    animationProgress={viewer.animationProgress}
+    previewAt={(t: number) => renderState.setStageTime(toAbsoluteTime(t, startTimeCode()))}
+    {isExporting}
+    {exportProgress}
+    {exportStage}
+    onExport={handleExport}
+  />
+{/if}
+
 {#if showCloseConfirm}
   <Modal
     title="Unsaved changes"
@@ -483,21 +500,4 @@
       >
     </div>
   </Modal>
-{/if}
-
-{#if showExportModal}
-  <ExportModal
-    onClose={() => !isExporting && (showExportModal = false)}
-    renderer={viewer.renderer}
-    scene={viewer.scene}
-    camera={viewer.camera}
-    hasAnimation={viewer.hasAnimation}
-    animationDuration={viewer.animationDuration}
-    animationProgress={viewer.animationProgress}
-    previewAt={(t: number) => renderState.setStageTime(toAbsoluteTime(t, startTimeCode()))}
-    {isExporting}
-    {exportProgress}
-    {exportStage}
-    onExport={handleExport}
-  />
 {/if}
