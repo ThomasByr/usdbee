@@ -32,11 +32,7 @@ export function loadPlaybackState(): void {
   if (!saved) return;
   try {
     const parsed = JSON.parse(saved);
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      VALID_UNITS.includes(parsed.timelineUnits)
-    ) {
+    if (typeof parsed === "object" && parsed !== null && VALID_UNITS.includes(parsed.timelineUnits)) {
       playbackState.timelineUnits = parsed.timelineUnits;
     }
   } catch (e) {
@@ -52,4 +48,14 @@ export function formatTimeline(frame: number, tcps: number, units: TimelineUnits
   if (units === "frames" || tcps <= 0) return frames;
   const seconds = `${(frame / tcps).toFixed(1)} s`;
   return units === "seconds" ? seconds : `${frames} · ${seconds}`;
+}
+
+// The slider duration is an offset; its right-hand label is the absolute end.
+export function formatTimelineEnd(
+  duration: number,
+  startTimeCode: number,
+  tcps: number,
+  units: TimelineUnits,
+): string {
+  return formatTimeline(duration + startTimeCode, tcps, units);
 }

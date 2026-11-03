@@ -28,6 +28,12 @@ describe("formatTimeline", () => {
     expect(formatTimeline(1234, 24, "seconds")).toBe("51.4 s");
   });
 
+  it("formats the timeline end as an absolute time code", async () => {
+    const { formatTimelineEnd } = await freshPlaybackModule();
+    expect(formatTimelineEnd(99, 1001, 24, "frames")).toBe("1100");
+    expect(formatTimelineEnd(99, 1001, 24, "seconds")).toBe("45.8 s");
+  });
+
   it("falls back to frames when time codes per second is 0", async () => {
     const { formatTimeline } = await freshPlaybackModule();
     expect(formatTimeline(123, 0, "frames-seconds")).toBe("123");

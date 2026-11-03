@@ -73,6 +73,7 @@ const details = (over: Partial<PrimDetails> = {}): PrimDetails =>
 const unbound = { name: "Ball", surface: null };
 
 let instance: ReturnType<typeof mount> | null = null;
+const initialInnerHeight = window.innerHeight;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -96,6 +97,7 @@ afterEach(() => {
   if (instance !== null) unmount(instance);
   instance = null;
   document.body.innerHTML = "";
+  Object.defineProperty(window, "innerHeight", { configurable: true, value: initialInnerHeight });
 });
 
 async function mountPopover(primPath = "/World/Ball") {
@@ -130,9 +132,53 @@ describe("AppearancePopover commit wiring", () => {
     mocks.getMaterialInfo.mockResolvedValue({ name: "RedMat", surface: { textures: [] } });
     await mountPopover();
 
-    expect(hexInput()).toBeNull();
+    expect(hexInput().closest("fieldset")?.disabled).toBe(true);
     expect(document.body.textContent).toContain("RedMat");
     expect(document.body.textContent).toContain("Bound material");
+  });
+
+  it("disables color while the material query is pending", async () => {
+    const pendingMaterial = deferred<unknown>();
+    mocks.getMaterialInfo.mockReturnValue(pendingMaterial.promise);
+    await mountPopover();
+
+    expect(hexInput().closest("fieldset")?.disabled).toBe(true);
+    expect(document.body.textContent).toContain("Checking material");
+    pendingMaterial.resolve(unbound);
+  });
+
+  it("fails closed and surfaces a material query error", async () => {
+    mocks.getMaterialInfo.mockResolvedValue(null);
+    await mountPopover();
+
+    expect(hexInput().closest("fieldset")?.disabled).toBe(true);
+    expect(document.body.textContent).toContain("Material state unavailable");
+  });
+
+  it("bounds its height to the viewport when anchored near the bottom", async () => {
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 400 });
+    const anchor = document.body.appendChild(document.createElement("div"));
+    anchor.getBoundingClientRect = () =>
+      ({
+        left: 20,
+        right: 40,
+        top: 380,
+        bottom: 390,
+        width: 20,
+        height: 10,
+        x: 20,
+        y: 380,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    instance = mount(AppearancePopover, {
+      target: document.body,
+      props: { primPath: "/World/Ball", anchor, onClose: () => {} },
+    });
+    await tick();
+
+    const popover = document.querySelector<HTMLElement>(".appearance-popover")!;
+    expect(parseFloat(popover.style.maxHeight)).toBeGreaterThan(0);
+    expect(parseFloat(popover.style.maxHeight)).toBeLessThanOrEqual(392);
   });
 
   it("commits an edited color through the shared attribute wrapper with the prim's path", async () => {

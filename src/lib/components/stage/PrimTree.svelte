@@ -69,6 +69,12 @@
   // off-screen rows, so arrows/page keys here are how keyboard users
   // reach rows outside the mounted window.
   function onScrollKey(event: KeyboardEvent) {
+    if (
+      event.target instanceof Element &&
+      event.target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])")
+    ) {
+      return;
+    }
     const el = scrollEl;
     if (!el) return;
     const page = Math.max(el.clientHeight - ROW_HEIGHT, ROW_HEIGHT);

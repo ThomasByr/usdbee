@@ -31,6 +31,17 @@
   let popoverOpen = $state(false);
   let popoverAnchor = $state<HTMLButtonElement | null>(null);
   let rowInvisible = $state(false);
+  let rowError = $state<string | null>(null);
+  let visibilityPending = $state(false);
+  let visibilityGeneration = 0;
+
+  $effect(() => {
+    void node;
+    visibilityGeneration += 1;
+    rowInvisible = false;
+    rowError = null;
+    visibilityPending = false;
+  });
 
   // The eye reflects visibility state that is already loaded: the selected
   // prim's details (the inspector's fetch) or the value this row's own
@@ -53,17 +64,30 @@
   // metadata wrapper the popover uses; the current opinion comes from a
   // details fetch (the tree carries no authored state).
   async function toggleVisibility() {
-    const details = await stageState.fetchPrimDetails(node.path);
-    if (!details) return;
-    const invisible =
-      (details.metadata.find(([field]) => field === "visibility")?.[1].data as string) === "invisible";
-    const next = invisible ? "inherited" : "invisible";
-    const error = await stageState.setPrimMetadata("visibility", { type: "token", data: next }, node.path);
-    if (error !== null) {
-      console.warn(`usdbee: visibility toggle on ${node.path} failed:`, error);
-      return;
+    if (visibilityPending) return;
+    const generation = visibilityGeneration;
+    visibilityPending = true;
+    rowError = null;
+    try {
+      const details = await stageState.fetchPrimDetails(node.path);
+      if (generation !== visibilityGeneration) return;
+      if (!details) {
+        rowError = `Could not read visibility for ${node.path}`;
+        return;
+      }
+      const invisible =
+        (details.metadata.find(([field]) => field === "visibility")?.[1].data as string) === "invisible";
+      const next = invisible ? "inherited" : "invisible";
+      const error = await stageState.setPrimMetadata("visibility", { type: "token", data: next }, node.path);
+      if (generation !== visibilityGeneration) return;
+      if (error !== null) {
+        rowError = error;
+        return;
+      }
+      rowInvisible = next === "invisible";
+    } finally {
+      if (generation === visibilityGeneration) visibilityPending = false;
     }
-    rowInvisible = next === "invisible";
   }
 
   // The row's Enter/Space selection must not fire from the action buttons.
@@ -140,10 +164,15 @@
             void toggleVisibility();
           }}
           onkeydown={keepRowKeys}
+          disabled={visibilityPending}
+          aria-pressed={authoredInvisible}
         >
           <Icon name={authoredInvisible ? "eye-off" : "eye"} size={13} />
         </button>
       </span>
+    {/if}
+    {#if rowError}
+      <span class="row-error" role="alert" title={rowError}>Visibility: {rowError}</span>
     {/if}
   </div>
   {#if popoverOpen && popoverAnchor}

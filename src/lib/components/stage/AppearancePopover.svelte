@@ -17,10 +17,11 @@
   let popoverEl = $state<HTMLElement | null>(null);
   let details = $state<PrimDetails | null>(null);
   let material = $state<MaterialInfo | null>(null);
+  let materialQuery = $state<"loading" | "error" | "ready">("loading");
   let branch = $state(false);
   let textureDraft = $state("");
   let message = $state<string | null>(null);
-  let pos = $state({ left: 0, top: 0 });
+  let pos = $state({ left: 0, top: 0, maxHeight: 0 });
 
   const primName = $derived(primPath.split("/").pop() ?? "");
   // get_material_data answers the prim's own name with a null surface when
@@ -28,6 +29,9 @@
   // viewport, so the color editor hides while one is bound.
   const boundMaterial = $derived(
     material !== null && (material.surface !== null || material.name !== primName),
+  );
+  const materialState = $derived(
+    materialQuery === "ready" ? (boundMaterial ? "bound" : "unbound") : materialQuery,
   );
   const displayColorAttr = $derived(
     details?.attributes.find((attr) => attr.name === "primvars:displayColor") ?? null,
@@ -48,10 +52,12 @@
   );
 
   async function refresh() {
+    materialQuery = "loading";
     [details, material] = await Promise.all([
       stageState.fetchPrimDetails(primPath),
       stageState.getMaterialInfo(primPath),
     ]);
+    materialQuery = material === null ? "error" : "ready";
   }
 
   $effect(() => {
@@ -60,9 +66,12 @@
 
   $effect(() => {
     const rect = anchor.getBoundingClientRect();
+    const desiredTop = rect.bottom + 4;
+    const top = desiredTop < window.innerHeight - 80 ? desiredTop : 8;
     pos = {
       left: Math.max(8, Math.min(rect.left, window.innerWidth - 300)),
-      top: Math.min(rect.bottom + 4, window.innerHeight - 260),
+      top,
+      maxHeight: Math.max(0, window.innerHeight - top - 8),
     };
   });
 
@@ -145,7 +154,7 @@
 <div
   class="appearance-popover"
   bind:this={popoverEl}
-  style="left: {pos.left}px; top: {pos.top}px;"
+  style="left: {pos.left}px; top: {pos.top}px; max-height: {pos.maxHeight}px;"
   role="dialog"
   aria-label="Appearance"
 >
@@ -158,12 +167,17 @@
 
   <div class="popover-section">
     <span class="popover-label">Color</span>
-    {#if boundMaterial}
+    <fieldset class="popover-color-control" disabled={materialState !== "unbound"}>
+      <AttributeEditor value={displayColor} oncommit={applyColor} />
+    </fieldset>
+    {#if materialState === "bound"}
       <span class="popover-note" title="A bound material wins over displayColor in the viewport">
         Bound material "{material?.name}" drives the color; remove the texture binding to author displayColor.
       </span>
-    {:else}
-      <AttributeEditor value={displayColor} oncommit={applyColor} />
+    {:else if materialState === "loading"}
+      <span class="popover-note">Checking material…</span>
+    {:else if materialState === "error"}
+      <span class="popover-message" role="alert">Material state unavailable; color editing is disabled.</span>
     {/if}
   </div>
 

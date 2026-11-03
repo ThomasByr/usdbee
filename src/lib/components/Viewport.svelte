@@ -18,7 +18,7 @@
   import type { GizmoMode } from "$lib/render/xformOps";
   import type { RendererKit } from "$lib/three/RendererKit.svelte";
   import { controlsState } from "$lib/state/controlsState.svelte";
-  import { formatTimeline, playbackState } from "$lib/state/playbackState.svelte";
+  import { formatTimeline, formatTimelineEnd, playbackState } from "$lib/state/playbackState.svelte";
   import * as THREE from "three";
   import Toolbar from "./Toolbar.svelte";
 
@@ -202,15 +202,19 @@
         onmousedown={() => (viewer.isDraggingAnim = true)}
         onmouseup={() => (viewer.isDraggingAnim = false)}
       />
-      <span
-        class="timeline-time"
-        title={`${timeCodesPerSecond} fps`}>{formatTimeline(
+      <span class="timeline-time" title={`${timeCodesPerSecond} fps`}
+        >{formatTimeline(
           viewer.animationProgress + startTimeCode(),
           timeCodesPerSecond,
           playbackState.timelineUnits,
         )}
         /
-        {formatTimeline(viewer.animationDuration, timeCodesPerSecond, playbackState.timelineUnits)}</span
+        {formatTimelineEnd(
+          viewer.animationDuration,
+          startTimeCode(),
+          timeCodesPerSecond,
+          playbackState.timelineUnits,
+        )}</span
       >
     </div>
   {/if}

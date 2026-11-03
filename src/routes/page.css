@@ -500,7 +500,8 @@ input[type="color"]::-webkit-color-swatch {
   border: 1px solid var(--border-strong);
   border-radius: 6px;
   background: var(--bg);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 4px 16px var(--shadow);
+  overflow-y: auto;
   font-size: 0.82rem;
 }
 
@@ -551,6 +552,22 @@ input[type="color"]::-webkit-color-swatch {
 .popover-note {
   color: var(--text-muted);
   overflow-wrap: anywhere;
+}
+
+.popover-color-control {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.row-error {
+  margin-left: 6px;
+  overflow: hidden;
+  color: var(--danger-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .popover-row {

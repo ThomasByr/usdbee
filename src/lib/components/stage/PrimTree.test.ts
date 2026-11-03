@@ -4,6 +4,7 @@ import { mount, unmount, tick } from "svelte";
 import type { PrimNode } from "$lib/stage/types";
 import { ROW_HEIGHT } from "$lib/stage/treeWindowing";
 import PrimTree from "./PrimTree.svelte";
+import PrimTreeNodeHarness from "./__tests__/prim-tree-node-harness.svelte";
 
 const mocks = vi.hoisted(() => ({
   selectPrim: vi.fn(),
@@ -48,9 +49,18 @@ const leaf = (path: string, name: string, type_name = "Mesh"): PrimNode => ({
 
 let instance: ReturnType<typeof mount> | null = null;
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   mocks.selectPrim.mockReset();
   mocks.fetchPrimDetails.mockReset().mockResolvedValue(null);
+  mocks.setPrimMetadata.mockReset().mockResolvedValue(null);
   mocks.selectedPath = null;
 });
 
@@ -124,6 +134,60 @@ describe("PrimTree windowed rendering", () => {
     scrollEl().dispatchEvent(new Event("scroll"));
     await tick();
     expect(scrollEl().scrollTop).toBe(0);
+  });
+
+  it("does not scroll for arrow or Home keys bubbling from an input", async () => {
+    await mountTree(Array.from({ length: 100 }, (_, i) => leaf(`/N${i}`, `N${i}`)));
+    const input = scrollEl().appendChild(document.createElement("input"));
+    scrollEl().scrollTop = 5 * ROW_HEIGHT;
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true }));
+    expect(scrollEl().scrollTop).toBe(5 * ROW_HEIGHT);
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    expect(scrollEl().scrollTop).toBe(5 * ROW_HEIGHT);
+  });
+
+  it("ignores a second visibility toggle while the first is pending", async () => {
+    const pendingDetails = deferred<never>();
+    mocks.fetchPrimDetails.mockReturnValue(pendingDetails.promise);
+    await mountTree([leaf("/Root", "Root")]);
+    const toggle = document.querySelectorAll<HTMLButtonElement>(".row-action-btn")[1];
+
+    toggle.click();
+    toggle.click();
+    await tick();
+    expect(mocks.fetchPrimDetails).toHaveBeenCalledTimes(1);
+
+    pendingDetails.resolve({ metadata: [] } as never);
+    await vi.waitFor(() => expect(mocks.setPrimMetadata).toHaveBeenCalledTimes(1));
+  });
+
+  it("surfaces visibility toggle failures in the row", async () => {
+    mocks.fetchPrimDetails.mockResolvedValue({ metadata: [] } as never);
+    mocks.setPrimMetadata.mockResolvedValue("backend refused visibility");
+    await mountTree([leaf("/Root", "Root")]);
+    document.querySelectorAll<HTMLButtonElement>(".row-action-btn")[1].click();
+
+    await vi.waitFor(() => expect(mocks.setPrimMetadata).toHaveBeenCalledTimes(1));
+    await tick();
+    expect(document.querySelector(".row-error")?.textContent).toContain("backend refused visibility");
+  });
+
+  it("resets row-local visibility when the tree rebuilds", async () => {
+    mocks.fetchPrimDetails.mockResolvedValue({ metadata: [] } as never);
+    instance = mount(PrimTreeNodeHarness, {
+      target: document.body,
+      props: { node: leaf("/Root", "Root") },
+    });
+    await tick();
+    const toggle = document.querySelectorAll<HTMLButtonElement>(".row-action-btn")[1];
+    toggle.click();
+    await vi.waitFor(() => expect(toggle.getAttribute("aria-pressed")).toBe("true"));
+
+    (instance as unknown as { rebuild: () => void }).rebuild();
+    await tick();
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
   });
 
   it("expands collapsed ancestors of a deep selection and scrolls to it", async () => {
