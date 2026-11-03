@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -10,12 +11,13 @@ import { stageState } from "../stage/stageState.svelte";
 import { editState } from "./editState.svelte";
 import { layerTextState } from "./layerTextState.svelte";
 import { loadOrchestrator } from "./loadOrchestrator.svelte";
+import { recentFiles } from "./recentFiles.svelte";
 import type { StageInfo, StageSummary } from "../stage/types";
 
 const mockedInvoke = vi.mocked(invoke);
 const mockedListen = vi.mocked(listen);
 
-const handlers: Record<string, (event: { payload: unknown }) => void> = {};
+const handlers: Record<string, ((event: { payload: unknown }) => void)[]> = {};
 
 let nextStageId = 0;
 // The mock backend's per-stage dirty counts (list_stages source).
@@ -36,15 +38,24 @@ function stageInfoFor(id: number, path: string): StageInfo {
 
 function commands(cmd: string, args?: Record<string, unknown>): unknown {
   const stageId = (args?.stageId ?? 0) as number;
-  if (cmd !== "open_usd_path" && cmd !== "list_stages" && stageId === 0) {
+  if (cmd !== "open_usd_file_path" && cmd !== "list_stages" && stageId === 0) {
     throw new Error("no stage open");
   }
   switch (cmd) {
-    case "open_usd_path": {
+    case "open_usd_file_path": {
       const path = (args?.path ?? "") as string;
       if (badPaths.has(path)) throw new Error("cannot open: " + path);
       nextStageId += 1;
-      return stageInfoFor(nextStageId, path);
+      const info = stageInfoFor(nextStageId, path);
+      // The command emits the same event stream as the dialog flow.
+      const fire = (name: string, payload: unknown) => {
+        for (const h of handlers[name] ?? []) h({ payload });
+      };
+      fire("usd-load-start", path);
+      fire("usd-load-progress", { stage: "Opening File", percent: 10 });
+      fire("usd-scene-loaded", { root_file: path, dependencies: {} });
+      fire("usd-stage-opened", info);
+      return info;
     }
     case "get_stage_tree":
       return [];
@@ -67,22 +78,35 @@ function commands(cmd: string, args?: Record<string, unknown>): unknown {
   }
 }
 
+// Fan an event out to every registered listener, like the real backend.
+function fireEvent(name: string, payload: unknown): void {
+  for (const h of handlers[name] ?? []) h({ payload });
+}
+
 async function openTab(path: string): Promise<void> {
   await tabsState.openTab(path);
-  // openTab fires editState.refresh detached; let it settle before asserts.
+  // The event-driven open flow settles asynchronously; wait for the tab
+  // to be registered and activated before asserting.
+  await vi.waitFor(() => {
+    const tab = tabsState.stages.find((t) => t.root_file === path);
+    expect(tab).toBeDefined();
+    expect(tabsState.activeId).toBe(tab!.stage_id);
+  });
+  // adoptOpened fires editState.refresh detached; let it settle before asserts.
   await vi.waitFor(() => {
     expect(mockedInvoke).toHaveBeenCalledWith("get_undo_state", { stageId: tabsState.activeId });
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   mockedInvoke
     .mockReset()
     .mockImplementation((cmd, args) =>
       Promise.resolve(commands(cmd, (args ?? {}) as Record<string, unknown>)),
     );
   mockedListen.mockReset().mockImplementation(async (name, callback) => {
-    handlers[name as string] = callback as (event: { payload: unknown }) => void;
+    const key = name as string;
+    (handlers[key] ??= []).push(callback as (event: { payload: unknown }) => void);
     return () => {};
   });
   for (const key of Object.keys(handlers)) delete handlers[key];
@@ -96,6 +120,10 @@ beforeEach(() => {
   tabsState.pendingCloseDirty = 0;
   tabsState.loadScene = vi.fn().mockResolvedValue(undefined);
   tabsState.resetScene = vi.fn();
+  // The path-open flow is event-driven like the dialog flow; both stores'
+  // listeners must be wired for openTab.
+  await tabsState.init({ loadScene: tabsState.loadScene, resetScene: tabsState.resetScene });
+  await loadOrchestrator.init({ loadScene: tabsState.loadScene, resetScene: tabsState.resetScene });
 
   stageState.activeStageId = 0;
   stageState.stageInfo = null;
@@ -115,6 +143,9 @@ beforeEach(() => {
   loadOrchestrator.dependencies = null;
   loadOrchestrator.loadingProgress = null;
   loadOrchestrator.modalError = null;
+
+  localStorage.clear();
+  recentFiles.clear();
 });
 
 describe("tabDisplayName", () => {
@@ -129,10 +160,10 @@ describe("tabDisplayName", () => {
 });
 
 describe("openTab", () => {
-  it("opens a new backend stage and activates it", async () => {
+  it("opens a new backend stage through the path orchestration command", async () => {
     await openTab("/scene/a.usda");
 
-    expect(mockedInvoke).toHaveBeenCalledWith("open_usd_path", { path: "/scene/a.usda" });
+    expect(mockedInvoke).toHaveBeenCalledWith("open_usd_file_path", { path: "/scene/a.usda" });
     expect(tabsState.stages).toHaveLength(1);
     expect(tabsState.stages[0].stage_id).toBe(1);
     expect(tabsState.stages[0].root_file).toBe("/scene/a.usda");
@@ -140,7 +171,14 @@ describe("openTab", () => {
     expect(stageState.activeStageId).toBe(1);
     expect(stageState.stageInfo?.stage_id).toBe(1);
     expect(loadOrchestrator.rootFile).toBe("/scene/a.usda");
-    expect(tabsState.loadScene).toHaveBeenCalledTimes(1);
+    expect(tabsState.loadScene).toHaveBeenCalled();
+  });
+
+  it("records the opened file in recent files", async () => {
+    await openTab("/scene/a.usda");
+
+    expect(recentFiles.entries[0]).toEqual({ path: "/scene/a.usda", name: "a.usda" });
+    expect(recentFiles.entries).toHaveLength(1);
   });
 
   it("opens each path as its own tab", async () => {
@@ -163,6 +201,7 @@ describe("openTab", () => {
     expect(loadOrchestrator.modalError).toContain("cannot open: /bad.usda");
     expect(loadOrchestrator.loadingProgress).toBeNull();
     expect(loadOrchestrator.rootFile).toBe("/scene/a.usda");
+    expect(recentFiles.entries.map((e) => e.path)).not.toContain("/bad.usda");
   });
 });
 
@@ -268,7 +307,9 @@ describe("closeTab", () => {
     expect(stageState.stageInfo).toBeNull();
     expect(stageState.status).toBe("idle");
     expect(loadOrchestrator.rootFile).toBeNull();
-    expect(tabsState.resetScene).toHaveBeenCalledTimes(1);
+    // The load-start event resets the scene (dialog-flow behavior) and the
+    // last close resets it again.
+    expect(tabsState.resetScene).toHaveBeenCalledTimes(2);
     expect(editState.dirtyLayers).toEqual([]);
   });
 });
@@ -277,17 +318,15 @@ describe("event subscriptions", () => {
   it("usd-stage-changed for an inactive stage refreshes the summaries only", async () => {
     await openTab("/scene/a.usda");
     await openTab("/scene/b.usda");
-    await tabsState.init({ loadScene: tabsState.loadScene, resetScene: tabsState.resetScene });
     dirtyOverrides.set(1, 3);
     mockedInvoke.mockClear();
     (tabsState.loadScene as ReturnType<typeof vi.fn>).mockClear();
 
-    handlers["usd-stage-changed"]({ payload: { stage_id: 1, paths: ["/World"] } });
+    fireEvent("usd-stage-changed", { stage_id: 1, paths: ["/World"] });
     await vi.waitFor(() => {
-      expect(mockedInvoke).toHaveBeenCalledWith("list_stages");
+      expect(tabsState.stages.find((tab) => tab.stage_id === 1)?.dirty_count).toBe(3);
     });
-
-    expect(tabsState.stages.find((tab) => tab.stage_id === 1)?.dirty_count).toBe(3);
+    expect(mockedInvoke).toHaveBeenCalledWith("list_stages");
     // The active tab's view does not refetch for another stage's event.
     expect(mockedInvoke).not.toHaveBeenCalledWith("get_stage_tree", expect.anything());
     expect(mockedInvoke).not.toHaveBeenCalledWith("get_edit_target", expect.anything());
@@ -297,10 +336,9 @@ describe("event subscriptions", () => {
 
   it("usd-stage-opened registers the stage as a new active tab", async () => {
     await openTab("/scene/a.usda");
-    await tabsState.init({ loadScene: tabsState.loadScene, resetScene: tabsState.resetScene });
     (tabsState.loadScene as ReturnType<typeof vi.fn>).mockClear();
 
-    handlers["usd-stage-opened"]({ payload: stageInfoFor(7, "/scene/dialog.usda") });
+    fireEvent("usd-stage-opened", stageInfoFor(7, "/scene/dialog.usda"));
     await vi.waitFor(() => {
       expect(tabsState.activeId).toBe(7);
       expect(tabsState.loadScene).toHaveBeenCalled();

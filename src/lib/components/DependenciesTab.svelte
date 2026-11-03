@@ -1,5 +1,6 @@
 <script lang="ts">
   import { formatBytes, isTexture } from "$lib/utils/format";
+  import { openContainingFolder } from "$lib/utils/reveal";
 
   let {
     rootFile,
@@ -19,9 +20,15 @@
 </script>
 
 {#if rootFile}
-  <div class="node root">
+  <div class="node root" title={rootFile}>
     <strong>Root:</strong>
     {rootFile.split(/[\\/]/).pop()}
+    <button
+      class="icon-btn"
+      style="flex-shrink: 0; margin-left: auto;"
+      title="Open containing folder"
+      onclick={() => void openContainingFolder(rootFile!, openErrorModal)}>📁</button
+    >
   </div>
 {/if}
 

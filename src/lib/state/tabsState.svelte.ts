@@ -4,6 +4,7 @@ import { stageState } from "../stage/stageState.svelte";
 import { editState } from "./editState.svelte";
 import { layerTextState } from "./layerTextState.svelte";
 import { loadOrchestrator, type DependencyMap } from "./loadOrchestrator.svelte";
+import { recentFiles } from "./recentFiles.svelte";
 import { confirmCloseNeeded } from "./closeGuard";
 import type { StageInfo, StageSummary } from "../stage/types";
 
@@ -88,6 +89,9 @@ export const tabsState = $state({
   // The extra loadScene supersedes whatever the usd-scene-loaded step
   // started: an open always ends with the viewport showing its stage.
   async adoptOpened(info: StageInfo): Promise<void> {
+    // The user-facing path (pre-extraction for usdz) is what recent files
+    // records; the tab's root_file keeps the load-time snapshot below.
+    recentFiles.add(loadOrchestrator.requestedPath ?? info.root_layer);
     this.register(info, loadOrchestrator.rootFile ?? info.root_layer, loadOrchestrator.dependencies);
     await this.setActive(info.stage_id);
   },
@@ -104,28 +108,19 @@ export const tabsState = $state({
     });
   },
 
-  // Path-based open (drag-drop, recent files): a NEW backend stage per
-  // call through open_usd_path. No dialog orchestration runs here — no
-  // usdz extraction, no dependency scan — so errors surface through the
-  // shared error modal and the scene composes without fallback colors.
+  // Path-based open (drag-drop, recent files): the backend command runs
+  // the SAME orchestration as the dialog flow — usdz extraction, the
+  // dependency scan, the usd-load-* progress events — so the tab
+  // registers through the shared usd-stage-opened listener like every
+  // other open, and big files show progress. The command's Err carries
+  // the readable failure message.
   async openTab(path: string): Promise<void> {
-    loadOrchestrator.loadingProgress = { stage: "Opening stage...", percent: 0 };
-    let info: StageInfo;
     try {
-      info = await invoke<StageInfo>("open_usd_path", { path });
+      await invoke<StageInfo>("open_usd_file_path", { path });
     } catch (e) {
       loadOrchestrator.loadingProgress = null;
       loadOrchestrator.openErrorModal("Failed to open USD:\n\n" + (typeof e === "string" ? e : String(e)));
-      return;
     }
-    loadOrchestrator.rootFile = path;
-    loadOrchestrator.dependencies = null;
-    await stageState.adoptOpenedStage(info);
-    this.register(info, path, null);
-    this.activeId = info.stage_id;
-    void editState.refresh();
-    await this.loadScene();
-    loadOrchestrator.loadingProgress = null;
   },
 
   // Activate a tab: per-tab state is refetched fresh — tree/details through
@@ -180,6 +175,7 @@ export const tabsState = $state({
       this.activeId = 0;
       stageState.clear();
       loadOrchestrator.rootFile = null;
+      loadOrchestrator.requestedPath = null;
       loadOrchestrator.dependencies = null;
       this.resetScene();
       void editState.refresh();

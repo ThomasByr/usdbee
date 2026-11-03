@@ -29,6 +29,8 @@
     saveControlPreferences,
   } from "$lib/state/controlsState.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
+  import { tabsState } from "$lib/state/tabsState.svelte";
+  import { initDragDrop } from "$lib/dnd/dragDrop";
   import { editState } from "$lib/state/editState.svelte";
   import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
   import { initTheme } from "$lib/state/themeState.svelte";
@@ -265,6 +267,15 @@
     // Editing state: subscribes to usd-stage-changed (dirty-layer and
     // undo-state refresh) and primes the edit-target/dirty-layer snapshot.
     unlisteners.push(editState.init());
+
+    // Task 12: dropped USD files open as stages (mixed or non-USD drops
+    // surface the shared error modal and open nothing).
+    unlisteners.push(
+      initDragDrop(
+        (path) => tabsState.openTab(path),
+        (msg) => loadOrchestrator.openErrorModal(msg),
+      ),
+    );
 
     // Task 11: the guard aggregates dirt across ALL open stages
     // (list_stages dirty counts) plus the active stage's unapplied text

@@ -52,6 +52,9 @@ export function filterDependencies(
 
 export const loadOrchestrator = $state({
   rootFile: null as string | null,
+  // The path the user asked to open (usd-load-start's payload — the
+  // PRE-extraction path for usdz); recent files records this one.
+  requestedPath: null as string | null,
   loadingProgress: null as LoadProgress | null,
   dependencies: null as DependencyMap | null,
   filterText: "",
@@ -83,6 +86,7 @@ export const loadOrchestrator = $state({
       }),
       listen<string>("usd-load-start", (event) => {
         this.rootFile = event.payload;
+        this.requestedPath = event.payload;
         this.loadingProgress = { stage: "Starting...", percent: 0 };
         this.dependencies = null;
 

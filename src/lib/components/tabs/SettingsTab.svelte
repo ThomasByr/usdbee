@@ -1,5 +1,9 @@
 <script lang="ts">
   import { themeState, setThemePreference, type ThemePreference } from "$lib/state/themeState.svelte";
+  import { recentFiles } from "$lib/state/recentFiles.svelte";
+  import { tabsState } from "$lib/state/tabsState.svelte";
+  import { openContainingFolder } from "$lib/utils/reveal";
+  import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
 
   let {
@@ -42,7 +46,10 @@
         <option value="light">Light</option>
       </select>
     </label>
-    <div class="theme-hint">Currently {themeState.resolved === "light" ? "Light" : "Dark"} <Icon name={themeState.resolved === "light" ? "sun" : "moon"} /></div>
+    <div class="theme-hint">
+      Currently {themeState.resolved === "light" ? "Light" : "Dark"}
+      <Icon name={themeState.resolved === "light" ? "sun" : "moon"} />
+    </div>
   </div>
 
   <div class="settings-group">
@@ -130,7 +137,9 @@
       </select>
     </label>
 
-    <div style="font-size: 11px; color: var(--text-dim); text-transform: uppercase; margin: 8px 0 4px 0;">Keyboard</div>
+    <div style="font-size: 11px; color: var(--text-dim); text-transform: uppercase; margin: 8px 0 4px 0;">
+      Keyboard
+    </div>
     {#each Object.entries(keybindings) as [action, key]}
       <div
         style="display: flex; align-items: center; justify-content: space-between; font-size: 13px; margin-bottom: 4px;"
@@ -181,6 +190,40 @@
   </div>
 
   <div class="settings-group">
+    <h3>Recent Files</h3>
+    {#if recentFiles.entries.length === 0}
+      <p style="font-size: 12px; color: var(--text-dim);">No recent files yet.</p>
+    {:else}
+      <div class="recent-list">
+        {#each recentFiles.entries as entry (entry.path)}
+          <div class="recent-item" title={entry.path}>
+            <span class="recent-name">{entry.name}</span>
+            <span class="recent-actions">
+              <button
+                class="reset-btn"
+                title="Open {entry.path}"
+                onclick={() => void tabsState.openTab(entry.path)}>Open</button
+              >
+              <button
+                class="reset-btn"
+                title="Open containing folder"
+                onclick={() => void openContainingFolder(entry.path, loadOrchestrator.openErrorModal)}
+                >Folder</button
+              >
+              <button
+                class="reset-btn"
+                title="Remove from recent files"
+                onclick={() => recentFiles.remove(entry.path)}>✕</button
+              >
+            </span>
+          </div>
+        {/each}
+      </div>
+      <button class="reset-btn" onclick={() => recentFiles.clear()}>Clear all</button>
+    {/if}
+  </div>
+
+  <div class="settings-group">
     <h3>Scene Information</h3>
     <p>Triangles: {triangleCount.toLocaleString()}</p>
   </div>
@@ -208,5 +251,33 @@
     gap: 6px;
     font-size: 11px;
     color: var(--text-dim);
+  }
+
+  .recent-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 8px;
+  }
+
+  .recent-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 13px;
+    min-width: 0;
+  }
+
+  .recent-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .recent-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
   }
 </style>
