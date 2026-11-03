@@ -146,4 +146,17 @@ export const stageState = $state({
       return typeof e === "string" ? e : String(e);
     }
   },
+
+  // Author (or clear, with null) a texture material for `path`: the backend
+  // builds a /Looks/<Name>_Mat PreviewSurface network under a Looks scope
+  // and binds it to the prim. The explicit path (not the selection) serves
+  // branch application, which loops over many gprims.
+  async setPrimTexture(path: string, texture: string | null): Promise<string | null> {
+    try {
+      await invoke("set_prim_texture", { path, texturePath: texture });
+      return null;
+    } catch (e) {
+      return typeof e === "string" ? e : String(e);
+    }
+  },
 });

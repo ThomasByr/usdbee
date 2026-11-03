@@ -2466,3 +2466,197 @@ fn undo_redo_without_open_stage_fail() {
     let error = usdbee_lib::stage::request_undo_state(&state.sender).expect_err("no stage is open");
     assert!(error.contains("no stage open"), "got: {}", error);
 }
+
+// --- Phase 4, Task 7: texture material authoring ---
+
+fn request_set_texture(
+    state: &StageState,
+    path: &str,
+    texture: Option<&str>,
+) -> Result<(), String> {
+    usdbee_lib::stage::request_set_prim_texture(&state.sender, path, texture)
+}
+
+fn material_via_owner(state: &StageState, path: &str) -> usdbee_lib::materials::MaterialInfo {
+    usdbee_lib::stage::request_material_data(&state.sender, path).expect("material data serializes")
+}
+
+fn child_node<'a>(
+    nodes: &'a [usdbee_lib::stage::PrimNode],
+    path: &str,
+) -> &'a usdbee_lib::stage::PrimNode {
+    nodes
+        .iter()
+        .find(|n| n.path == path)
+        .unwrap_or_else(|| panic!("expected node {} in {:?}", path, nodes))
+}
+
+fn checker_texture() -> String {
+    fixture("checker.png").to_string_lossy().to_string()
+}
+
+#[test]
+fn set_prim_texture_binds_a_preview_surface_network() {
+    let (state, events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+    let texture = checker_texture();
+
+    request_set_texture(&state, "/World/Ball", Some(&texture))
+        .expect("binding a texture material should succeed");
+
+    // The existing read path reports the texture: the authored network
+    // must be complete enough for the viewport material flow.
+    let material = material_via_owner(&state, "/World/Ball");
+    assert_eq!(material.name, "Ball_Mat", "the bound material serializes");
+    let surface = material
+        .surface
+        .expect("a UsdPreviewSurface composes from the authored network");
+    assert_eq!(surface.textures.len(), 1, "textures: {:?}", surface.textures);
+    assert_eq!(surface.textures[0].input, "diffuseColor");
+    assert_eq!(surface.textures[0].file_path, texture);
+    assert_eq!(surface.textures[0].st_primvar, "st");
+    assert_eq!(
+        surface.diffuse_color, None,
+        "diffuseColor arrives via the texture connection, not a value"
+    );
+
+    // The per-prim material prims live at /Looks/<Name>_Mat under a scope
+    // (a sibling of the default prim at the layer root).
+    let tree = request_stage_tree(&state.sender).expect("tree should serialize");
+    let looks = child_node(&tree, "/Looks");
+    assert_eq!(looks.type_name, "Scope");
+    let mat = child_node(&looks.children, "/Looks/Ball_Mat");
+    assert_eq!(mat.type_name, "Material");
+    assert_eq!(mat.children.len(), 2, "surface + texture shaders: {:?}", mat.children);
+
+    // The edit dirtied exactly the session layer.
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
+    assert_eq!(dirty.len(), 1, "dirty layers: {dirty:?}");
+    assert!(dirty[0].is_session);
+
+    let paths = events
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("usd-stage-changed fires for the texture edit");
+    assert_eq!(paths, vec!["/World/Ball".to_string()]);
+}
+
+#[test]
+fn set_prim_texture_clear_removes_the_binding_but_keeps_the_material() {
+    let (state, events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+    request_set_texture(&state, "/World/Ball", Some(&checker_texture()))
+        .expect("binding should succeed");
+
+    request_set_texture(&state, "/World/Ball", None)
+        .expect("clearing the texture binding should succeed");
+
+    let material = material_via_owner(&state, "/World/Ball");
+    assert_eq!(material.name, "Ball");
+    assert!(material.surface.is_none(), "no material is bound after the clear");
+
+    // The material prims stay (documented shortcut: no prim-removal path).
+    let tree = request_stage_tree(&state.sender).expect("tree should serialize");
+    let looks = child_node(&tree, "/Looks");
+    assert_eq!(child_node(&looks.children, "/Looks/Ball_Mat").type_name, "Material");
+
+    let paths = events
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("usd-stage-changed fires for the clear");
+    assert_eq!(paths, vec!["/World/Ball".to_string()]);
+}
+
+#[test]
+fn texture_binding_is_one_undo_step_and_redoable() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+    let texture = checker_texture();
+    request_set_texture(&state, "/World/Ball", Some(&texture))
+        .expect("binding should succeed");
+
+    let undo = undo_state(&state);
+    assert!(undo.can_undo);
+    assert!(!undo.can_redo);
+
+    // ONE undo reverts the whole transaction: binding gone AND the created
+    // material prims gone (one commit authored all of it).
+    assert!(request_undo(&state).expect("one undo reverts the network"));
+    let material = material_via_owner(&state, "/World/Ball");
+    assert!(material.surface.is_none(), "the binding is gone after one undo");
+    let tree = request_stage_tree(&state.sender).expect("tree should serialize");
+    assert!(
+        !tree.iter().any(|n| n.path == "/Looks"),
+        "the /Looks prims vanish with the binding: {:?}",
+        tree
+    );
+    assert!(!undo_state(&state).can_undo, "the stack drained in one step");
+
+    // Redo re-applies everything.
+    assert!(request_redo(&state).expect("redo restores the network"));
+    let material = material_via_owner(&state, "/World/Ball");
+    let surface = material.surface.expect("the redone material composes");
+    assert_eq!(surface.textures[0].file_path, texture);
+    let tree = request_stage_tree(&state.sender).expect("tree should serialize");
+    assert!(tree.iter().any(|n| n.path == "/Looks"));
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
+    assert_eq!(dirty.len(), 1);
+    assert!(dirty[0].is_session);
+}
+
+#[test]
+fn rebinding_a_texture_is_one_undo_step_back_to_the_previous_file() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+    let checker = checker_texture();
+    request_set_texture(&state, "/World/Ball", Some(&checker))
+        .expect("first binding should succeed");
+
+    // A missing file is authored verbatim (the picker passes absolute
+    // paths; resolution happens at read time).
+    let missing = "/definitely/not/a/texture.png";
+    request_set_texture(&state, "/World/Ball", Some(missing))
+        .expect("rebinding should succeed");
+    let material = material_via_owner(&state, "/World/Ball");
+    assert_eq!(
+        material.surface.expect("still bound").textures[0].file_path,
+        missing,
+        "the authored spelling reads back when the file is missing"
+    );
+
+    assert!(request_undo(&state).expect("undo reverts the rebind"));
+    let material = material_via_owner(&state, "/World/Ball");
+    assert_eq!(
+        material.surface.expect("rebound again").textures[0].file_path,
+        checker
+    );
+}
+
+#[test]
+fn set_prim_texture_guards_instances_and_inactive_prims() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "instanced.usda");
+    let error = request_set_texture(&state, "/Scene/WheelA", Some(&checker_texture()))
+        .expect_err("binding a texture on an instance prim must fail");
+    assert!(
+        error.contains("/__Prototype_0"),
+        "the error must name the prototype, got: {}",
+        error
+    );
+    assert!(error.contains("instance"), "got: {}", error);
+
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+    usdbee_lib::stage::request_set_prim_metadata(
+        &state.sender,
+        "/World/Ball",
+        "active",
+        &payload("bool", serde_json::json!(false)),
+    )
+    .expect("deactivating should succeed");
+    let error = request_set_texture(&state, "/World/Ball", Some(&checker_texture()))
+        .expect_err("binding a texture on an inactive prim must fail");
+    assert!(
+        error.contains("inactive"),
+        "the inactive rejection stays readable, got: {}",
+        error
+    );
+}

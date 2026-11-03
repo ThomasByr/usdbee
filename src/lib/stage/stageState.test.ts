@@ -147,6 +147,36 @@ describe("stageState", () => {
     expect(error).toBe("prim not found: /A");
   });
 
+  it("setPrimTexture invokes the backend per path and passes null for a clear", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    mockedInvoke.mockResolvedValue(undefined);
+
+    const error = await stageState.setPrimTexture("/A", "/tex/checker.png");
+
+    expect(error).toBeNull();
+    expect(mockedInvoke).toHaveBeenCalledWith("set_prim_texture", {
+      path: "/A",
+      texturePath: "/tex/checker.png",
+    });
+
+    await stageState.setPrimTexture("/A", null);
+    expect(mockedInvoke).toHaveBeenLastCalledWith("set_prim_texture", {
+      path: "/A",
+      texturePath: null,
+    });
+  });
+
+  it("setPrimTexture surfaces backend errors", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    mockedInvoke.mockRejectedValueOnce("prim not found: /A");
+
+    const error = await stageState.setPrimTexture("/A", "/tex/checker.png");
+
+    expect(error).toBe("prim not found: /A");
+  });
+
   it("setAttributeValue forwards the time argument, including null", async () => {
     mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
     await stageState.loadStage("/a.usda");

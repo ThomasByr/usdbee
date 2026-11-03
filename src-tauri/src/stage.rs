@@ -18,7 +18,8 @@ use openusd::usd::{
 use openusd_schemas::geom::{
     Imageable, ImageableExt, PointInstancer, PointInstancerSchema, Purpose, Visibility,
 };
-use openusd_schemas::shade::{Material, MaterialBindingAPI};
+use openusd_schemas::shade::nodes::{PreviewSurface, UVTexture};
+use openusd_schemas::shade::{Connectable, Material, MaterialBindingAPI};
 use serde::{Deserialize, Serialize};
 
 use crate::fetcher::get_usdbee_cache_dir;
@@ -89,6 +90,13 @@ pub enum StageRequest {
         variant_set: String,
         // None clears the set's selection on the edit target.
         selection: Option<String>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    // None clears the prim's material:binding targets (the material prims
+    // under /Looks stay — the arm documents the shortcut).
+    SetPrimTexture {
+        path: String,
+        texture: Option<String>,
         reply: mpsc::Sender<Result<(), String>>,
     },
     GetEditTarget {
@@ -538,6 +546,41 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                                 &variant_set,
                                 selection.as_deref(),
                             )
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    if response.is_ok() {
+                        if let (Some(ref stage), Some(ref replay)) =
+                            (&current_stage, &current_replay)
+                        {
+                            record_user_mutation(
+                                replay,
+                                &mut undo_journal,
+                                &mut redo_stack,
+                                &mut dirty_ledger,
+                                stage.edit_target().layer_identifier(),
+                                &path,
+                            );
+                            after_mutation(
+                                &sink,
+                                &mut mesh_cache,
+                                &mut manifest_skeleton,
+                                &mut resolve_memo,
+                                &path,
+                            );
+                        }
+                    }
+                    let _ = reply.send(response);
+                }
+                StageRequest::SetPrimTexture {
+                    path,
+                    texture,
+                    reply,
+                } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            author_prim_texture(stage, &path, texture.as_deref())
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -1284,6 +1327,121 @@ fn variant_selection_err(path: &str, variant_set: &str, error: impl std::fmt::Di
     format!(
         "failed to set variant selection {} on {}: {}",
         variant_set, path, error
+    )
+}
+
+/// Author (or clear, with `None`) the texture material for the prim at
+/// `path`. `Some(texture)` builds, under a `/Looks` scope, the per-prim
+/// network — a Material at `/Looks/<Name>_Mat` holding a UsdPreviewSurface
+/// shader and a UsdUVTexture shader, `inputs:file` ← the texture (authored
+/// verbatim; resolution is read-time), `outputs:rgb` →
+/// `inputs:diffuseColor`, `outputs:surface` → the Material's terminal — and
+/// binds it via MaterialBindingAPI. `None` clears the prim's
+/// `material:binding` targets.
+fn author_prim_texture(
+    stage: &Stage,
+    path: &str,
+    texture: Option<&str>,
+) -> Result<(), String> {
+    let prim = editable_prim(stage, path, false)?;
+    match texture {
+        Some(texture) => bind_prim_texture(stage, &prim, path, texture),
+        None => clear_prim_texture(&prim, path),
+    }
+}
+
+/// One undo step for the whole network: the crate seals one undo entry per
+/// committed layer transaction and `Stage::edit` batches property specs
+/// only (it cannot create prim specs), so the network is authored on a
+/// throwaway stage with the crate's shade API, its forward diffs merge into
+/// one Diff, and a single `apply_diff` replays it onto the current edit
+/// target — the same commit seam the redo arm uses.
+fn bind_prim_texture(
+    stage: &Stage,
+    prim: &openusd::usd::Prim,
+    path: &str,
+    texture: &str,
+) -> Result<(), String> {
+    let name = prim
+        .path()
+        .name()
+        .ok_or_else(|| format!("cannot author the texture material on {}", path))?;
+    let scratch = ReplayStage::from(
+        Stage::builder()
+            .schema_registry(openusd_schemas::schema_registry())
+            .in_memory("texture-material-scratch.usda")
+            .map_err(|e| texture_err(path, e))?,
+    );
+    let material_path = format!("/Looks/{}_Mat", name);
+    let author = || -> openusd::Result<()> {
+        scratch.define_typed_prim("/Looks", "Scope")?;
+        let material = Material::define(&scratch, material_path.clone())?;
+        let surface =
+            PreviewSurface::define(&scratch, format!("{}/PreviewSurface", material_path))?;
+        let albedo = UVTexture::define(&scratch, format!("{}/Albedo", material_path))?;
+        albedo
+            .shader()
+            .create_input("file", "asset")?
+            .set(sdf::Value::AssetPath(sdf::AssetPath::new(texture)))?;
+        let rgb = albedo.shader().create_output("rgb", "float3")?;
+        surface
+            .shader()
+            .create_input("diffuseColor", "color3f")?
+            .connect_to(&rgb)?;
+        let surface_output = surface.shader().create_output("surface", "token")?;
+        material
+            .create_surface_output()?
+            .connect_to(&surface_output)?;
+        // The bound prim must compose on the scratch stage for the binding
+        // authoring; its spec op is dropped from the diff below so the
+        // replay never touches the target prim's own prim spec.
+        let proxy = scratch.override_prim(prim.path().clone())?;
+        MaterialBindingAPI::from_prim_unchecked(proxy).bind(material_path)?;
+        Ok(())
+    };
+    author().map_err(|e| texture_err(path, e))?;
+    let mut edits = Vec::new();
+    for diff in scratch.diff() {
+        edits.extend(diff.edits);
+    }
+    edits.retain(|edit| edit.path() != prim.path());
+    if edits.is_empty() {
+        return Err(texture_err(path, "the material network authored nothing"));
+    }
+    stage
+        .apply_diff(
+            &Diff {
+                edits,
+                mapping: None,
+            },
+            ApplyMode::CurrentEditTarget,
+        )
+        .map_err(|e| texture_err(path, e))
+}
+
+/// shortcut: no verified prim-removal API — the material prims under
+/// /Looks stay once created (only the binding is cleared); remove
+/// /Looks/<Name>_Mat when one lands. Rel targets list-compose, so a
+/// binding authored on a layer weaker than the current edit target can
+/// survive the clear; v1 clears what set_prim_texture itself authored.
+fn clear_prim_texture(prim: &openusd::usd::Prim, path: &str) -> Result<(), String> {
+    let bound = MaterialBindingAPI::from_prim_unchecked(prim.clone())
+        .direct_binding("")
+        .map_err(|e| texture_err(path, e))?;
+    if bound.is_none() {
+        // Nothing is bound through this prim's own relationship; authoring
+        // an empty target list would only create spec noise.
+        return Ok(());
+    }
+    prim.author_relationship_targets("material:binding", None::<sdf::Path>)
+        .map(|_| ())
+        .map_err(|e| texture_err(path, e))
+}
+
+fn texture_err(path: &str, error: impl std::fmt::Display) -> String {
+    format!(
+        "failed to author the texture material on {}: {}",
+        path, error
     )
 }
 
@@ -2925,6 +3083,35 @@ pub fn request_set_variant_selection(
             path: path.to_string(),
             variant_set: variant_set.to_string(),
             selection: selection.map(str::to_string),
+            reply,
+        })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn set_prim_texture(
+    path: String,
+    texture_path: Option<String>,
+    state: tauri::State<'_, StageState>,
+) -> Result<(), String> {
+    request_set_prim_texture(&state.sender, &path, texture_path.as_deref())
+}
+
+pub fn request_set_prim_texture(
+    sender: &mpsc::Sender<StageRequest>,
+    path: &str,
+    texture_path: Option<&str>,
+) -> Result<(), String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::SetPrimTexture {
+            path: path.to_string(),
+            texture: texture_path.map(str::to_string),
             reply,
         })
         .map_err(|_| "stage service unavailable".to_string())?;
