@@ -27,6 +27,7 @@
   } from "$lib/state/controlsState.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
   import { editState } from "$lib/state/editState.svelte";
+  import { filteredDependencies, loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
   import { confirmCloseNeeded } from "$lib/state/closeGuard";
   import { layerTextState } from "$lib/state/layerTextState.svelte";
   import {
@@ -38,26 +39,12 @@
   import { disposeScene } from "$lib/render/sceneBuilder";
   import { TransformGizmo, type GizmoCommit } from "$lib/render/transformGizmo";
   import { composeOpUpdate, evaluateGizmoGate, matricesClose, type GizmoMode } from "$lib/render/xformOps";
-  import type { StageInfo } from "$lib/stage/types";
   import { stageModalErrorLines } from "$lib/stage/modalErrors";
   import { upAxisRotation } from "$lib/stage/upAxis";
   import * as THREE from "three";
   import { RendererKit } from "$lib/three/RendererKit.svelte";
 
   // State
-  let rootFile = $state<string | null>(null);
-  let loadingProgress = $state<{ stage: string; percent: number } | null>(null);
-  let dependencies = $state<Record<
-    string,
-    {
-      path: string;
-      resolved: boolean;
-      size_bytes: number | null;
-      fallback_color?: string | null;
-      error_msg?: string | null;
-    }
-  > | null>(null);
-
   let canvas: HTMLCanvasElement;
 
   let viewer = new RendererKit();
@@ -89,8 +76,6 @@
   // Sidebar resize state
   let sidebarWidth = $state<number>(320);
   let isResizing = $state<boolean>(false);
-  let filterText = $state<string>("");
-  let modalError = $state<string | null>(null);
   let stageModalLines = $state<string[] | null>(null);
   let stageModalDismissed = $state<boolean>(false);
   let showExportModal = $state<boolean>(false);
@@ -113,14 +98,6 @@
     } catch (e) {
       console.error("Failed to save Omniverse URL:", e);
     }
-  }
-
-  function openErrorModal(msg: string) {
-    modalError = msg;
-  }
-
-  function closeErrorModal() {
-    modalError = null;
   }
 
   function closeStageModal() {
@@ -168,30 +145,22 @@
             stage.includes("Encoding") ||
             stage.includes("Saving")
           ) {
-            loadingProgress = { stage, percent };
+            loadOrchestrator.loadingProgress = { stage, percent };
           }
         },
         onComplete: () => {
           showExportModal = false;
           isExporting = false;
-          loadingProgress = null;
+          loadOrchestrator.loadingProgress = null;
         },
         onError: (msg) => {
-          openErrorModal(msg);
+          loadOrchestrator.openErrorModal(msg);
           isExporting = false;
-          loadingProgress = null;
+          loadOrchestrator.loadingProgress = null;
         },
       },
     );
   }
-
-  let filteredDependencies = $derived(
-    dependencies
-      ? Object.entries(dependencies).filter(([path, _]) =>
-          path.toLowerCase().includes(filterText.toLowerCase()),
-        )
-      : [],
-  );
 
   // Stage errors own their modal state (stageModalLines/stageModalDismissed) so
   // they never read or overwrite modalError — rendering errors (usd-load-error,
@@ -510,7 +479,7 @@
       viewer.keysPressed.add(e.key.toLowerCase());
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
         e.preventDefault();
-        openUsdFile();
+        void loadOrchestrator.openUsdFile();
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
@@ -578,28 +547,11 @@
       listen("open-save-dialog", () => {
         void openSaveDialog();
       }),
-      listen<string>("usd-load-error", (event) => {
-        loadingProgress = null;
-        openErrorModal("Failed to extract or load USD: " + event.payload);
-      }),
-      listen<string>("usd-load-start", (event) => {
-        rootFile = event.payload;
-        loadingProgress = { stage: "Starting...", percent: 0 };
-        dependencies = null;
-
-        removeLoadedGroup();
-      }),
-      listen<{ stage: string; percent: number }>("usd-load-progress", (event) => {
-        loadingProgress = event.payload;
-      }),
-      listen<StageInfo>("usd-stage-opened", (event) => {
-        stageState.adoptOpenedStage(event.payload);
-        // Re-query the edit target + dirty layers: the previous stage's
-        // dirty set must not survive into the new open.
-        void editState.refresh();
-      }),
-      listen("usd-scene-loaded", (event: any) => {
-        void handleSceneLoaded(event.payload);
+      // Loading orchestration lives in loadOrchestrator; the viewport-bound
+      // steps it can't own are handed back through hooks.
+      loadOrchestrator.init({
+        resetScene: removeLoadedGroup,
+        loadScene: loadRustScene,
       }),
       listen("usd-stage-changed", (event) => {
         const paths = ((event.payload as { paths?: string[] } | null)?.paths ?? []) as string[];
@@ -624,15 +576,6 @@
         }
       }),
     );
-
-    // The viewport scene load: compose the scene from the Rust manifest
-    // (no zip, no Three.js USD parsing).
-    async function handleSceneLoaded(payload: any) {
-      loadingProgress = null;
-      rootFile = payload.root_file;
-      dependencies = payload.dependencies;
-      await loadRustScene();
-    }
 
     if (canvas) {
       viewer.init(canvas);
@@ -763,19 +706,19 @@
     if (!viewer.scene) return;
     removeLoadedGroup();
     viewer.animationProgress = 0;
-    loadingProgress = { stage: "Composing Rust render scene...", percent: 40 };
+    loadOrchestrator.loadingProgress = { stage: "Composing Rust render scene...", percent: 40 };
     try {
       const group = await renderState.loadRenderScene(
         stageState.stageInfo?.start_time_code ?? 0,
-        dependencies ?? {},
+        loadOrchestrator.dependencies ?? {},
       );
       if (group) {
         integrateScene(group);
       } else if (renderState.status === "error") {
-        openErrorModal("Error Rendering USD:\n\n" + renderState.error);
+        loadOrchestrator.openErrorModal("Error Rendering USD:\n\n" + renderState.error);
       }
     } finally {
-      loadingProgress = null;
+      loadOrchestrator.loadingProgress = null;
     }
   }
 
@@ -793,24 +736,23 @@
     }
     if (!needsRebuild) return;
     removeLoadedGroup();
-    const group = await renderState.loadRenderScene(renderState.time ?? 0, dependencies ?? {});
+    const group = await renderState.loadRenderScene(
+      renderState.time ?? 0,
+      loadOrchestrator.dependencies ?? {},
+    );
     if (group) integrateScene(group);
   }
 
-  async function openUsdFile() {
-    await invoke("trigger_open_usd_dialog");
-  }
-
   async function replaceWithColor(path: string, event: Event) {
-    if (!dependencies) return;
+    if (!loadOrchestrator.dependencies) return;
     const input = event.target as HTMLInputElement;
     const color = input.value;
     try {
       await invoke("set_fallback_color", { path, color });
 
       // Update local state to reflect the change
-      dependencies[path] = {
-        ...dependencies[path],
+      loadOrchestrator.dependencies[path] = {
+        ...loadOrchestrator.dependencies[path],
         resolved: true,
         fallback_color: color,
       };
@@ -1152,7 +1094,7 @@
         {/if}
       </h2>
       <div class="header-actions">
-        <button class="primary-btn" onclick={openUsdFile} title="Open USD File">
+        <button class="primary-btn" onclick={() => void loadOrchestrator.openUsdFile()} title="Open USD File">
           <svg
             width="14"
             height="14"
@@ -1170,7 +1112,7 @@
         <button
           class="primary-btn"
           onclick={() => (showExportModal = true)}
-          disabled={loadingProgress !== null || rootFile === null}
+          disabled={loadOrchestrator.loadingProgress !== null || loadOrchestrator.rootFile === null}
           title="Export Scene"
         >
           <svg
@@ -1212,11 +1154,11 @@
       >
     </div>
 
-    {#if loadingProgress}
+    {#if loadOrchestrator.loadingProgress}
       <div class="progress-box">
-        <p>{loadingProgress.stage}</p>
+        <p>{loadOrchestrator.loadingProgress.stage}</p>
         <div class="progress-bar">
-          <div class="progress-fill" style="width: {loadingProgress.percent}%"></div>
+          <div class="progress-fill" style="width: {loadOrchestrator.loadingProgress.percent}%"></div>
         </div>
       </div>
     {/if}
@@ -1224,11 +1166,11 @@
     <div class="dependency-tree">
       {#if activeTab === "files"}
         <DependenciesTab
-          {rootFile}
-          {dependencies}
-          {filteredDependencies}
-          bind:filterText
-          {openErrorModal}
+          rootFile={loadOrchestrator.rootFile}
+          dependencies={loadOrchestrator.dependencies}
+          filteredDependencies={filteredDependencies()}
+          bind:filterText={loadOrchestrator.filterText}
+          openErrorModal={loadOrchestrator.openErrorModal}
           {replaceWithColor}
         />
       {/if}
@@ -1308,7 +1250,7 @@
 
   <!-- Main View for 3D Render Surface -->
   <section class="viewport">
-    {#if rootFile}
+    {#if loadOrchestrator.rootFile}
       <div class="top-toolbar">
         <button
           class="tool-btn"
@@ -1462,7 +1404,7 @@
       </div>
     {/if}
 
-    <canvas bind:this={canvas} class="webgl-canvas" class:visible={!!rootFile}></canvas>
+    <canvas bind:this={canvas} class="webgl-canvas" class:visible={!!loadOrchestrator.rootFile}></canvas>
 
     {#if viewer.hasAnimation}
       <div class="timeline-overlay">
@@ -1500,21 +1442,21 @@
       </div>
     {/if}
 
-    {#if !rootFile}
+    {#if !loadOrchestrator.rootFile}
       <div class="empty-state">
         <p>No USD scene loaded.</p>
         <p class="subtitle">Use File > Open USD... or the button to begin.</p>
       </div>
-    {:else if loadingProgress}
+    {:else if loadOrchestrator.loadingProgress}
       <div class="loading-overlay">
-        <h3>Loading {loadingProgress.stage}...</h3>
+        <h3>Loading {loadOrchestrator.loadingProgress.stage}...</h3>
       </div>
     {/if}
   </section>
 </main>
 
-{#if modalError}
-  <ErrorModal error={modalError} onClose={closeErrorModal} />
+{#if loadOrchestrator.modalError}
+  <ErrorModal error={loadOrchestrator.modalError} onClose={loadOrchestrator.closeErrorModal} />
 {:else if stageModalLines !== null && !stageModalDismissed}
   <ErrorModal lines={stageModalLines} onClose={closeStageModal} />
 {/if}
