@@ -1,4 +1,4 @@
-use crate::fetcher::{cached_path_for, fetch_and_cache_url, get_usdbee_cache_dir};
+use crate::fetcher::{fetch_and_cache_url, get_usdbee_cache_dir};
 use crate::models::UsdDependencyNode;
 use crate::omniverse::resolve_omniverse_uri;
 
@@ -172,6 +172,7 @@ fn clean(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fetcher::cached_path_for;
     use std::io::{Read, Write};
 
     // One-shot local HTTP server so remote-dependency handling is exercised
