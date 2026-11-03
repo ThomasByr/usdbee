@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { ValuePayload } from "./types";
-import { commitEditedValue, isEditableValue, parseEditedValue } from "./valueEdit";
+import {
+  colorArrayHex,
+  commitColorArray,
+  commitEditedValue,
+  isColorArray,
+  isEditableValue,
+  parseEditedValue,
+} from "./valueEdit";
 
 const payload = (type: string, data: unknown): ValuePayload => ({ type, data });
 
@@ -39,9 +46,74 @@ describe("isEditableValue", () => {
       "dict",
       "unsupported",
       "unauthored",
+      // The editable color-array tags need a valid 1-element color too.
+      "color3f_array",
+      "vec3f_array",
+      "float3_array",
     ]) {
       expect(isEditableValue(payload(type, null))).toBe(false);
     }
+  });
+
+  it("admits exactly the two display-color array families at one element", () => {
+    for (const type of ["color3f_array", "vec3f_array", "float3_array"]) {
+      const value = payload(type, [[0.5, 0.5, 0.5]]);
+      expect(isEditableValue(value)).toBe(true);
+      expect(isColorArray(value)).toBe(true);
+    }
+    expect(isEditableValue(payload("int_array", [[1, 2, 3]]))).toBe(false);
+  });
+
+  it("rejects the color-array tags on any other shape", () => {
+    for (const data of [
+      [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+      [[0.1, 0.2]],
+      [[0.1, 0.2, 0.3, 0.4]],
+      [["r", "g", "b"]],
+      [[NaN, 0, 0]],
+      [0.1, 0.2, 0.3],
+      [],
+    ]) {
+      for (const type of ["color3f_array", "vec3f_array", "float3_array"]) {
+        expect(isColorArray(payload(type, data))).toBe(false);
+        expect(isEditableValue(payload(type, data))).toBe(false);
+      }
+    }
+  });
+});
+
+describe("color array hex helpers", () => {
+  const redPayload: ValuePayload = payload("color3f_array", [[1, 0, 0]]);
+
+  it("hex-decodes to an 8-bit grid triple", () => {
+    expect(commitColorArray(redPayload, "#ff0000")).toEqual({
+      ok: true,
+      value: { type: "color3f_array", data: [[1, 0, 0]] },
+    });
+    expect(commitColorArray(redPayload, "#4080c0")).toEqual({
+      ok: true,
+      value: { type: "color3f_array", data: [[64 / 255, 128 / 255, 192 / 255]] },
+    });
+  });
+
+  it("commit keeps the payload tag for the round trip", () => {
+    const result = commitColorArray(redPayload, "#f00");
+    expect(result.ok && result.value.type).toBe("color3f_array");
+  });
+
+  it("rejects garbage hex without producing a payload", () => {
+    for (const raw of ["", "nothex", "#11223", "#12345", "ffff0", "#zzz"]) {
+      const result = commitColorArray(redPayload, raw);
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it("recomputes the same hex from the composed read", () => {
+    expect(colorArrayHex(redPayload)).toBe("#ff0000");
+    expect(colorArrayHex(payload("vec3f_array", [[64 / 255, 128 / 255, 192 / 255]]))).toBe(
+      "#4080c0",
+    );
+    expect(colorArrayHex(payload("color3f_array", null))).toBeNull();
   });
 });
 

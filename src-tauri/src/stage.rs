@@ -1010,12 +1010,17 @@ fn editable_prim(
 fn payload_type_name(payload: &ValuePayload) -> Result<ValueTypeName, String> {
     // The serializer's generic spellings map back to the declared USD
     // names create_attribute expects (the gizmo sends the declared
-    // spellings directly; these arms keep the round trip consistent).
+    // spellings directly; these arms keep the round trip consistent). The
+    // color-array tags map onto the registered array names: the crate has
+    // no color-specific Value kind, and "vec3f[]" is not a registered
+    // spelling (the family's usda name is float3[]).
     let spelling = match payload.r#type.as_str() {
         "assetpath" => "asset",
         "vec3f" => "float3",
         "vec3d" => "double3",
         "token_array" => "token[]",
+        "color3f_array" => "color3f[]",
+        "float3_array" | "vec3f_array" => "float3[]",
         other => other,
     };
     ValueTypeName::find(spelling)

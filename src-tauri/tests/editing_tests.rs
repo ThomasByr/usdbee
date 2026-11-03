@@ -142,6 +142,127 @@ fn set_value_authors_unauthored_and_undeclared_attributes() {
     assert_eq!(fresh.value.data, serde_json::json!(-1.25));
 }
 
+// --- Task 6: display color (and float3) array authoring ---
+
+#[test]
+fn set_value_authors_a_single_display_color_element() {
+    let (state, events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "primvars:displayColor",
+        payload("color3f_array", serde_json::json!([[1.0, 0.25, 0.0]])),
+        None,
+    )
+    .expect("authoring a 1-element displayColor should succeed");
+
+    // The composed detail reads the authored value back (round trip).
+    let details = details_via_owner(&state, "/World/Ball", None);
+    let color = attribute(&details, "primvars:displayColor");
+    assert!(color.authored);
+    assert_eq!(color.type_name, "color3f[]");
+    assert_eq!(color.value.r#type, "color3f_array");
+    assert_eq!(
+        color.value.data,
+        serde_json::json!([[1.0, 0.25, 0.0]]),
+        "compose back must read the same color"
+    );
+
+    // The edit dirties exactly the session layer.
+    let dirty = request_list_dirty_layers(&state.sender).expect("dirty layers list");
+    assert_eq!(dirty.len(), 1, "dirty layers: {dirty:?}");
+    assert!(dirty[0].is_session);
+
+    // usd-stage-changed fires with the edited prim path.
+    let paths = events
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("usd-stage-changed should fire after the color edit");
+    assert_eq!(paths, vec!["/World/Ball".to_string()]);
+
+    // Undo reverts the authored color to the fixture value.
+    assert!(undo_state(&state).can_undo);
+    assert!(request_undo(&state).expect("undo succeeds"));
+    let details = details_via_owner(&state, "/World/Ball", None);
+    let color = attribute(&details, "primvars:displayColor");
+    assert_eq!(
+        color.value.data,
+        serde_json::json!([[0.5, 0.5, 0.5]]),
+        "undo must restore the pre-edit color"
+    );
+}
+
+#[test]
+fn set_value_stamps_the_schema_declared_unauthored_display_color() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "display_color.usda");
+
+    // /World/Blank authors no displayColor: the gprim schema declares it,
+    // so set stamps the spec from the declaration (no create call).
+    request_set_value(
+        &state,
+        "/World/Blank",
+        "primvars:displayColor",
+        payload("color3f_array", serde_json::json!([[0.0, 1.0, 0.0]])),
+        None,
+    )
+    .expect("authoring an unauthored schema-declared displayColor should succeed");
+
+    let details = details_via_owner(&state, "/World/Blank", None);
+    let color = attribute(&details, "primvars:displayColor");
+    assert!(color.authored);
+    assert_eq!(color.type_name, "color3f[]");
+    assert_eq!(color.value.r#type, "color3f_array");
+    assert_eq!(color.value.data, serde_json::json!([[0.0, 1.0, 0.0]]));
+}
+
+#[test]
+fn float3_array_authors_one_element_and_refuses_longer_arrays() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+
+    // A fresh float3[] attribute: the builder path creates the spec and
+    // authors the value as one undo step.
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "float3Vec",
+        payload("float3_array", serde_json::json!([[1.0, 2.0, 3.0]])),
+        None,
+    )
+    .expect("a fresh float3[] attribute should create with one value");
+    let details = details_via_owner(&state, "/World/Ball", None);
+    let fresh = attribute(&details, "float3Vec");
+    assert!(fresh.authored);
+    assert_eq!(fresh.type_name, "float3[]");
+    // A non-color vec3-family array serializes with the generic tag.
+    assert_eq!(fresh.value.r#type, "vec3f_array");
+    assert_eq!(fresh.value.data, serde_json::json!([[1.0, 2.0, 3.0]]));
+
+    // Longer arrays stay refused with the not-yet-editable error.
+    for (tag, data) in [
+        (
+            "color3f_array",
+            serde_json::json!([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]),
+        ),
+        (
+            "float3_array",
+            serde_json::json!([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]),
+        ),
+    ] {
+        let error = request_set_value(
+            &state,
+            "/World/Ball",
+            "primvars:displayColor",
+            payload(tag, data),
+            None,
+        )
+        .expect_err("multi-element arrays must refuse");
+        assert!(error.contains("not editable"), "{tag}: {}", error);
+    }
+}
+
 #[test]
 fn set_value_on_instance_prim_is_a_readable_error() {
     let (state, _events) = owner_with_events();
@@ -2184,7 +2305,7 @@ fn import_never_writes_the_layer_file() {
     let (state, _events) = owner_with_events();
     let info = open_path_via_owner(&state, &fixture("basic.usda"));
 
-    let file_before = std::fs::read(&fixture("basic.usda")).expect("fixture reads");
+    let file_before = std::fs::read(fixture("basic.usda")).expect("fixture reads");
 
     let text = request_export_layer_text(&state, &info.root_layer).expect("export works");
     let edited = text.replace("radius = 1.0", "radius = 9.5");
@@ -2199,7 +2320,7 @@ fn import_never_writes_the_layer_file() {
     );
 
     // ...while the file on disk stayed byte-for-byte identical.
-    let file_after = std::fs::read(&fixture("basic.usda")).expect("fixture reads");
+    let file_after = std::fs::read(fixture("basic.usda")).expect("fixture reads");
     assert_eq!(
         file_before, file_after,
         "the layer file must never be written"

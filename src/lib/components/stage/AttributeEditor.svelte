@@ -1,6 +1,13 @@
 <script lang="ts">
   import type { ValuePayload } from "$lib/stage/types";
-  import { commitEditedValue, isEditableValue, parseEditedValue } from "$lib/stage/valueEdit";
+  import {
+    colorArrayHex,
+    commitColorArray,
+    commitEditedValue,
+    isColorArray,
+    isEditableValue,
+    parseEditedValue,
+  } from "$lib/stage/valueEdit";
   import ValueView from "./ValueView.svelte";
 
   // `oncommit` receives the edited payload and returns the backend error
@@ -11,6 +18,9 @@
   }: { value: ValuePayload; oncommit: (value: ValuePayload) => Promise<string | null> } = $props();
 
   const editable = $derived(isEditableValue(value));
+  const colorEditable = $derived(editable && isColorArray(value));
+  // Null when the value is not an editable color array (no swatch shown).
+  const swatch = $derived(colorEditable ? colorArrayHex(value) : null);
   let draft = $state("");
   let error = $state<string | null>(null);
   // A failed Enter-commit keeps the draft for fixing, and the blur that
@@ -23,7 +33,7 @@
   // `value.data` unchanged, so the user's draft stays for fixing).
   $effect(() => {
     const data = value.data;
-    draft = String(data ?? "");
+    draft = colorEditable ? (colorArrayHex(value) ?? "") : String(data ?? "");
     error = null;
   });
 
@@ -33,14 +43,19 @@
       return;
     }
     if (!editable) return;
-    const result = commitEditedValue(value, draft);
+    const wasColor = colorEditable;
+    const result = wasColor ? commitColorArray(value, draft) : commitEditedValue(value, draft);
     if (!result.ok) {
       error = result.error;
       suppressNextBlur = true;
       return;
     }
-    if (result.value.data === value.data) {
-      // Nothing changed: just clear the error state.
+    // Nothing changed: just clear the error state. Color arrays compare
+    // by content (both sides are fresh JSON arrays).
+    const unchanged = wasColor
+      ? JSON.stringify(result.value.data) === JSON.stringify(value.data)
+      : result.value.data === value.data;
+    if (unchanged) {
       error = null;
       return;
     }
@@ -74,6 +89,18 @@
   />
 {:else if editable}
   <span class="value-editor-wrap">
+    {#if colorEditable && swatch !== null}
+      <input
+        class="color-swatch"
+        type="color"
+        value={swatch}
+        onchange={(event) => {
+          draft = event.currentTarget.value;
+          suppressNextBlur = true;
+          void commit();
+        }}
+      />
+    {/if}
     <input
       class="value-editor"
       class:value-error={error !== null}
@@ -99,6 +126,25 @@
     display: inline-flex;
     flex-direction: column;
     min-width: 0;
+  }
+
+  .color-swatch {
+    width: 1.6rem;
+    height: 1.2rem;
+    padding: 0;
+    border: 1px solid var(--input-border-soft);
+    border-radius: 3px;
+    background: none;
+    cursor: pointer;
+  }
+
+  .color-swatch::-webkit-color-swatch-wrapper {
+    padding: 0;
+  }
+
+  .color-swatch::-webkit-color-swatch {
+    border: none;
+    border-radius: 2px;
   }
 
   .value-editor {

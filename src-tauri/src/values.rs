@@ -433,6 +433,15 @@ pub fn value_payload_to_sdf(payload: &ValuePayload) -> Result<Value, String> {
         "string" => Value::String(payload_string(payload)?),
         "token" => Value::Token(payload_string(payload)?.into()),
         "assetpath" => Value::AssetPath(AssetPath::new(payload_string(payload)?)),
+        // Exactly one [r, g, b] element — the constant color the appearance
+        // editors author. The crate has no color-specific Value variant:
+        // every float3-family array (color3f[], float3[], vec3f[]) is
+        // `Value::Vec3fVec` and the role lives in the declared type name,
+        // which the authoring call site validates. Longer (or wrong-length)
+        // payloads keep the not-editable refusal.
+        "color3f_array" | "float3_array" | "vec3f_array" => {
+            Value::Vec3fVec(vec![payload_single_color_element(payload)?])
+        }
         "float3" | "vec3f" => {
             let (x, y, z) = payload_vec3(payload)?;
             Value::Vec3f(gf::Vec3f {
@@ -459,6 +468,35 @@ pub fn value_payload_to_sdf(payload: &ValuePayload) -> Result<Value, String> {
                 .collect::<Result<Vec<_>, String>>()?,
         ),
         _ => return Err(not_editable()),
+    })
+}
+
+/// The single [r, g, b] element an editable color array carries.
+fn payload_single_color_element(payload: &ValuePayload) -> Result<gf::Vec3f, String> {
+    let single = match payload.data.as_array().map(Vec::as_slice) {
+        Some([single]) => single,
+        // Wrong length (longer arrays included) keeps the refusal uniform
+        // with the families that have no editor yet.
+        _ => {
+            return Err(format!(
+                "type not editable yet: {} (needs exactly 1 color element)",
+                payload.r#type
+            ))
+        }
+    };
+    let triple = single
+        .as_array()
+        .ok_or_else(|| format!("{} element is not an [r, g, b] list", payload.r#type))?;
+    let mut out = [0.0; 3];
+    for (index, item) in triple.iter().enumerate() {
+        out[index] = item
+            .as_f64()
+            .ok_or_else(|| format!("{} component {} is not a number", payload.r#type, index))?;
+    }
+    Ok(gf::Vec3f {
+        x: out[0] as f32,
+        y: out[1] as f32,
+        z: out[2] as f32,
     })
 }
 

@@ -1,0 +1,19 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    # An authored constant displayColor (one element).
+    def Sphere "Painted"
+    {
+        color3f[] primvars:displayColor = [(0.1, 0.2, 0.3)]
+    }
+
+    # No displayColor authored: the gprim schema declares it, so authoring
+    # must stamp the spec from the declaration (no create call).
+    def Sphere "Blank"
+    {
+    }
+}
