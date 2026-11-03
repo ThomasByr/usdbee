@@ -6,7 +6,9 @@ Vocabulary:
              panels), --bg-sunken (tracks, disabled, resize handle),
              --bg-deep (code/error boxes), --preview-bg / --checkerboard
              (export preview), --toolbar-bg (floating toolbar strip)
-  Overlay    --overlay, --overlay-strong (backdrops), --shadow (shadow color)
+  Overlay    --overlay, --overlay-strong (backdrops), --shadow (shadow color),
+             --overlay-text / --overlay-text-dim / --overlay-accent
+             (text/icons rendered on the dark overlay backdrops)
   Borders    --border, --border-muted, --border-strong, --border-heavy,
              --border-split (tree header), --control-border,
              --input-border-soft / --input-bg-soft (translucent inputs),
@@ -53,6 +55,9 @@ Rules:
   --overlay: rgba(0, 0, 0, 0.6);
   --overlay-strong: rgba(0, 0, 0, 0.7);
   --shadow: rgba(0, 0, 0, 0.5);
+  --overlay-text: #d4d4d4;
+  --overlay-text-dim: #aaaaaa;
+  --overlay-accent: #4ec9b0;
 
   /* Borders */
   --border: #333333;
@@ -165,6 +170,9 @@ Rules:
   --overlay: rgba(0, 0, 0, 0.35);
   --overlay-strong: rgba(0, 0, 0, 0.45);
   --shadow: rgba(0, 0, 0, 0.25);
+  --overlay-text: #f0f0f0;
+  --overlay-text-dim: #cccccc;
+  --overlay-accent: #4ec9b0;
 
   /* Borders */
   --border: #d4d4d4;

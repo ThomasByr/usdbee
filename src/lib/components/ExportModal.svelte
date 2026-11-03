@@ -559,7 +559,7 @@
     padding: 4px 8px;
     font-size: 0.8rem;
     border-radius: 4px;
-    color: var(--text-mid);
+    color: var(--overlay-text-dim);
     z-index: 10;
     pointer-events: none;
   }

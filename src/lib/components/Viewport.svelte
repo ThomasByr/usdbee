@@ -162,7 +162,7 @@
     <div class="timeline-overlay">
       <button
         class="icon-btn"
-        style="color: var(--text-body)"
+        style="color: var(--overlay-text)"
         onclick={() => (viewer.isPlayingAnim = !viewer.isPlayingAnim)}
         title={viewer.isPlayingAnim ? "Pause" : "Play"}
       >
@@ -254,7 +254,7 @@
   }
 
   .timeline-time {
-    color: var(--syntax-teal);
+    color: var(--overlay-accent);
     font-family: monospace;
     font-size: 12px;
     min-width: 125px;
@@ -276,7 +276,7 @@
     padding: 10px 20px;
     border-radius: 6px;
     z-index: 2;
-    color: var(--syntax-teal);
+    color: var(--overlay-accent);
   }
 
   .empty-state p {
