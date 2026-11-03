@@ -377,11 +377,20 @@ input[type="color"]::-webkit-color-swatch {
 /* Tree View */
 .tree-node {
   font-size: 13px;
-  margin-bottom: 2px;
+}
+
+/* Prim-tree virtualization (Task 9): the windowed row slot. Height is set
+   inline from the ROW_HEIGHT constant in treeWindowing.ts. */
+.tree-row {
+  position: absolute;
+  left: 0;
+  right: 0;
 }
 
 .tree-node-label {
   padding: 4px;
+  height: 28px;
+  box-sizing: border-box;
   color: var(--text);
   display: flex;
   align-items: center;

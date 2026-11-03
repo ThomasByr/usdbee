@@ -4,7 +4,6 @@
   import { isGprim } from "$lib/stage/treeUtils";
   import Icon from "$lib/components/icons/Icon.svelte";
   import AppearancePopover from "./AppearancePopover.svelte";
-  import PrimTreeNode from "./PrimTreeNode.svelte";
 
   let {
     node,
@@ -21,6 +20,8 @@
   } = $props();
 
   const hasChildren = $derived(node.children.length > 0);
+  // Open state drives the toggle glyph only — PrimTree owns the windowed
+  // render list, so no recursive child rendering here.
   const open = $derived(forceOpen || expandedPaths[node.path] === true);
   const selected = $derived(stageState.selectedPath === node.path);
   // Appearance targets are non-instanced gprims; the backend edit arms
@@ -38,9 +39,7 @@
   const authoredInvisible = $derived.by(() => {
     const details = stageState.details;
     if (details && details.path === node.path) {
-      return (
-        (details.metadata.find(([field]) => field === "visibility")?.[1].data as string) === "invisible"
-      );
+      return (details.metadata.find(([field]) => field === "visibility")?.[1].data as string) === "invisible";
     }
     return rowInvisible;
   });
@@ -146,12 +145,5 @@
   </div>
   {#if popoverOpen && popoverAnchor}
     <AppearancePopover primPath={node.path} anchor={popoverAnchor} onClose={() => (popoverOpen = false)} />
-  {/if}
-  {#if hasChildren && open}
-    <div class="tree-node-children">
-      {#each node.children as child (child.path)}
-        <PrimTreeNode depth={depth + 1} {expandedPaths} {forceOpen} {onHighlight} node={child} />
-      {/each}
-    </div>
   {/if}
 </div>

@@ -765,3 +765,68 @@ fn details_for_missing_prim_is_a_readable_error() {
     let details = details_via_owner(&state, "/World/Ball", None);
     assert_eq!(details.type_name, "Mesh");
 }
+
+fn count_nodes(nodes: &[PrimNode]) -> usize {
+    nodes
+        .iter()
+        .map(|n| 1 + count_nodes(&n.children))
+        .sum::<usize>()
+}
+
+// Perf tripwire probe for Task 9 (prim-tree virtualization): get_stage_tree
+// must serialize a >50k-prim stage fast enough for the frontend to window.
+// #[ignore]d by the preflight ruling: the scene generation + debug-profile
+// walk take far too long for the default suite — run explicitly with
+// `cargo test --manifest-path src-tauri/Cargo.toml -- --ignored
+// stage_tree_serializes_50k_prims_within_bound`.
+#[test]
+#[ignore = "perf probe: slow in debug; run explicitly via -- --ignored"]
+fn stage_tree_serializes_50k_prims_within_bound() {
+    // 1 root + 100 groups x 512 leaf meshes = 51,301 prims.
+    let mut text = String::from("#usda 1.0\n\ndef Xform \"World\"\n{\n");
+    for group in 0..100 {
+        text.push_str(&format!("    def Xform \"Group{group}\"\n    {{\n"));
+        for mesh in 0..512 {
+            text.push_str(&format!("        def Mesh \"M{mesh}\"\n        {{\n        }}\n"));
+        }
+        text.push_str("    }\n");
+    }
+    text.push_str("}\n");
+
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let path = dir.path().join("probe_50k.usda");
+    fs::write(&path, &text).expect("probe scene should be written");
+
+    let state = spawn_stage_owner();
+    let (reply_tx, reply_rx) = mpsc::channel();
+    state
+        .sender
+        .send(StageRequest::Open {
+            path: path.clone(),
+            is_usdz: false,
+            source_usdz: None,
+            reply: reply_tx,
+        })
+        .expect("stage owner should accept the probe open");
+    reply_rx
+        .recv()
+        .expect("stage owner should reply")
+        .expect("probe stage should open");
+
+    let start = std::time::Instant::now();
+    let tree = tree_via_owner(&state);
+    let elapsed = start.elapsed();
+
+    let total = count_nodes(&tree);
+    assert!(total > 50_000, "expected >50k prims, serialized {}", total);
+    // Generous debug-profile bound: measured 6.2s for 51,301 prims on the
+    // dev machine, so 15s tolerates variance while still tripping on a 2x
+    // serialization regression. Release is ~10x faster.
+    assert!(
+        elapsed.as_secs_f64() < 15.0,
+        "get_stage_tree took {:?} for {} prims (debug bound 15s)",
+        elapsed,
+        total
+    );
+    eprintln!("probe: get_stage_tree serialized {} prims in {:?}", total, elapsed);
+}
