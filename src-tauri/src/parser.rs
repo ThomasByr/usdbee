@@ -1,4 +1,4 @@
-use crate::fetcher::{fetch_and_cache_url, get_usdbee_cache_dir};
+use crate::fetcher::{cached_path_for, fetch_and_cache_url, get_usdbee_cache_dir};
 use crate::models::UsdDependencyNode;
 use crate::omniverse::resolve_omniverse_uri;
 
@@ -195,6 +195,27 @@ mod tests {
         path
     }
 
+    // The download cache persists across runs and is keyed by URL hash, and
+    // these tests' URLs embed an ephemeral port. A stale entry from a previous
+    // run that rebound the same port makes fetch_and_cache_url skip the HTTP
+    // call entirely — that short-circuit was the original flake in the 404
+    // test. Evicting each remote URL's entry keeps every run on the wire.
+    fn evict_cached_download(url: &str) {
+        let _ = fs::remove_file(cached_path_for(url, &get_usdbee_cache_dir()));
+    }
+
+    fn resolve_remote(scan: &mut DependencyScan) -> Result<(), String> {
+        for url in scan
+            .entries
+            .iter()
+            .filter(|e| is_remote(&e.key))
+            .map(|e| e.key.clone())
+        {
+            evict_cached_download(&url);
+        }
+        resolve_remote_dependencies(scan, "")
+    }
+
     fn scan(dir: &Path, name: &str) -> DependencyScan {
         scan_dependencies(&dir.join(name)).unwrap()
     }
@@ -270,7 +291,7 @@ mod tests {
         write_usda(dir.path(), "asset.usda", "#usda 1.0\ndef \"A\"\n{\n}\n");
 
         let mut deps = scan(dir.path(), "root.usda");
-        resolve_remote_dependencies(&mut deps, "").unwrap();
+        resolve_remote(&mut deps).unwrap();
 
         let local = deps
             .entries
@@ -298,7 +319,7 @@ mod tests {
         );
 
         let mut deps = scan(dir.path(), "root.usda");
-        let result = resolve_remote_dependencies(&mut deps, "");
+        let result = resolve_remote(&mut deps);
 
         let err = match result {
             Err(e) => e,
@@ -332,7 +353,7 @@ mod tests {
             .expect("remote dep is keyed by its original URL");
         assert!(!dep.node.resolved, "not fetched until resolve_remote runs");
 
-        resolve_remote_dependencies(&mut deps, "").unwrap();
+        resolve_remote(&mut deps).unwrap();
 
         let dep = deps
             .entries
@@ -347,4 +368,36 @@ mod tests {
         assert!(dep.node.error_msg.is_none());
         assert!(!dep.node.path.starts_with("http"), "path is the cache file");
     }
+
+    // Regression for the original remote_fetch_failure flake: the download
+    // cache persists across runs keyed by URL hash, and test URLs embed an
+    // ephemeral port. A previous run that fetched the same port's URL left a
+    // cache entry; a later run rebinding that port must still see the 404
+    // fail instead of "succeeding" from the stale cache.
+    #[test]
+    fn stale_cache_entry_does_not_mask_a_failed_download() {
+        let port = spawn_http_server(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let url = format!("http://127.0.0.1:{}/tex.png", port);
+
+        let cache_dir = get_usdbee_cache_dir();
+        let stale = cached_path_for(&url, &cache_dir);
+        fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        fs::write(&stale, b"stale bytes from a previous run").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        write_usda(
+            dir.path(),
+            "root.usda",
+            &format!("#usda 1.0\ndef \"R\"\n{{\n    asset t = @{url}@\n}}\n"),
+        );
+
+        let mut deps = scan(dir.path(), "root.usda");
+        let result = resolve_remote(&mut deps);
+
+        let err = result.expect_err("the evicted stale entry must not mask the 404");
+        assert!(err.contains("Failed to download"), "got: {err}");
+    }
 }
+

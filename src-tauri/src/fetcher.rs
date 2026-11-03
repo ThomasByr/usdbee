@@ -15,18 +15,22 @@ pub fn get_usdbee_cache_dir() -> PathBuf {
     dir
 }
 
-pub fn fetch_and_cache_url(url: &str, cache_base_dir: &Path) -> Result<PathBuf, String> {
+/// The hashed cache file a URL maps to. `pub(crate)` so tests can evict
+/// stale entries from previous runs before exercising the download path.
+pub(crate) fn cached_path_for(url: &str, cache_base_dir: &Path) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     url.hash(&mut hasher);
-    let hash = hasher.finish();
 
     let ext = Path::new(url.split('?').next().unwrap_or(url))
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("bin");
 
-    let safe_name = format!("{:016x}.{}", hash, ext);
-    let cached_path = cache_base_dir.join(&safe_name);
+    cache_base_dir.join(format!("{:016x}.{}", hasher.finish(), ext))
+}
+
+pub fn fetch_and_cache_url(url: &str, cache_base_dir: &Path) -> Result<PathBuf, String> {
+    let cached_path = cached_path_for(url, cache_base_dir);
 
     if cached_path.exists() {
         materialize_url_alias(url, cache_base_dir, &cached_path)?;
