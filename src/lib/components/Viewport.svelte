@@ -205,7 +205,7 @@
       <span
         class="timeline-time"
         title={`${timeCodesPerSecond} fps`}>{formatTimeline(
-          viewer.animationProgress,
+          viewer.animationProgress + startTimeCode(),
           timeCodesPerSecond,
           playbackState.timelineUnits,
         )}
