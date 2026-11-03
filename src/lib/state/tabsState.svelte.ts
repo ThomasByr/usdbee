@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { stageState } from "../stage/stageState.svelte";
 import { editState } from "./editState.svelte";
 import { layerTextState } from "./layerTextState.svelte";
-import { loadOrchestrator, type DependencyMap } from "./loadOrchestrator.svelte";
+import { loadOrchestrator, OPEN_IN_FLIGHT_MESSAGE, type DependencyMap } from "./loadOrchestrator.svelte";
 import { recentFiles } from "./recentFiles.svelte";
 import { confirmCloseNeeded } from "./closeGuard";
 import type { StageInfo, StageSummary } from "../stage/types";
@@ -130,7 +130,14 @@ export const tabsState = $state({
       await invoke<StageInfo>("open_usd_file_path", { path });
       await completion;
     } catch (e) {
-      await loadOrchestrator.failOpen("Failed to open USD:\n\n" + (typeof e === "string" ? e : String(e)));
+      const message = typeof e === "string" ? e : String(e);
+      if (message === OPEN_IN_FLIGHT_MESSAGE) {
+        // A backend gate refusal is not a failure: nothing loaded, nothing
+        // to restore — surface the refusal and release the slot.
+        loadOrchestrator.refuseOpen();
+      } else {
+        await loadOrchestrator.failOpen("Failed to open USD:\n\n" + message);
+      }
     }
   },
 

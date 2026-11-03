@@ -1,11 +1,10 @@
 mod commands;
 mod fetcher;
-pub use commands::LoadGate;
+pub use commands::{open_usd_file_path, LoadGate, OPEN_IN_FLIGHT_MESSAGE};
 pub use fetcher::get_usdbee_cache_dir;
 pub mod materials;
 mod models;
 mod omniverse;
-pub use commands::open_usd_file_path;
 pub use omniverse::AppState;
 pub mod parser;
 pub mod stage;

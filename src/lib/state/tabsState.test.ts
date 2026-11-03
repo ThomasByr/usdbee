@@ -269,6 +269,63 @@ describe("openTab", () => {
     expect(recentFiles.entries.map((entry) => entry.path)).toEqual(["/scene/slow.usda"]);
   });
 
+  it("a refused second stream adopts nothing after the first open finishes", async () => {
+    const pending = deferred<StageInfo>();
+    mockedInvoke.mockImplementationOnce(() => pending.promise);
+    const first = tabsState.openTab("/scene/slow.usda");
+    fireEvent("usd-load-start", "/scene/slow.usda");
+    // A dialog-initiated second open is refused mid-flight.
+    fireEvent("usd-load-start", "/scene/dialog.usda");
+    expect(loadOrchestrator.modalError).toContain("already opening");
+
+    // The first open completes and frees the slot.
+    const info = stageInfoFor(1, "/scene/slow.usda");
+    fireEvent("usd-scene-loaded", { root_file: "/scene/slow.usda", dependencies: {} });
+    fireEvent("usd-stage-opened", info);
+    pending.resolve(info);
+    await first;
+    expect(tabsState.activeId).toBe(1);
+
+    // The refused stream finishes backend-side afterwards: no tab, no
+    // recent entry, no activation, and its orphan stage is closed.
+    fireEvent("usd-load-progress", { stage: "Opening File", percent: 60 });
+    fireEvent("usd-scene-loaded", {
+      root_file: "/scene/dialog.usda",
+      dependencies: { "/dialog.dep": { path: "/dialog.dep", resolved: true, size_bytes: 1 } },
+    });
+    fireEvent("usd-stage-opened", stageInfoFor(9, "/scene/dialog.usda"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(tabsState.stages.map((tab) => tab.stage_id)).toEqual([1]);
+    expect(tabsState.activeId).toBe(1);
+    expect(stageState.stageInfo?.stage_id).toBe(1);
+    expect(loadOrchestrator.rootFile).toBe("/scene/slow.usda");
+    expect(loadOrchestrator.dependencies).toEqual({});
+    expect(loadOrchestrator.loadingProgress).toBeNull();
+    expect(recentFiles.entries.map((entry) => entry.path)).toEqual(["/scene/slow.usda"]);
+    expect(mockedInvoke).toHaveBeenCalledWith("close_stage", { stageId: 9 });
+  });
+
+  it("a backend gate refusal of a path open releases the slot without failing the open", async () => {
+    mockedInvoke.mockImplementationOnce(() =>
+      Promise.reject("A USD file is already opening. Wait for it to finish before opening another."),
+    );
+
+    await tabsState.openTab("/scene/b.usda");
+
+    expect(loadOrchestrator.modalError).toContain("already opening");
+    expect(loadOrchestrator.modalError).not.toContain("Failed to open USD");
+    expect(tabsState.stages).toHaveLength(0);
+    expect(recentFiles.entries).toEqual([]);
+    // No stage was minted for a gate refusal, so nothing needs closing.
+    expect(mockedInvoke).not.toHaveBeenCalledWith("close_stage", expect.anything());
+
+    // The refusal released the slot: the next open proceeds normally.
+    await openTab("/scene/a.usda");
+    expect(tabsState.stages.map((tab) => tab.root_file)).toEqual(["/scene/a.usda"]);
+    expect(tabsState.activeId).toBe(1);
+  });
+
   it("adopts the opening file's own path after a mid-open tab switch", async () => {
     await openTab("/scene/b.usda");
     await openTab("/scene/c.usda");

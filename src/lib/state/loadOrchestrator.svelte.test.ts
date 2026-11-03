@@ -237,4 +237,99 @@ describe("init event subscriptions", () => {
     expect(stageState.stageInfo).toEqual(stageInfo);
     expect(stageState.status).toBe("ready");
   });
+
+  it("drops a gate refusal arriving on the load-error channel without failing the open", async () => {
+    await loadOrchestrator.init(noHooks);
+    handlerFor["usd-load-start"]({ payload: "/scene/archive.usdz" });
+
+    handlerFor["usd-load-error"]({
+      payload: "A USD file is already opening. Wait for it to finish before opening another.",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The refusal is not a failure of THIS open: no restore, no modal, the
+    // requested path stays pinned on the open.
+    expect(loadOrchestrator.modalError).toBeNull();
+    expect(loadOrchestrator.rootFile).toBe("/scene/archive.usdz");
+    expect(loadOrchestrator.loadingProgress).toEqual({ stage: "Starting...", percent: 0 });
+
+    // The first open's stream still adopts with its own requested path.
+    mockedInvoke.mockResolvedValue([]);
+    handlerFor["usd-scene-loaded"]({
+      payload: { root_file: "/tmp/usdbee/extracted/root.usda", dependencies: deps },
+    });
+    handlerFor["usd-stage-opened"]({
+      payload: { ...stageInfo, root_layer: "/tmp/usdbee/extracted/root.usda" },
+    });
+    await vi.waitFor(() => expect(stageState.stageInfo?.root_layer).toBe("/tmp/usdbee/extracted/root.usda"));
+  });
+
+  it("closes a refused stream's orphan stage after the first open finishes", async () => {
+    await loadOrchestrator.init(noHooks);
+    mockedInvoke.mockResolvedValue([]);
+    stageState.stageInfo = null;
+
+    handlerFor["usd-load-start"]({ payload: "/scene/a.usda" });
+    // A second dialog open is refused while the first is in flight.
+    handlerFor["usd-load-start"]({ payload: "/scene/b.usda" });
+    expect(loadOrchestrator.modalError).toContain("already opening");
+
+    // The first open completes and frees the slot.
+    handlerFor["usd-scene-loaded"]({ payload: { root_file: "/scene/a.usda", dependencies: deps } });
+    handlerFor["usd-stage-opened"]({ payload: { ...stageInfo, root_layer: "/scene/a.usda" } });
+    loadOrchestrator.finishOpen();
+    await vi.waitFor(() => expect(stageState.stageInfo?.root_layer).toBe("/scene/a.usda"));
+
+    // The refused stream completes backend-side AFTER the first finished:
+    // it must adopt nothing and its stage must be closed, not orphaned.
+    handlerFor["usd-scene-loaded"]({
+      payload: { root_file: "/scene/b.usda", dependencies: { "/b.dep": { path: "/b.dep", resolved: true, size_bytes: 1 } } },
+    });
+    handlerFor["usd-stage-opened"]({ payload: { ...stageInfo, stage_id: 9, root_layer: "/scene/b.usda" } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mockedInvoke).toHaveBeenCalledWith("close_stage", { stageId: 9 });
+    const adopted = stageState.stageInfo as { root_layer: string } | null;
+    expect(adopted?.root_layer).toBe("/scene/a.usda");
+    expect(loadOrchestrator.dependencies).toEqual(deps);
+    expect(loadOrchestrator.loadingProgress).toBeNull();
+  });
+
+  it("keeps the failure modal when a second load-start arrives during the failure restore", async () => {
+    let resolveRestore!: () => void;
+    const restore = new Promise<void>((resolve) => {
+      resolveRestore = resolve;
+    });
+    const loadScene = vi.fn(() => restore);
+    await loadOrchestrator.init({ resetScene: () => {}, loadScene });
+    loadOrchestrator.rootFile = "/scene/current.usda";
+    loadOrchestrator.dependencies = { ...deps };
+
+    handlerFor["usd-load-start"]({ payload: "/scene/broken.usda" });
+    handlerFor["usd-load-error"]({ payload: "bad layer" });
+
+    // A second open starts while the restore is still in flight: the
+    // refusal must not overwrite the actual failure message.
+    handlerFor["usd-load-start"]({ payload: "/scene/other.usda" });
+
+    expect(loadOrchestrator.modalError).toBe("Failed to extract or load USD: bad layer");
+    expect(loadOrchestrator.rootFile).toBe("/scene/current.usda");
+
+    resolveRestore();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(loadOrchestrator.modalError).toBe("Failed to extract or load USD: bad layer");
+
+    // The refused second stream adopts nothing once the restore finished.
+    mockedInvoke.mockResolvedValue(undefined);
+    handlerFor["usd-scene-loaded"]({ payload: { root_file: "/scene/other.usda", dependencies: {} } });
+    handlerFor["usd-stage-opened"]({
+      payload: { ...stageInfo, stage_id: 8, root_layer: "/scene/other.usda" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mockedInvoke).toHaveBeenCalledWith("close_stage", { stageId: 8 });
+    expect(loadOrchestrator.dependencies).toEqual(deps);
+    expect(loadOrchestrator.rootFile).toBe("/scene/current.usda");
+  });
 });

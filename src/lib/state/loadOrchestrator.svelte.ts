@@ -58,8 +58,17 @@ interface ActiveOpen {
   resolve: () => void;
 }
 
-const OPEN_IN_FLIGHT_MESSAGE = "A USD file is already opening. Wait for it to finish before opening another.";
+export const OPEN_IN_FLIGHT_MESSAGE = "A USD file is already opening. Wait for it to finish before opening another.";
 let activeOpen: ActiveOpen | null = null;
+// A refused open's stream can outlive the active open (the backend keeps
+// loading it): its identity is pinned here until its own terminal event,
+// so its late events stay dropped and its orphan stage gets closed even
+// after finishOpen/failOpen cleared the active open. The backend LoadGate
+// guarantees at most one refused stream is mid-flight at a time.
+let refusedOpen: { sceneRoot: string | null } | null = null;
+// True while a failed open is still restoring the previous tab's scene:
+// a refusal arriving now must not overwrite the real failure message.
+let restoringAfterFailure = false;
 let sceneHooks: LoadHooks | null = null;
 
 function startOpen(): ActiveOpen {
@@ -127,7 +136,8 @@ export const loadOrchestrator = $state({
   // from racing that moment.
   acceptsSceneLoaded(rootFile: string): boolean {
     const operation = activeOpen;
-    if (!operation?.started) return true;
+    if (!operation) return refusedOpen === null;
+    if (!operation.started) return true;
     return (
       rootFile === operation.sceneRoot ||
       rootFile === operation.requestedPath ||
@@ -137,8 +147,10 @@ export const loadOrchestrator = $state({
 
   acceptsStageOpened(info: StageInfo): boolean {
     const operation = activeOpen;
-    if (!operation?.started) return true;
-    return info.root_layer === operation.sceneRoot;
+    if (operation?.started) return info.root_layer === operation.sceneRoot;
+    // No open in flight: a pending refusal's late stage-opened must never
+    // adopt — it is dropped and its orphan stage closed instead.
+    return refusedOpen === null;
   },
 
   // Ask the backend to show the file-open dialog; the chosen path comes
@@ -148,7 +160,7 @@ export const loadOrchestrator = $state({
   // plus the backend's LoadGate.
   async openUsdFile(): Promise<void> {
     if (activeOpen) {
-      this.openErrorModal(OPEN_IN_FLIGHT_MESSAGE);
+      if (!restoringAfterFailure) this.openErrorModal(OPEN_IN_FLIGHT_MESSAGE);
       return;
     }
     try {
@@ -163,10 +175,18 @@ export const loadOrchestrator = $state({
   // only after the tab has adopted the stage (or the failure was restored).
   beginPathOpen(): Promise<void> | null {
     if (activeOpen) {
-      this.openErrorModal(OPEN_IN_FLIGHT_MESSAGE);
+      if (!restoringAfterFailure) this.openErrorModal(OPEN_IN_FLIGHT_MESSAGE);
       return null;
     }
     return startOpen().completion;
+  },
+
+  // A backend gate refusal answering a path open: nothing was loaded, so
+  // nothing is restored — release the slot and surface the readable
+  // refusal, never the failure channel.
+  refuseOpen(): void {
+    this.openErrorModal(OPEN_IN_FLIGHT_MESSAGE);
+    this.finishOpen();
   },
 
   finishOpen(): void {
@@ -179,6 +199,7 @@ export const loadOrchestrator = $state({
     const operation = activeOpen;
     this.loadingProgress = null;
     this.openErrorModal(message);
+    restoringAfterFailure = true;
     try {
       if (operation?.snapshot && operation.snapshot.stageId === stageState.activeStageId) {
         this.rootFile = operation.snapshot.rootFile;
@@ -186,6 +207,7 @@ export const loadOrchestrator = $state({
         if (operation.snapshot.rootFile !== null) await sceneHooks?.loadScene();
       }
     } finally {
+      restoringAfterFailure = false;
       if (activeOpen === operation) {
         activeOpen = null;
         operation?.resolve();
@@ -199,17 +221,29 @@ export const loadOrchestrator = $state({
     sceneHooks = hooks;
     const unlistens = await Promise.all([
       listen<string>("usd-load-error", (event) => {
+        // Belt-and-suspenders: the dialog wrapper already skips emitting a
+        // gate refusal here; drop it anyway so it can never run the first
+        // open's failure restoration.
+        if (event.payload === OPEN_IN_FLIGHT_MESSAGE) return;
         if (activeOpen?.ignoringForeign) return;
+        if (!activeOpen && refusedOpen) {
+          // The refused stream failed backend-side; its refusal was
+          // already surfaced, so drop its terminal error too.
+          refusedOpen = null;
+          return;
+        }
         void this.failOpen(loadErrorMessage(event.payload));
       }),
       listen<string>("usd-load-start", (event) => {
         const operation = activeOpen ?? startOpen();
         if (operation.started) {
           // A second load-start (dialog/native-menu flow) while this open
-          // is still in flight: refuse it and ignore the rest of its
-          // stream so the first open completes untouched.
+          // is still in flight: refuse it, keep its identity past this
+          // open's lifetime, and ignore the rest of its stream so the
+          // first open completes untouched.
+          refusedOpen = { sceneRoot: null };
           operation.ignoringForeign = true;
-          this.openErrorModal(OPEN_IN_FLIGHT_MESSAGE);
+          if (!restoringAfterFailure) this.openErrorModal(OPEN_IN_FLIGHT_MESSAGE);
           return;
         }
         operation.started = true;
@@ -227,23 +261,40 @@ export const loadOrchestrator = $state({
       }),
       listen<LoadProgress>("usd-load-progress", (event) => {
         if (activeOpen?.ignoringForeign) return;
+        if (!activeOpen && refusedOpen) return;
         this.loadingProgress = event.payload;
       }),
       listen<StageInfo>("usd-stage-opened", (event) => {
-        if (!this.acceptsStageOpened(event.payload)) return;
-        stageState.adoptOpenedStage(event.payload);
+        const info = event.payload;
+        if (!this.acceptsStageOpened(info)) {
+          // A refused open completed backend-side with no tab: close its
+          // stage so it does not linger invisibly.
+          refusedOpen = null;
+          void invoke("close_stage", { stageId: info.stage_id }).catch(() => {});
+          return;
+        }
+        stageState.adoptOpenedStage(info);
         // Re-query the edit target + dirty layers: the previous stage's
         // dirty set must not survive into the new open.
         void editState.refresh();
       }),
       listen<{ root_file: string; dependencies: DependencyMap }>("usd-scene-loaded", (event) => {
-        if (!this.acceptsSceneLoaded(event.payload.root_file)) return;
-        if (activeOpen) activeOpen.sceneRoot = event.payload.root_file;
+        const rootFile = event.payload.root_file;
+        if (!this.acceptsSceneLoaded(rootFile)) {
+          // A refused stream's scene-loaded: pin its root so its
+          // stage-opened is dropped (and its orphan stage closed) even
+          // after the active open finishes.
+          if (refusedOpen) refusedOpen.sceneRoot ??= rootFile;
+          return;
+        }
+        if (activeOpen) activeOpen.sceneRoot = rootFile;
         void this.handleSceneLoaded(event.payload, hooks);
       }),
       listen<string>("usd-load-refused", (event) => {
         // The backend refused to start a load while one was running
-        // (native menu); surface it without touching the in-flight open.
+        // (native menu); surface it once, without touching the in-flight
+        // open or a failure restore in progress.
+        if (restoringAfterFailure) return;
         this.openErrorModal(event.payload);
       }),
     ]);

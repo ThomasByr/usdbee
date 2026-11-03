@@ -11,6 +11,23 @@ use std::path::Path;
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
+/// The readable refusal a second open receives while one runs. It is not a
+/// load failure: it reaches the frontend through the usd-load-refused
+/// event (plus the command's Err for path opens), never usd-load-error —
+/// a load-error would trip the first open's failure restoration.
+pub const OPEN_IN_FLIGHT_MESSAGE: &str =
+    "A USD file is already opening. Wait for it to finish before opening another.";
+
+/// The dialog flow's failure channel: gate refusals are filtered out because
+/// usd-load-refused already carried the notice.
+pub(crate) fn dialog_load_error(err: &str) -> Option<String> {
+    if err == OPEN_IN_FLIGHT_MESSAGE {
+        None
+    } else {
+        Some(err.to_string())
+    }
+}
+
 /// Serializes opens at the source: the native menu's dialog cannot be
 /// intercepted from JS, so the backend refuses a second load while one is
 /// running. The frontend's own slot spans tab adoption, so the JS listener
@@ -21,7 +38,7 @@ pub struct LoadGate {
 }
 
 impl LoadGate {
-    fn claim(&self) -> Option<GateClaim<'_>> {
+    pub fn claim(&self) -> Option<GateClaim<'_>> {
         if self
             .claimed
             .compare_exchange(
@@ -40,7 +57,7 @@ impl LoadGate {
 }
 
 /// Released on drop (also on panic), so the gate can never leak.
-struct GateClaim<'a>(&'a LoadGate);
+pub struct GateClaim<'a>(&'a LoadGate);
 
 impl Drop for GateClaim<'_> {
     fn drop(&mut self) {
@@ -61,8 +78,10 @@ pub async fn trigger_open_usd_dialog(app: tauri::AppHandle) -> Result<(), String
                 let app_clone = app.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = process_usd_file(app_clone.clone(), path_str).await {
-                        eprintln!("Error loading USD: {}", e);
-                        let _ = app_clone.emit("usd-load-error", e);
+                        if let Some(e) = dialog_load_error(&e) {
+                            eprintln!("Error loading USD: {}", e);
+                            let _ = app_clone.emit("usd-load-error", e);
+                        }
                     }
                 });
             }
@@ -204,11 +223,8 @@ async fn process_usd_file<R: tauri::Runtime>(
 ) -> Result<StageInfo, String> {
     let gate = app.state::<LoadGate>();
     let Some(_claim) = gate.claim() else {
-        let message =
-            "A USD file is already opening. Wait for it to finish before opening another."
-                .to_string();
-        let _ = app.emit("usd-load-refused", message.clone());
-        return Err(message);
+        let _ = app.emit("usd-load-refused", OPEN_IN_FLIGHT_MESSAGE);
+        return Err(OPEN_IN_FLIGHT_MESSAGE.to_string());
     };
     process_usd_file_inner(&app, path).await
 }
@@ -548,6 +564,15 @@ mod tests {
         assert!(gate.claim().is_none(), "a second claim must be refused");
         drop(first);
         assert!(gate.claim().is_some(), "release must reopen the gate");
+    }
+
+    #[test]
+    fn gate_refusal_never_rides_the_dialog_failure_channel() {
+        assert_eq!(dialog_load_error(OPEN_IN_FLIGHT_MESSAGE), None);
+        assert_eq!(
+            dialog_load_error("File does not exist"),
+            Some("File does not exist".to_string())
+        );
     }
 
     #[test]

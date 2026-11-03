@@ -3,11 +3,11 @@
 // scan, stage open — and return the opened stage's info.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use tauri::Manager;
+use tauri::{Listener, Manager};
 use usdbee_lib::get_usdbee_cache_dir;
-use usdbee_lib::{open_usd_file_path, AppState};
+use usdbee_lib::{open_usd_file_path, AppState, LoadGate, OPEN_IN_FLIGHT_MESSAGE};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -22,7 +22,7 @@ fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
     app.manage(usdbee_lib::stage::StageState::new(
         usdbee_lib::stage::noop_sink(),
     ));
-    app.manage(usdbee_lib::LoadGate::default());
+    app.manage(LoadGate::default());
     app.manage(AppState {
         omniverse_server: Mutex::new("http://localhost:34080".into()),
     });
@@ -93,5 +93,52 @@ fn missing_path_is_a_readable_error() {
         err.to_lowercase().contains("exist"),
         "the error must name the problem, got: {}",
         err
+    );
+}
+
+#[test]
+fn gate_refusal_surfaces_through_the_refused_channel_only() {
+    let app = mock_app();
+    let gate = app.state::<LoadGate>();
+    let _claim = gate.claim().expect("the test must hold the gate");
+
+    let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    for name in ["usd-load-start", "usd-load-error", "usd-load-refused"] {
+        let sink = seen.clone();
+        app.listen(name, move |event| {
+            sink.lock()
+                .unwrap()
+                .push((name.to_string(), event.payload().to_string()));
+        });
+    }
+
+    let err = tauri::async_runtime::block_on(open_usd_file_path(
+        app.handle().clone(),
+        fixture("basic.usda").to_string_lossy().into_owned(),
+    ))
+    .expect_err("an open while the gate is held must be refused");
+
+    assert_eq!(err, OPEN_IN_FLIGHT_MESSAGE, "the refusal must be readable");
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        seen.iter()
+            .filter(|(name, _)| name == "usd-load-refused")
+            .count(),
+        1,
+        "the refusal must be surfaced exactly once"
+    );
+    assert!(
+        seen.iter().any(
+            |(name, payload)| name == "usd-load-refused" && payload.contains("already opening")
+        ),
+        "the refusal must carry the readable message"
+    );
+    assert!(
+        !seen.iter().any(|(name, _)| name == "usd-load-error"),
+        "a refusal must never ride the failure channel"
+    );
+    assert!(
+        !seen.iter().any(|(name, _)| name == "usd-load-start"),
+        "a refused open must not start a load stream"
     );
 }
