@@ -1,5 +1,6 @@
 mod commands;
 mod fetcher;
+pub use commands::LoadGate;
 pub use fetcher::get_usdbee_cache_dir;
 pub mod materials;
 mod models;
@@ -46,6 +47,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            app.manage(LoadGate::default());
             let handle = app.handle().clone();
             app.manage(stage::StageState::new(std::sync::Arc::new(
                 move |stage_id: u64, paths: &[String]| {

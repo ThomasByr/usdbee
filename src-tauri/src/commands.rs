@@ -11,6 +11,45 @@ use std::path::Path;
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
+/// Serializes opens at the source: the native menu's dialog cannot be
+/// intercepted from JS, so the backend refuses a second load while one is
+/// running. The frontend's own slot spans tab adoption, so the JS listener
+/// still guards the gap after this gate releases.
+#[derive(Default)]
+pub struct LoadGate {
+    claimed: std::sync::atomic::AtomicBool,
+}
+
+impl LoadGate {
+    fn claim(&self) -> Option<GateClaim<'_>> {
+        if self
+            .claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            Some(GateClaim(self))
+        } else {
+            None
+        }
+    }
+}
+
+/// Released on drop (also on panic), so the gate can never leak.
+struct GateClaim<'a>(&'a LoadGate);
+
+impl Drop for GateClaim<'_> {
+    fn drop(&mut self) {
+        self.0
+            .claimed
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 #[tauri::command]
 pub async fn trigger_open_usd_dialog(app: tauri::AppHandle) -> Result<(), String> {
     app.dialog()
@@ -156,9 +195,26 @@ async fn unpack_usdz(path: &str) -> Result<(String, std::path::PathBuf), String>
 
 // The shared open orchestration for the dialog flow and the path-based
 // command: emits the full usd-load-* event stream (start/progress/scene-
-// loaded/stage-opened) and returns the opened stage's info.
+// loaded/stage-opened) and returns the opened stage's info. Refused while
+// another load runs; the readable refusal reaches the frontend through
+// the usd-load-refused event (and the command's Err for path opens).
 async fn process_usd_file<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
+    path: String,
+) -> Result<StageInfo, String> {
+    let gate = app.state::<LoadGate>();
+    let Some(_claim) = gate.claim() else {
+        let message =
+            "A USD file is already opening. Wait for it to finish before opening another."
+                .to_string();
+        let _ = app.emit("usd-load-refused", message.clone());
+        return Err(message);
+    };
+    process_usd_file_inner(&app, path).await
+}
+
+async fn process_usd_file_inner<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     mut path: String,
 ) -> Result<StageInfo, String> {
     app.emit("usd-load-start", path.clone())
@@ -483,6 +539,15 @@ mod tests {
             sanitize_entry_name("assets/model.usdc", out),
             Some(out.join("assets/model.usdc"))
         );
+    }
+
+    #[test]
+    fn load_gate_serializes_concurrent_claims() {
+        let gate = LoadGate::default();
+        let first = gate.claim().expect("first claim must succeed");
+        assert!(gate.claim().is_none(), "a second claim must be refused");
+        drop(first);
+        assert!(gate.claim().is_some(), "release must reopen the gate");
     }
 
     #[test]

@@ -36,12 +36,24 @@ export interface LoadHooks {
 interface OpenSnapshot {
   stageId: number;
   rootFile: string | null;
-  requestedPath: string | null;
   dependencies: DependencyMap | null;
 }
 
 interface ActiveOpen {
   snapshot: OpenSnapshot | null;
+  // The requested path from THIS open's load-start (the pre-extraction
+  // path for usdz). Adoption consumes this per-operation record so a
+  // mid-open tab switch cannot reroute it.
+  requestedPath: string | null;
+  // The root layer this open reported through usd-scene-loaded; used to
+  // attribute late load events to their owning open.
+  sceneRoot: string | null;
+  // Whether this open's own usd-load-start already arrived.
+  started: boolean;
+  // Set once a second load-start is refused: that refused stream's
+  // progress and load-error events are ignored (its scene-loaded and
+  // stage-opened are dropped by root attribution).
+  ignoringForeign: boolean;
   completion: Promise<void>;
   resolve: () => void;
 }
@@ -55,7 +67,15 @@ function startOpen(): ActiveOpen {
   const completion = new Promise<void>((done) => {
     resolve = done;
   });
-  activeOpen = { snapshot: null, completion, resolve };
+  activeOpen = {
+    snapshot: null,
+    requestedPath: null,
+    sceneRoot: null,
+    started: false,
+    ignoringForeign: false,
+    completion,
+    resolve,
+  };
   return activeOpen;
 }
 
@@ -78,9 +98,6 @@ export function filterDependencies(
 
 export const loadOrchestrator = $state({
   rootFile: null as string | null,
-  // The path the user asked to open (usd-load-start's payload — the
-  // PRE-extraction path for usdz); recent files records this one.
-  requestedPath: null as string | null,
   loadingProgress: null as LoadProgress | null,
   dependencies: null as DependencyMap | null,
   filterText: "",
@@ -96,8 +113,39 @@ export const loadOrchestrator = $state({
     loadOrchestrator.modalError = null;
   },
 
+  // The requested path pinned on the active open's load-start; tab
+  // adoption consumes this per-operation value, never a shared global.
+  openRequestedPath(): string | null {
+    return activeOpen?.requestedPath ?? null;
+  },
+
+  // Event attribution: while an open is in flight, only events whose root
+  // matches that open belong to it — a refused second open's scene-loaded
+  // and stage-opened must not cross-wire the first open's state. A usdz
+  // open's first scene-loaded is accepted on trust (its extracted root is
+  // unknowable beforehand); the backend LoadGate keeps another stream
+  // from racing that moment.
+  acceptsSceneLoaded(rootFile: string): boolean {
+    const operation = activeOpen;
+    if (!operation?.started) return true;
+    return (
+      rootFile === operation.sceneRoot ||
+      rootFile === operation.requestedPath ||
+      (operation.sceneRoot === null && operation.requestedPath?.toLowerCase().endsWith(".usdz") === true)
+    );
+  },
+
+  acceptsStageOpened(info: StageInfo): boolean {
+    const operation = activeOpen;
+    if (!operation?.started) return true;
+    return info.root_layer === operation.sceneRoot;
+  },
+
   // Ask the backend to show the file-open dialog; the chosen path comes
   // back through the usd-load-start / usd-scene-loaded event stream.
+  // Only checked, not reserved: a dialog cancellation is unobservable
+  // from JS, so the universal guard lives in the usd-load-start listener
+  // plus the backend's LoadGate.
   async openUsdFile(): Promise<void> {
     if (activeOpen) {
       this.openErrorModal(OPEN_IN_FLIGHT_MESSAGE);
@@ -134,7 +182,6 @@ export const loadOrchestrator = $state({
     try {
       if (operation?.snapshot && operation.snapshot.stageId === stageState.activeStageId) {
         this.rootFile = operation.snapshot.rootFile;
-        this.requestedPath = operation.snapshot.requestedPath;
         this.dependencies = operation.snapshot.dependencies;
         if (operation.snapshot.rootFile !== null) await sceneHooks?.loadScene();
       }
@@ -152,34 +199,52 @@ export const loadOrchestrator = $state({
     sceneHooks = hooks;
     const unlistens = await Promise.all([
       listen<string>("usd-load-error", (event) => {
+        if (activeOpen?.ignoringForeign) return;
         void this.failOpen(loadErrorMessage(event.payload));
       }),
       listen<string>("usd-load-start", (event) => {
         const operation = activeOpen ?? startOpen();
+        if (operation.started) {
+          // A second load-start (dialog/native-menu flow) while this open
+          // is still in flight: refuse it and ignore the rest of its
+          // stream so the first open completes untouched.
+          operation.ignoringForeign = true;
+          this.openErrorModal(OPEN_IN_FLIGHT_MESSAGE);
+          return;
+        }
+        operation.started = true;
+        operation.requestedPath = event.payload;
         operation.snapshot ??= {
           stageId: stageState.activeStageId,
           rootFile: this.rootFile,
-          requestedPath: this.requestedPath,
           dependencies: this.dependencies,
         };
         this.rootFile = event.payload;
-        this.requestedPath = event.payload;
         this.loadingProgress = { stage: "Starting...", percent: 0 };
         this.dependencies = null;
 
         hooks.resetScene();
       }),
       listen<LoadProgress>("usd-load-progress", (event) => {
+        if (activeOpen?.ignoringForeign) return;
         this.loadingProgress = event.payload;
       }),
       listen<StageInfo>("usd-stage-opened", (event) => {
+        if (!this.acceptsStageOpened(event.payload)) return;
         stageState.adoptOpenedStage(event.payload);
         // Re-query the edit target + dirty layers: the previous stage's
         // dirty set must not survive into the new open.
         void editState.refresh();
       }),
       listen<{ root_file: string; dependencies: DependencyMap }>("usd-scene-loaded", (event) => {
+        if (!this.acceptsSceneLoaded(event.payload.root_file)) return;
+        if (activeOpen) activeOpen.sceneRoot = event.payload.root_file;
         void this.handleSceneLoaded(event.payload, hooks);
+      }),
+      listen<string>("usd-load-refused", (event) => {
+        // The backend refused to start a load while one was running
+        // (native menu); surface it without touching the in-flight open.
+        this.openErrorModal(event.payload);
       }),
     ]);
     return () => {
@@ -194,7 +259,7 @@ export const loadOrchestrator = $state({
     hooks: LoadHooks,
   ): Promise<void> {
     this.loadingProgress = null;
-    // rootFile/requestedPath stay on the user-facing path from load-start;
+    // rootFile stays on the user-facing path from load-start;
     // payload.root_file is the resolved layer (an extracted path for usdz).
     this.dependencies = payload.dependencies;
     await hooks.loadScene();

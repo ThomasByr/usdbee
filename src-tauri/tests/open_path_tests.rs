@@ -22,6 +22,7 @@ fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
     app.manage(usdbee_lib::stage::StageState::new(
         usdbee_lib::stage::noop_sink(),
     ));
+    app.manage(usdbee_lib::LoadGate::default());
     app.manage(AppState {
         omniverse_server: Mutex::new("http://localhost:34080".into()),
     });

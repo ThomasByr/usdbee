@@ -47,7 +47,6 @@ beforeEach(() => {
   mockedInvoke.mockReset();
   mockedListen.mockReset();
   loadOrchestrator.rootFile = null;
-  loadOrchestrator.requestedPath = null;
   loadOrchestrator.loadingProgress = null;
   loadOrchestrator.dependencies = null;
   loadOrchestrator.filterText = "";
@@ -103,7 +102,7 @@ describe("init event subscriptions", () => {
     });
   });
 
-  it("subscribes to the five load events and unlistens them all", async () => {
+  it("subscribes to the six load events and unlistens them all", async () => {
     const dispose = await loadOrchestrator.init(noHooks);
 
     for (const name of [
@@ -112,12 +111,24 @@ describe("init event subscriptions", () => {
       "usd-load-progress",
       "usd-stage-opened",
       "usd-scene-loaded",
+      "usd-load-refused",
     ]) {
       expect(mockedListen).toHaveBeenCalledWith(name, expect.any(Function));
     }
     expect(dispose).toBeTypeOf("function");
     dispose();
-    expect(unlisten).toHaveBeenCalledTimes(5);
+    expect(unlisten).toHaveBeenCalledTimes(6);
+  });
+
+  it("usd-load-refused surfaces the backend refusal without failing the open", async () => {
+    await loadOrchestrator.init(noHooks);
+
+    handlerFor["usd-load-refused"]({
+      payload: "A USD file is already opening. Wait for it to finish before opening another.",
+    });
+
+    expect(loadOrchestrator.modalError).toContain("already opening");
+    expect(loadOrchestrator.loadingProgress).toBeNull();
   });
 
   it("usd-load-start sets the root file, starts progress and resets the scene", async () => {
@@ -137,7 +148,6 @@ describe("init event subscriptions", () => {
     const loadScene = vi.fn().mockResolvedValue(undefined);
     await loadOrchestrator.init({ resetScene: () => {}, loadScene });
     loadOrchestrator.rootFile = "/scene/current.usda";
-    loadOrchestrator.requestedPath = "/scene/current.usda";
     loadOrchestrator.dependencies = { ...deps };
 
     handlerFor["usd-load-start"]({ payload: "/scene/broken.usdz" });
@@ -148,7 +158,6 @@ describe("init event subscriptions", () => {
     await vi.waitFor(() => expect(loadScene).toHaveBeenCalledTimes(1));
 
     expect(loadOrchestrator.rootFile).toBe("/scene/current.usda");
-    expect(loadOrchestrator.requestedPath).toBe("/scene/current.usda");
     expect(loadOrchestrator.dependencies).toEqual(deps);
     expect(loadOrchestrator.loadingProgress).toBeNull();
   });
@@ -158,19 +167,16 @@ describe("init event subscriptions", () => {
     await loadOrchestrator.init({ resetScene: () => {}, loadScene });
     stageState.activeStageId = 1;
     loadOrchestrator.rootFile = "/scene/a.usda";
-    loadOrchestrator.requestedPath = "/scene/a.usda";
     loadOrchestrator.dependencies = { ...deps };
 
     handlerFor["usd-load-start"]({ payload: "/scene/broken.usdz" });
     stageState.activeStageId = 2;
     loadOrchestrator.rootFile = "/scene/b.usda";
-    loadOrchestrator.requestedPath = "/scene/b.usda";
     loadOrchestrator.dependencies = {};
     handlerFor["usd-load-error"]({ payload: "bad archive" });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(loadOrchestrator.rootFile).toBe("/scene/b.usda");
-    expect(loadOrchestrator.requestedPath).toBe("/scene/b.usda");
     expect(loadOrchestrator.dependencies).toEqual({});
     expect(loadScene).not.toHaveBeenCalled();
   });

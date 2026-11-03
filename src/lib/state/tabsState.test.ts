@@ -151,7 +151,6 @@ beforeEach(async () => {
 
   layerTextState.draftDirty = false;
   loadOrchestrator.rootFile = null;
-  loadOrchestrator.requestedPath = null;
   loadOrchestrator.dependencies = null;
   loadOrchestrator.loadingProgress = null;
   loadOrchestrator.modalError = null;
@@ -223,8 +222,78 @@ describe("openTab", () => {
 
     expect(tabsState.stages[0].root_file).toBe("/scene/archive.usdz");
     expect(loadOrchestrator.rootFile).toBe("/scene/archive.usdz");
-    expect(loadOrchestrator.requestedPath).toBe("/scene/archive.usdz");
     expect(recentFiles.entries[0].path).toBe("/scene/archive.usdz");
+  });
+
+  it("refuses a dialog-initiated load-start while a path open is in flight", async () => {
+    const pending = deferred<StageInfo>();
+    mockedInvoke.mockImplementationOnce(() => pending.promise);
+    const first = tabsState.openTab("/scene/slow.usda");
+    fireEvent("usd-load-start", "/scene/slow.usda");
+
+    // A dialog-initiated second open (no JS reservation) arrives mid-flight.
+    fireEvent("usd-load-start", "/scene/dialog.usda");
+
+    expect(loadOrchestrator.modalError).toContain("already opening");
+    expect(loadOrchestrator.rootFile).toBe("/scene/slow.usda");
+    expect(loadOrchestrator.loadingProgress).toEqual({ stage: "Starting...", percent: 0 });
+    expect(tabsState.resetScene).toHaveBeenCalledTimes(1);
+
+    // The refused open's whole event stream is ignored.
+    fireEvent("usd-load-progress", { stage: "Opening File", percent: 60 });
+    expect(loadOrchestrator.loadingProgress).toEqual({ stage: "Starting...", percent: 0 });
+    fireEvent("usd-scene-loaded", {
+      root_file: "/scene/dialog.usda",
+      dependencies: { "/dialog.dep": { path: "/dialog.dep", resolved: true, size_bytes: 1 } },
+    });
+    expect(loadOrchestrator.dependencies).toBeNull();
+    fireEvent("usd-stage-opened", stageInfoFor(9, "/scene/dialog.usda"));
+    fireEvent("usd-load-error", "dialog stream failed");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(tabsState.stages).toHaveLength(0);
+    expect(stageState.stageInfo).toBeNull();
+    expect(loadOrchestrator.modalError).toContain("already opening");
+    expect(recentFiles.entries).toEqual([]);
+
+    // The first open completes with its own root, deps and recent entry.
+    const info = stageInfoFor(1, "/scene/slow.usda");
+    fireEvent("usd-scene-loaded", { root_file: "/scene/slow.usda", dependencies: {} });
+    fireEvent("usd-stage-opened", info);
+    pending.resolve(info);
+    await first;
+
+    expect(tabsState.stages.map((tab) => tab.root_file)).toEqual(["/scene/slow.usda"]);
+    expect(tabsState.activeId).toBe(1);
+    expect(loadOrchestrator.dependencies).toEqual({});
+    expect(recentFiles.entries.map((entry) => entry.path)).toEqual(["/scene/slow.usda"]);
+  });
+
+  it("adopts the opening file's own path after a mid-open tab switch", async () => {
+    await openTab("/scene/b.usda");
+    await openTab("/scene/c.usda");
+    const pending = deferred<StageInfo>();
+    mockedInvoke.mockImplementationOnce(() => pending.promise);
+    const opening = tabsState.openTab("/scene/a.usda");
+    fireEvent("usd-load-start", "/scene/a.usda");
+
+    // Switching tabs mid-open rewrites the active view's shared state.
+    await tabsState.setActive(1);
+    expect(loadOrchestrator.rootFile).toBe("/scene/b.usda");
+
+    const info = stageInfoFor(3, "/scene/a.usda");
+    fireEvent("usd-scene-loaded", { root_file: "/scene/a.usda", dependencies: {} });
+    fireEvent("usd-stage-opened", info);
+    pending.resolve(info);
+    await opening;
+
+    expect(tabsState.stages.find((tab) => tab.stage_id === 3)?.root_file).toBe("/scene/a.usda");
+    expect(recentFiles.entries.map((entry) => entry.path)).toEqual([
+      "/scene/a.usda",
+      "/scene/c.usda",
+      "/scene/b.usda",
+    ]);
+    expect(loadOrchestrator.rootFile).toBe("/scene/a.usda");
   });
 
   it("records the opened file in recent files", async () => {
@@ -255,7 +324,6 @@ describe("openTab", () => {
     expect(loadOrchestrator.modalError).toContain("cannot open: /bad.usda");
     expect(loadOrchestrator.loadingProgress).toBeNull();
     expect(loadOrchestrator.rootFile).toBe("/scene/a.usda");
-    expect(loadOrchestrator.requestedPath).toBe("/scene/a.usda");
     expect(loadOrchestrator.dependencies).toEqual({});
     expect(tabsState.loadScene).toHaveBeenCalledTimes(1);
     expect(recentFiles.entries.map((e) => e.path)).not.toContain("/bad.usda");

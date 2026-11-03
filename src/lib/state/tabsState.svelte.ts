@@ -91,9 +91,11 @@ export const tabsState = $state({
   // The extra loadScene supersedes whatever the usd-scene-loaded step
   // started: an open always ends with the viewport showing its stage.
   async adoptOpened(info: StageInfo): Promise<void> {
+    if (!loadOrchestrator.acceptsStageOpened(info)) return;
     // The user-facing path (pre-extraction for usdz) is what recent files,
-    // containing-folder reveal and the tab record all keep.
-    const rootFile = loadOrchestrator.requestedPath ?? info.root_layer;
+    // containing-folder reveal and the tab record all keep — pinned on
+    // THIS open's load-start, so a mid-open tab switch cannot reroute it.
+    const rootFile = loadOrchestrator.openRequestedPath() ?? info.root_layer;
     recentFiles.add(rootFile);
     this.register(info, rootFile, loadOrchestrator.dependencies);
     try {
@@ -141,7 +143,6 @@ export const tabsState = $state({
     const generation = ++activationGeneration;
     this.activeId = id;
     loadOrchestrator.rootFile = tab.root_file;
-    loadOrchestrator.requestedPath = tab.root_file;
     loadOrchestrator.dependencies = tab.dependencies;
     await stageState.adoptOpenedStage(tab.stage_info);
     if (generation !== activationGeneration || id !== this.activeId) return;
@@ -188,7 +189,6 @@ export const tabsState = $state({
       this.activeId = 0;
       stageState.clear();
       loadOrchestrator.rootFile = null;
-      loadOrchestrator.requestedPath = null;
       loadOrchestrator.dependencies = null;
       this.resetScene();
       void editState.refresh();
