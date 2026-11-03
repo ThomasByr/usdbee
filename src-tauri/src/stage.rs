@@ -357,12 +357,7 @@ impl StageState {
         let stage_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
         let tessellations = Arc::new(AtomicUsize::new(0));
-        spawn_stage_owner_for(
-            stage_id,
-            self.sink.clone(),
-            receiver,
-            tessellations.clone(),
-        );
+        spawn_stage_owner_for(stage_id, self.sink.clone(), receiver, tessellations.clone());
         self.stages
             .lock()
             .map_err(|_| "stage map lock poisoned".to_string())?
@@ -1601,11 +1596,7 @@ fn variant_selection_err(path: &str, variant_set: &str, error: impl std::fmt::Di
 /// `inputs:diffuseColor`, `outputs:surface` → the Material's terminal — and
 /// binds it via MaterialBindingAPI. `None` clears the prim's
 /// `material:binding` targets.
-fn author_prim_texture(
-    stage: &Stage,
-    path: &str,
-    texture: Option<&str>,
-) -> Result<(), String> {
+fn author_prim_texture(stage: &Stage, path: &str, texture: Option<&str>) -> Result<(), String> {
     let prim = editable_prim(stage, path, false)?;
     match texture {
         Some(texture) => bind_prim_texture(stage, &prim, path, texture),
@@ -3363,7 +3354,12 @@ pub async fn set_variant_selection(
     selection: Option<String>,
     state: tauri::State<'_, StageState>,
 ) -> Result<(), String> {
-    request_set_variant_selection(&state.sender(stage_id)?, &path, &variant_set, selection.as_deref())
+    request_set_variant_selection(
+        &state.sender(stage_id)?,
+        &path,
+        &variant_set,
+        selection.as_deref(),
+    )
 }
 
 pub fn request_set_variant_selection(
@@ -3430,17 +3426,12 @@ pub async fn open_usd_path(
 // Async command so Tauri runs it off the main thread; the body stays
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
-pub async fn close_stage(
-    stage_id: u64,
-    state: tauri::State<'_, StageState>,
-) -> Result<(), String> {
+pub async fn close_stage(stage_id: u64, state: tauri::State<'_, StageState>) -> Result<(), String> {
     state.close_stage(stage_id)
 }
 
 #[tauri::command]
-pub async fn list_stages(
-    state: tauri::State<'_, StageState>,
-) -> Result<Vec<StageSummary>, String> {
+pub async fn list_stages(state: tauri::State<'_, StageState>) -> Result<Vec<StageSummary>, String> {
     state.list_stages()
 }
 

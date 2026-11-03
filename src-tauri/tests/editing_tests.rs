@@ -1483,8 +1483,7 @@ fn save_stage_as_usdz_survives_nested_usdz_dependencies() {
         .add_layer("packaged.usda", packaged.as_bytes())
         .expect("layer packages into the archive");
     writer.finish().expect("archive finalizes");
-    std::fs::write(dir.path().join("inner.usdz"), &archive_bytes)
-        .expect("inner archive writes");
+    std::fs::write(dir.path().join("inner.usdz"), &archive_bytes).expect("inner archive writes");
 
     let root = dir.path().join("root.usda");
     std::fs::write(
@@ -1506,7 +1505,9 @@ fn save_stage_as_usdz_survives_nested_usdz_dependencies() {
             return false;
         };
         for index in 0..zip.len() {
-            let Ok(mut entry) = zip.by_index(index) else { continue };
+            let Ok(mut entry) = zip.by_index(index) else {
+                continue;
+            };
             let name = entry.name().to_string();
             if name.ends_with(suffix) {
                 return true;
@@ -2242,7 +2243,9 @@ fn request_import_layer_text(
     usdbee_lib::stage::request_import_layer_text(&state.sender(), identifier, text)
 }
 
-fn request_list_stage_layers(state: &TestOwner) -> Result<Vec<usdbee_lib::stage::LayerInfo>, String> {
+fn request_list_stage_layers(
+    state: &TestOwner,
+) -> Result<Vec<usdbee_lib::stage::LayerInfo>, String> {
     usdbee_lib::stage::request_list_stage_layers(&state.sender())
 }
 
@@ -2530,16 +2533,13 @@ fn undo_redo_without_open_stage_fail() {
 
 // --- Phase 4, Task 7: texture material authoring ---
 
-fn request_set_texture(
-    state: &TestOwner,
-    path: &str,
-    texture: Option<&str>,
-) -> Result<(), String> {
+fn request_set_texture(state: &TestOwner, path: &str, texture: Option<&str>) -> Result<(), String> {
     usdbee_lib::stage::request_set_prim_texture(&state.sender(), path, texture)
 }
 
 fn material_via_owner(state: &TestOwner, path: &str) -> usdbee_lib::materials::MaterialInfo {
-    usdbee_lib::stage::request_material_data(&state.sender(), path).expect("material data serializes")
+    usdbee_lib::stage::request_material_data(&state.sender(), path)
+        .expect("material data serializes")
 }
 
 fn child_node<'a>(
@@ -2575,7 +2575,12 @@ fn set_prim_texture_binds_a_preview_surface_network() {
     let surface = material
         .surface
         .expect("a UsdPreviewSurface composes from the authored network");
-    assert_eq!(surface.textures.len(), 1, "textures: {:?}", surface.textures);
+    assert_eq!(
+        surface.textures.len(),
+        1,
+        "textures: {:?}",
+        surface.textures
+    );
     assert_eq!(surface.textures[0].input, "diffuseColor");
     assert_eq!(surface.textures[0].file_path, texture);
     assert_eq!(surface.textures[0].st_primvar, "st");
@@ -2591,7 +2596,12 @@ fn set_prim_texture_binds_a_preview_surface_network() {
     assert_eq!(looks.type_name, "Scope");
     let mat = child_node(&looks.children, "/Looks/World_Ball_Mat");
     assert_eq!(mat.type_name, "Material");
-    assert_eq!(mat.children.len(), 2, "surface + texture shaders: {:?}", mat.children);
+    assert_eq!(
+        mat.children.len(),
+        2,
+        "surface + texture shaders: {:?}",
+        mat.children
+    );
 
     // The edit dirtied exactly the session layer.
     let dirty = request_list_dirty_layers(&state.sender()).expect("dirty layers list");
@@ -2616,7 +2626,10 @@ fn set_prim_texture_clear_removes_the_binding_but_keeps_the_material() {
 
     let material = material_via_owner(&state, "/World/Ball");
     assert_eq!(material.name, "Ball");
-    assert!(material.surface.is_none(), "no material is bound after the clear");
+    assert!(
+        material.surface.is_none(),
+        "no material is bound after the clear"
+    );
 
     // The material prims stay (documented shortcut: no prim-removal path).
     let tree = request_stage_tree(&state.sender()).expect("tree should serialize");
@@ -2673,8 +2686,7 @@ fn texture_binding_is_one_undo_step_and_redoable() {
     let (state, _events) = owner_with_events();
     open_via_owner(&state, "basic.usda");
     let texture = checker_texture();
-    request_set_texture(&state, "/World/Ball", Some(&texture))
-        .expect("binding should succeed");
+    request_set_texture(&state, "/World/Ball", Some(&texture)).expect("binding should succeed");
 
     let undo = undo_state(&state);
     assert!(undo.can_undo);
@@ -2684,14 +2696,20 @@ fn texture_binding_is_one_undo_step_and_redoable() {
     // material prims gone (one commit authored all of it).
     assert!(request_undo(&state).expect("one undo reverts the network"));
     let material = material_via_owner(&state, "/World/Ball");
-    assert!(material.surface.is_none(), "the binding is gone after one undo");
+    assert!(
+        material.surface.is_none(),
+        "the binding is gone after one undo"
+    );
     let tree = request_stage_tree(&state.sender()).expect("tree should serialize");
     assert!(
         !tree.iter().any(|n| n.path == "/Looks"),
         "the /Looks prims vanish with the binding: {:?}",
         tree
     );
-    assert!(!undo_state(&state).can_undo, "the stack drained in one step");
+    assert!(
+        !undo_state(&state).can_undo,
+        "the stack drained in one step"
+    );
 
     // Redo re-applies everything.
     assert!(request_redo(&state).expect("redo restores the network"));
@@ -2716,8 +2734,7 @@ fn rebinding_a_texture_is_one_undo_step_back_to_the_previous_file() {
     // A missing file is authored verbatim (the picker passes absolute
     // paths; resolution happens at read time).
     let missing = "/definitely/not/a/texture.png";
-    request_set_texture(&state, "/World/Ball", Some(missing))
-        .expect("rebinding should succeed");
+    request_set_texture(&state, "/World/Ball", Some(missing)).expect("rebinding should succeed");
     let material = material_via_owner(&state, "/World/Ball");
     assert_eq!(
         material.surface.expect("still bound").textures[0].file_path,
@@ -2772,7 +2789,10 @@ fn two_concurrent_stages_edit_and_emit_independently() {
     let id_a = state.open(&fixture("basic.usda")).stage_id;
     let id_b = state.open(&fixture("variants.usda")).stage_id;
     assert_ne!(id_a, id_b, "each open mints a distinct stage id");
-    assert!(id_a >= 1 && id_b >= 1, "ids start at 1; 0 stays \"no stage\"");
+    assert!(
+        id_a >= 1 && id_b >= 1,
+        "ids start at 1; 0 stays \"no stage\""
+    );
 
     // Independent trees: each stage composes its own fixture.
     let sender_a = state.state.sender(id_a).expect("stage A lives");
@@ -2797,7 +2817,11 @@ fn two_concurrent_stages_edit_and_emit_independently() {
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("A's edit emits usd-stage-changed");
     assert_eq!(paths, vec!["/World/Ball".to_string()]);
-    assert_eq!(events.last_id(), id_a, "the event carries the edited stage's id");
+    assert_eq!(
+        events.last_id(),
+        id_a,
+        "the event carries the edited stage's id"
+    );
 
     let dirty_a = request_list_dirty_layers(&sender_a).expect("A's dirty list");
     assert_eq!(dirty_a.len(), 1, "A's session layer is dirty");
@@ -2816,8 +2840,7 @@ fn close_stage_cleans_up_and_leaves_the_other_stage_functional() {
     let dir = tempfile::tempdir().expect("temp dir");
     let extraction = dir.path().join("extracted");
     std::fs::create_dir_all(&extraction).expect("extraction dir");
-    std::fs::copy(fixture("basic.usda"), extraction.join("basic.usda"))
-        .expect("extracted root");
+    std::fs::copy(fixture("basic.usda"), extraction.join("basic.usda")).expect("extracted root");
     let id_a = state
         .open_flow(
             &extraction.join("basic.usda"),
@@ -2830,8 +2853,7 @@ fn close_stage_cleans_up_and_leaves_the_other_stage_functional() {
 
     // A's session layer file exists right after the open.
     let sender_a = state.state.sender(id_a).expect("stage A lives");
-    let layers =
-        usdbee_lib::stage::request_list_stage_layers(&sender_a).expect("A's layer list");
+    let layers = usdbee_lib::stage::request_list_stage_layers(&sender_a).expect("A's layer list");
     let session = layers.iter().find(|l| l.is_session).expect("session layer");
     let session_file = PathBuf::from(
         session
@@ -2848,7 +2870,10 @@ fn close_stage_cleans_up_and_leaves_the_other_stage_functional() {
         !session_file.exists(),
         "close deletes the stage's session layer file"
     );
-    assert!(!extraction.exists(), "close deletes the usdz extraction dir");
+    assert!(
+        !extraction.exists(),
+        "close deletes the usdz extraction dir"
+    );
 
     // Commands against the closed id fail readably.
     let error = state.state.sender(id_a).expect_err("the closed id is gone");
@@ -2861,19 +2886,18 @@ fn close_stage_cleans_up_and_leaves_the_other_stage_functional() {
         .state
         .close_stage(id_a)
         .expect_err("double close fails readably");
-    assert!(error.contains(&format!("no stage {}", id_a)), "got: {}", error);
+    assert!(
+        error.contains(&format!("no stage {}", id_a)),
+        "got: {}",
+        error
+    );
 
     // B stays fully functional: tree, edit, undo.
     let sender_b = state.state.sender(id_b).expect("stage B lives");
     let tree = request_stage_tree(&sender_b).expect("B's tree still serializes");
     assert_eq!(tree[0].path, "/Prop");
-    usdbee_lib::stage::request_set_variant_selection(
-        &sender_b,
-        "/Prop",
-        "color",
-        Some("blue"),
-    )
-    .expect("editing stage B after A's close should succeed");
+    usdbee_lib::stage::request_set_variant_selection(&sender_b, "/Prop", "color", Some("blue"))
+        .expect("editing stage B after A's close should succeed");
     assert!(
         usdbee_lib::stage::request_undo(&sender_b).expect("undo in B"),
         "B's undo journal survived A's close"
@@ -2953,7 +2977,10 @@ fn unknown_stage_ids_fail_readably_across_command_shapes() {
             error
         );
     }
-    let error = state.state.close_stage(999).expect_err("close guards the id");
+    let error = state
+        .state
+        .close_stage(999)
+        .expect_err("close guards the id");
     assert!(error.contains("no stage 999"), "got: {}", error);
 
     // A closed stage reads exactly like one that never existed.
@@ -2962,14 +2989,16 @@ fn unknown_stage_ids_fail_readably_across_command_shapes() {
         .state
         .sender(id)
         .expect_err("commands against the closed id fail");
-    assert!(error.contains(&format!("no stage {}", id)), "got: {}", error);
     assert!(
-        state
-            .state
-            .close_stage(id)
-            .unwrap_err()
-            .contains(&format!("no stage {}", id))
+        error.contains(&format!("no stage {}", id)),
+        "got: {}",
+        error
     );
+    assert!(state
+        .state
+        .close_stage(id)
+        .unwrap_err()
+        .contains(&format!("no stage {}", id)));
     // Closing the LAST stage is fine: the map is empty, not an error.
     assert!(
         state.state.list_stages().expect("list").is_empty(),

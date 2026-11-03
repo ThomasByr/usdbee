@@ -258,9 +258,12 @@ fn nested_prototype_geometry_uses_the_real_prim() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "purpose_scene.usda");
 
-    let synthetic =
-        request_geometry_data(&state.sender(), "/World/GroupInstancer/__proto_0/Shape", None)
-            .expect("nested synthetic prototype path should resolve");
+    let synthetic = request_geometry_data(
+        &state.sender(),
+        "/World/GroupInstancer/__proto_0/Shape",
+        None,
+    )
+    .expect("nested synthetic prototype path should resolve");
     let direct = request_geometry_data(
         &state.sender(),
         "/World/GroupInstancer/GroupProto/Shape",
@@ -367,7 +370,10 @@ fn native_instances_of_one_prototype_expand_independently() {
     assert_eq!(mover.transform[12], 1.0, "mover translate");
     assert!(mover.animated, "sampled xform animates the subtree");
     let in_motion = expect(&nodes, "/Scene/Mover/InMotion");
-    assert!(in_motion.children.len() >= 2, "instance expands the prototype");
+    assert!(
+        in_motion.children.len() >= 2,
+        "instance expands the prototype"
+    );
     let moving_mesh = expect(&nodes, "/Scene/Mover/InMotion/WheelMesh");
     assert_eq!(moving_mesh.type_name, "Mesh");
     assert!(moving_mesh.has_geometry);
@@ -502,7 +508,10 @@ fn warm_manifest_resamples_sampled_visibility_per_time() {
 
     let at_one = request_scene_manifest(&state.sender(), Some(1.0))
         .expect("manifest at t=1 should serialize");
-    assert!(!expect(&at_one, "/Scene/Toggle").visible, "invisible at t=1");
+    assert!(
+        !expect(&at_one, "/Scene/Toggle").visible,
+        "invisible at t=1"
+    );
 
     let at_two = request_scene_manifest(&state.sender(), Some(2.0))
         .expect("manifest at t=2 should serialize");
@@ -510,5 +519,8 @@ fn warm_manifest_resamples_sampled_visibility_per_time() {
 
     let back_to_one = request_scene_manifest(&state.sender(), Some(1.0))
         .expect("manifest back at t=1 should serialize");
-    assert!(!expect(&back_to_one, "/Scene/Toggle").visible, "re-samples at t=1");
+    assert!(
+        !expect(&back_to_one, "/Scene/Toggle").visible,
+        "re-samples at t=1"
+    );
 }

@@ -401,4 +401,3 @@ mod tests {
         assert!(err.contains("Failed to download"), "got: {err}");
     }
 }
-

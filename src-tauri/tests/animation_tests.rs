@@ -8,9 +8,7 @@ use std::path::PathBuf;
 mod common;
 
 use common::spawn_stage_owner;
-use usdbee_lib::stage::{
-    open_stage, request_geometry_data, serialize_render_manifest, RenderNode,
-};
+use usdbee_lib::stage::{open_stage, request_geometry_data, serialize_render_manifest, RenderNode};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

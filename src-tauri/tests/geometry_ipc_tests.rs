@@ -207,7 +207,11 @@ fn batch_round_trip_frames_slots_fail_soft_per_path() {
 
     let (status, payload) = slot(&bytes, &mut offset);
     assert_eq!(status, 0, "first slot: ok");
-    assert_eq!(u32_le(&payload, 0), 0x5553_4442, "slot bytes are a USDB frame");
+    assert_eq!(
+        u32_le(&payload, 0),
+        0x5553_4442,
+        "slot bytes are a USDB frame"
+    );
     assert_eq!(u32_le(&payload, 8), 3, "Ball vertex count");
 
     let (status, payload) = slot(&bytes, &mut offset);
@@ -276,7 +280,11 @@ fn ok_slot_after_an_unaligned_error_slot_stays_aligned_and_decodes() {
         0,
         "ok slot payload starts at a 4-byte aligned offset"
     );
-    assert_eq!(u32_le(&payload, 0), 0x5553_4442, "slot bytes are a USDB frame");
+    assert_eq!(
+        u32_le(&payload, 0),
+        0x5553_4442,
+        "slot bytes are a USDB frame"
+    );
     assert_eq!(u32_le(&payload, 8), 3, "Ball vertex count");
     assert_eq!(offset, bytes.len(), "no trailing bytes");
 }
@@ -340,8 +348,7 @@ fn two_instance_copies_of_one_prototype_tessellate_once_and_serve_warm() {
         "one shared tessellation served both copies"
     );
 
-    let repeat =
-        request_geometry_batch(&state.sender(), &batch_paths, None).expect("repeat batch");
+    let repeat = request_geometry_batch(&state.sender(), &batch_paths, None).expect("repeat batch");
     assert_eq!(repeat, bytes, "repeat batch serves warm from the MeshCache");
     assert_eq!(
         state.mesh_tessellations(),
@@ -361,7 +368,8 @@ fn manifest_matches_authored_hierarchy_transforms_and_flags() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "basic.usda");
 
-    let manifest = request_scene_manifest(&state.sender(), None).expect("manifest should serialize");
+    let manifest =
+        request_scene_manifest(&state.sender(), None).expect("manifest should serialize");
     assert_eq!(manifest.len(), 1);
 
     let world = &manifest[0];

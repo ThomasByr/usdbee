@@ -219,11 +219,7 @@ fn tree_via_owner(state: &common::TestOwner) -> Vec<PrimNode> {
     request_stage_tree(&state.sender()).expect("tree should serialize")
 }
 
-fn details_via_owner(
-    state: &common::TestOwner,
-    path: &str,
-    time: Option<f64>,
-) -> PrimDetails {
+fn details_via_owner(state: &common::TestOwner, path: &str, time: Option<f64>) -> PrimDetails {
     request_stage_details(&state.sender(), path, time).expect("details should serialize")
 }
 
@@ -748,8 +744,8 @@ fn details_request_without_open_stage_fails() {
 fn details_for_missing_prim_is_a_readable_error() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "basic.usda");
-    let error =
-        request_stage_details(&state.sender(), "/World/Nope", None).expect_err("prim does not exist");
+    let error = request_stage_details(&state.sender(), "/World/Nope", None)
+        .expect_err("prim does not exist");
     assert!(error.contains("prim not found"), "got: {}", error);
     // The owner survives the failed lookup.
     let details = details_via_owner(&state, "/World/Ball", None);
@@ -777,7 +773,9 @@ fn stage_tree_serializes_50k_prims_within_bound() {
     for group in 0..100 {
         text.push_str(&format!("    def Xform \"Group{group}\"\n    {{\n"));
         for mesh in 0..512 {
-            text.push_str(&format!("        def Mesh \"M{mesh}\"\n        {{\n        }}\n"));
+            text.push_str(&format!(
+                "        def Mesh \"M{mesh}\"\n        {{\n        }}\n"
+            ));
         }
         text.push_str("    }\n");
     }
@@ -805,5 +803,8 @@ fn stage_tree_serializes_50k_prims_within_bound() {
         elapsed,
         total
     );
-    eprintln!("probe: get_stage_tree serialized {} prims in {:?}", total, elapsed);
+    eprintln!(
+        "probe: get_stage_tree serialized {} prims in {:?}",
+        total, elapsed
+    );
 }
