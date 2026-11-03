@@ -77,7 +77,10 @@
     class="tree-node-label"
     class:selected
     style="padding-left: {depth * 14}px;"
-    role="button"
+    role="treeitem"
+    aria-selected={selected}
+    aria-level={depth + 1}
+    aria-expanded={hasChildren ? open : undefined}
     tabindex="0"
     onclick={select}
     onkeydown={(e) => {

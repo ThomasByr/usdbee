@@ -326,11 +326,7 @@
 
     const onMouseMove = (moveEvent: MouseEvent) => {
       if (!isResizing) return;
-      const maxAllowed = window.innerWidth > 0 ? window.innerWidth - 100 : 3000;
-      let newWidth = moveEvent.clientX;
-      if (newWidth < 150) newWidth = 150;
-      if (newWidth > maxAllowed) newWidth = maxAllowed;
-      sidebarWidth = newWidth;
+      sidebarWidth = clampSidebarWidth(moveEvent.clientX);
     };
 
     const onMouseUp = () => {
@@ -345,6 +341,25 @@
 
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
+  }
+
+  // Keyboard equivalent of the drag (Phase 1 review flag): the separator is
+  // focusable, arrow keys nudge the width and persist like a drag release.
+  const SIDEBAR_STEP = 16;
+
+  function clampSidebarWidth(width: number): number {
+    const maxAllowed = window.innerWidth > 0 ? window.innerWidth - 100 : 3000;
+    return Math.min(Math.max(width, 150), maxAllowed);
+  }
+
+  function resizeByKey(e: KeyboardEvent) {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    sidebarWidth = clampSidebarWidth(
+      sidebarWidth + (e.key === "ArrowLeft" ? -SIDEBAR_STEP : SIDEBAR_STEP),
+    );
+    localStorage.setItem("sidebarWidth", sidebarWidth.toString());
+    window.dispatchEvent(new Event("resize"));
   }
 </script>
 
@@ -498,7 +513,15 @@
 
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div class="resize-handle" onmousedown={startResize} role="separator" tabindex="0"></div>
+    <div
+      class="resize-handle"
+      onmousedown={startResize}
+      onkeydown={resizeByKey}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize sidebar"
+      tabindex="0"
+    ></div>
 
     <!-- Main View for 3D Render Surface -->
     <Viewport {viewer} bind:gizmoMode {lightAzimuth} {lightElevation} />

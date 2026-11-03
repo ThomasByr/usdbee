@@ -562,6 +562,7 @@
     color: var(--overlay-text-dim);
     z-index: 10;
     pointer-events: none;
+    /* shortcut: ~2:1 contrast on the light mp4 placeholder in light mode, restyle with the export preview's design pass */
   }
 
   .preview-container {

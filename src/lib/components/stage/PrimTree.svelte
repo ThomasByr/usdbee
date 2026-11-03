@@ -135,12 +135,13 @@
   {/if}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <!-- Scrollable region with keyboard scrolling: ARIA has no role for this
-       pattern, and a full role="tree" would require treeitem rows. -->
+  <!-- Scrollable tree region: the container owns arrow/page scrolling
+       (windowing unmounts off-screen rows), each visible row is a focusable
+       treeitem. -->
   <div
     class="tree-scroll"
     style="flex: 1; overflow-y: auto;"
-    role="region"
+    role="tree"
     aria-label="Prim tree"
     tabindex="0"
     bind:this={scrollEl}

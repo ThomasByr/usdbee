@@ -49,6 +49,11 @@ body,
   background: var(--accent);
 }
 
+.resize-handle:focus-visible {
+  outline: 1px solid var(--focus-border);
+  outline-offset: -2px;
+}
+
 .sidebar-header {
   padding: 16px;
   border-bottom: 1px solid var(--border);
@@ -422,6 +427,11 @@ input[type="color"]::-webkit-color-swatch {
 
 .tree-node-label:hover {
   background: var(--row-hover);
+}
+
+.tree-node-label:focus-visible {
+  outline: 1px solid var(--focus-border);
+  outline-offset: -1px;
 }
 
 .toggle-btn {
