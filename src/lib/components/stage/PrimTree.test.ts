@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount, tick } from "svelte";
 import type { PrimNode } from "$lib/stage/types";
+import { ROW_HEIGHT } from "$lib/stage/treeWindowing";
 import PrimTree from "./PrimTree.svelte";
 
 const mocks = vi.hoisted(() => ({
@@ -9,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   fetchPrimDetails: vi.fn(),
   setPrimMetadata: vi.fn().mockResolvedValue(null),
   tree: [] as PrimNode[],
+  selectedPath: null as string | null,
 }));
 
 vi.mock("$lib/stage/stageState.svelte", () => ({
@@ -23,7 +25,7 @@ vi.mock("$lib/stage/stageState.svelte", () => ({
       return "ready";
     },
     get selectedPath() {
-      return null;
+      return mocks.selectedPath;
     },
     get details() {
       return null;
@@ -49,6 +51,7 @@ let instance: ReturnType<typeof mount> | null = null;
 beforeEach(() => {
   mocks.selectPrim.mockReset();
   mocks.fetchPrimDetails.mockReset().mockResolvedValue(null);
+  mocks.selectedPath = null;
 });
 
 afterEach(() => {
@@ -64,7 +67,10 @@ async function mountTree(tree: PrimNode[]) {
   mocks.tree = tree;
   instance = mount(PrimTree, { target: document.body, props: {} });
   await tick();
+  await tick();
 }
+
+const scrollEl = (): HTMLElement => document.querySelector(".tree-scroll") as HTMLElement;
 
 describe("PrimTree windowed rendering", () => {
   it("mounts only a bounded slice of a large flat tree", async () => {
@@ -103,5 +109,40 @@ describe("PrimTree windowed rendering", () => {
     await tick();
 
     expect(mocks.selectPrim).toHaveBeenCalledWith("/Root");
+  });
+
+  it("scrolls to an out-of-window selection but keeps user scroll once made", async () => {
+    // Row 500 of a 3000-row flat tree is far outside the initial window;
+    // the selection effect must scroll to it exactly once.
+    const flat = Array.from({ length: 3000 }, (_, i) => leaf(`/N${i}`, `N${i}`));
+    mocks.selectedPath = "/N500";
+    await mountTree(flat);
+    expect(scrollEl().scrollTop).toBe(501 * ROW_HEIGHT);
+
+    // Scrolling with an unchanged selection must not snap the viewport back.
+    scrollEl().scrollTop = 0;
+    scrollEl().dispatchEvent(new Event("scroll"));
+    await tick();
+    expect(scrollEl().scrollTop).toBe(0);
+  });
+
+  it("expands collapsed ancestors of a deep selection and scrolls to it", async () => {
+    const tree: PrimNode[] = [
+      {
+        ...leaf("/Root", "Root", "Xform"),
+        children: [
+          {
+            ...leaf("/Root/Child", "Child", "Xform"),
+            children: [leaf("/Root/Child/Grand", "Grand")],
+          },
+        ],
+      },
+    ];
+    mocks.selectedPath = "/Root/Child/Grand";
+    await mountTree(tree);
+
+    // Ancestors expanded, so the selected row exists in the flat list.
+    expect(rowPaths()).toEqual(["/Root", "/Root/Child", "/Root/Child/Grand"]);
+    expect(scrollEl().scrollTop).toBeGreaterThan(0);
   });
 });

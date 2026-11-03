@@ -34,6 +34,20 @@ export function flattenTree(
   return rows;
 }
 
+// Ancestor paths of `path`, shallowest first ("/a/b/c" -> ["/a", "/a/b"]).
+// Marking these open in expandedPaths reveals a deeply nested selection.
+export function ancestorPaths(path: string): string[] {
+  if (!path.startsWith("/")) return [];
+  const segments = path.split("/").slice(1, -1);
+  const out: string[] = [];
+  let current = "";
+  for (const segment of segments) {
+    current += "/" + segment;
+    out.push(current);
+  }
+  return out;
+}
+
 export interface RowRange {
   start: number;
   end: number;

@@ -2,9 +2,11 @@
   import type { PrimNode } from "$lib/stage/types";
   import { stageState } from "$lib/stage/stageState.svelte";
   import { collectPaths, filterTree } from "$lib/stage/treeUtils";
+  import { untrack } from "svelte";
   import {
     OVERSCAN,
     ROW_HEIGHT,
+    ancestorPaths,
     ensureRowVisible,
     flattenTree,
     visibleRange,
@@ -33,19 +35,69 @@
     return map;
   });
 
-  // Selection can arrive from elsewhere (viewport click, inspector); scroll
-  // the selected row into view when it is outside the current window.
+  // Selection can arrive from elsewhere (viewport click, inspector). Run
+  // ONLY on selectedPath transitions (previous value tracked in a plain
+  // variable) so scrolling never re-triggers it; DOM metrics are read
+  // inside untrack. Ancestors of a collapsed selection are expanded first
+  // so the row exists in the flat list; the scroll itself waits a
+  // microtask so the spacer grows before scrollTop is clamped by it.
+  let prevSelected: string | null = null;
+
   $effect(() => {
     const selected = stageState.selectedPath;
-    if (!selected || !scrollEl) return;
+    if (selected === prevSelected) return;
+    prevSelected = selected;
+    if (!selected) return;
+    untrack(() => {
+      for (const ancestor of ancestorPaths(selected)) expandedPaths[ancestor] = true;
+      queueMicrotask(() => scrollSelectionIntoView(selected));
+    });
+  });
+
+  function scrollSelectionIntoView(selected: string) {
+    const el = scrollEl;
+    if (!el) return;
     const index = rowIndexByPath.get(selected);
     if (index === undefined) return;
-    const target = ensureRowVisible(rows.length, index, scrollTop, viewportHeight, ROW_HEIGHT);
-    if (target !== null) {
-      scrollEl.scrollTop = target;
-      scrollTop = target;
+    const target = ensureRowVisible(rows.length, index, el.scrollTop, el.clientHeight, ROW_HEIGHT);
+    if (target === null) return;
+    el.scrollTop = target;
+    scrollTop = target;
+  }
+
+  // The scroll container is keyboard-reachable: windowing unmounts
+  // off-screen rows, so arrows/page keys here are how keyboard users
+  // reach rows outside the mounted window.
+  function onScrollKey(event: KeyboardEvent) {
+    const el = scrollEl;
+    if (!el) return;
+    const page = Math.max(el.clientHeight - ROW_HEIGHT, ROW_HEIGHT);
+    let target: number;
+    switch (event.key) {
+      case "ArrowDown":
+        target = el.scrollTop + ROW_HEIGHT;
+        break;
+      case "ArrowUp":
+        target = el.scrollTop - ROW_HEIGHT;
+        break;
+      case "PageDown":
+        target = el.scrollTop + page;
+        break;
+      case "PageUp":
+        target = el.scrollTop - page;
+        break;
+      case "Home":
+        target = 0;
+        break;
+      case "End":
+        target = el.scrollHeight;
+        break;
+      default:
+        return;
     }
-  });
+    event.preventDefault();
+    el.scrollTop = target;
+  }
 
   function setAllExpanded(expand: boolean) {
     if (expand) {
@@ -81,11 +133,20 @@
       />
     </div>
   {/if}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <!-- Scrollable region with keyboard scrolling: ARIA has no role for this
+       pattern, and a full role="tree" would require treeitem rows. -->
   <div
+    class="tree-scroll"
     style="flex: 1; overflow-y: auto;"
+    role="region"
+    aria-label="Prim tree"
+    tabindex="0"
     bind:this={scrollEl}
     bind:clientHeight={viewportHeight}
     onscroll={onScroll}
+    onkeydown={onScrollKey}
   >
     {#if stageState.status === "ready"}
       <div style="position: relative; height: {rows.length * ROW_HEIGHT}px;">

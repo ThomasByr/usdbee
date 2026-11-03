@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PrimNode } from "./types";
-import { ROW_HEIGHT, ensureRowVisible, flattenTree, visibleRange } from "./treeWindowing";
+import { ROW_HEIGHT, ancestorPaths, ensureRowVisible, flattenTree, visibleRange } from "./treeWindowing";
 
 const leaf = (path: string, name: string, type_name = "Mesh"): PrimNode => ({
   path,
@@ -95,6 +95,18 @@ describe("visibleRange", () => {
 
   it("never lets overscan push start below zero", () => {
     expect(visibleRange(100, 100, 400, ROW_HEIGHT, 8).start).toBe(0);
+  });
+});
+
+describe("ancestorPaths", () => {
+  it("lists ancestors shallowest first", () => {
+    expect(ancestorPaths("/Root/Group/A")).toEqual(["/Root", "/Root/Group"]);
+  });
+
+  it("returns nothing for roots and non-paths", () => {
+    expect(ancestorPaths("/Root")).toEqual([]);
+    expect(ancestorPaths("")).toEqual([]);
+    expect(ancestorPaths("no-leading-slash")).toEqual([]);
   });
 });
 
