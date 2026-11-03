@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { LayerInfo } from "./types";
-import { layerDisplayName, layerTextRevisionAction } from "./layerText";
+import {
+  layerDisplayName,
+  layerTextRevisionAction,
+  layerTextStageChangedAction,
+} from "./layerText";
 
 const layer = (identifier: string, is_session = false): LayerInfo => ({
   identifier,
@@ -20,6 +24,27 @@ describe("layerTextRevisionAction", () => {
 
   it("blocks a dirty draft with a conflict when the stage advances", () => {
     expect(layerTextRevisionAction(4, 5, true)).toBe("conflict");
+  });
+});
+
+describe("layerTextStageChangedAction", () => {
+  it("ignores the stage change caused by the editor's own save", () => {
+    // Mid-save the draft is still dirty against the old base revision, but
+    // the event's revision matches the one the save marked before importing.
+    expect(layerTextStageChangedAction(4, 5, true, 5)).toBe("none");
+    expect(layerTextStageChangedAction(4, 5, false, 5)).toBe("none");
+  });
+
+  it("still flags a conflict for a genuinely external change", () => {
+    expect(layerTextStageChangedAction(4, 5, true, null)).toBe("conflict");
+  });
+
+  it("still flags a conflict for an external change with a stale self-save mark", () => {
+    expect(layerTextStageChangedAction(4, 5, true, 4)).toBe("conflict");
+  });
+
+  it("reloads a clean draft for an external change", () => {
+    expect(layerTextStageChangedAction(4, 5, false, null)).toBe("reload");
   });
 });
 

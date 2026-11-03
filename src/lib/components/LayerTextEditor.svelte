@@ -2,7 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import type { LayerInfo } from "$lib/stage/types";
-  import { layerDisplayName, layerTextRevisionAction } from "$lib/stage/layerText";
+  import { layerDisplayName, layerTextStageChangedAction } from "$lib/stage/layerText";
   import { layerTextState } from "$lib/state/layerTextState.svelte";
 
   // The Task 6 text layer editor: pick a stage layer, edit its usda text in
@@ -17,6 +17,10 @@
   let loadedText = $state<string>("");
   let stageRevision = $state(0);
   let loadedRevision = $state(0);
+  // The revision the current save expects the backend's own usd-stage-changed
+  // event to carry; null when no self-save event is awaited. That event is
+  // the editor's own import landing, so the guard must spare it.
+  let selfSaveRevision = $state<number | null>(null);
   let conflict = $state<string | null>(null);
   let loading = $state(false);
   let saving = $state(false);
@@ -52,6 +56,7 @@
       conflict = null;
       return;
     }
+    selfSaveRevision = null; // a manual reload supersedes any pending self-save mark
     loading = true;
     error = null;
     try {
@@ -75,21 +80,26 @@
 
   async function saveToStage(): Promise<void> {
     if (selectedId === null) return;
-    if (layerTextRevisionAction(loadedRevision, stageRevision, text !== loadedText) === "conflict") {
+    if (layerTextStageChangedAction(loadedRevision, stageRevision, text !== loadedText, selfSaveRevision) === "conflict") {
       conflict = conflictMessage;
       return;
     }
     saving = true;
     error = null;
     conflict = null;
+    // Mark the revision the import's own usd-stage-changed event will carry
+    // so the guard treats it as self-caused instead of an external change.
+    const savedRevision = stageRevision + 1;
+    selfSaveRevision = savedRevision;
     try {
       await invoke("import_layer_text", { identifier: selectedId, text });
       loadedText = text;
-      loadedRevision = stageRevision;
+      loadedRevision = Math.max(savedRevision, stageRevision);
       // The backend emits usd-stage-changed, so the tree/manifest/edit
       // state refresh through their own listeners.
     } catch (e) {
       error = typeof e === "string" ? e : String(e);
+      selfSaveRevision = null;
     } finally {
       saving = false;
     }
@@ -97,10 +107,14 @@
 
   async function onStageChanged(): Promise<void> {
     stageRevision += 1;
-    const selected = selectedId;
+    // A self-save event's revision matches the mark the save left behind.
+    const isSelfSave = selfSaveRevision !== null && selfSaveRevision === stageRevision;
+    if (isSelfSave) selfSaveRevision = null;
     await refreshLayers();
+    if (isSelfSave) return;
+    const selected = selectedId;
     if (selected === null || selected !== selectedId) return;
-    const action = layerTextRevisionAction(loadedRevision, stageRevision, text !== loadedText);
+    const action = layerTextStageChangedAction(loadedRevision, stageRevision, text !== loadedText, selfSaveRevision);
     if (action === "reload") await loadText();
     if (action === "conflict") conflict = conflictMessage;
   }

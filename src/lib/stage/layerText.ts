@@ -13,6 +13,19 @@ export function layerTextRevisionAction(
   return dirty ? "conflict" : "reload";
 }
 
+// A usd-stage-changed event whose revision matches the one the editor
+// marked before its own import is not an external change: it must not
+// flag a conflict or force a reload.
+export function layerTextStageChangedAction(
+  loadedRevision: number,
+  stageRevision: number,
+  dirty: boolean,
+  selfSaveRevision: number | null,
+): LayerTextRevisionAction {
+  if (selfSaveRevision !== null && selfSaveRevision === stageRevision) return "none";
+  return layerTextRevisionAction(loadedRevision, stageRevision, dirty);
+}
+
 // The selector label for one stage layer: session layers read "Session
 // layer" (their identifier is a generated temp path), file-backed layers
 // read their file name.
