@@ -27,22 +27,39 @@
   let saving = $state(false);
   // The inline parse/import error; null when the text is clean.
   let error = $state<string | null>(null);
+  // The stage id the displayed layers/draft belong to; -1 = none yet.
+  let layersStageId = -1;
 
   async function refreshLayers(): Promise<void> {
+    const stageId = stageState.activeStageId;
+    const stageSwitched = layersStageId !== stageId;
+    if (stageSwitched) {
+      // Tab switch: the draft belongs to the previous stage's layer, so it
+      // is discarded even if the new stage has a layer with the same
+      // identifier (the "drafts discarded on switch" ruling).
+      selectedId = null;
+      text = "";
+      loadedText = "";
+      selfSaveRevision = null;
+      conflict = null;
+      error = null;
+    }
     try {
       const listed = await invoke<LayerInfo[]>("list_stage_layers", {
-        stageId: stageState.activeStageId,
+        stageId,
       });
       layers = listed;
+      layersStageId = stageId;
       // Selection changes load their layer; same-selection revision handling
       // decides whether a clean draft reloads or a dirty one conflicts.
-      if (selectedId === null || !listed.some((l) => l.identifier === selectedId)) {
+      if (stageSwitched || selectedId === null || !listed.some((l) => l.identifier === selectedId)) {
         selectedId = listed[0]?.identifier ?? null;
         await loadText();
       }
     } catch {
       // No stage open (or it went away): nothing to edit.
       layers = [];
+      layersStageId = -1;
       selectedId = null;
       text = "";
       loadedText = "";
@@ -86,7 +103,10 @@
 
   async function saveToStage(): Promise<void> {
     if (selectedId === null) return;
-    if (layerTextStageChangedAction(loadedRevision, stageRevision, text !== loadedText, selfSaveRevision) === "conflict") {
+    if (
+      layerTextStageChangedAction(loadedRevision, stageRevision, text !== loadedText, selfSaveRevision) ===
+      "conflict"
+    ) {
       conflict = conflictMessage;
       return;
     }
@@ -124,7 +144,12 @@
     if (isSelfSave) return;
     const selected = selectedId;
     if (selected === null || selected !== selectedId) return;
-    const action = layerTextStageChangedAction(loadedRevision, stageRevision, text !== loadedText, selfSaveRevision);
+    const action = layerTextStageChangedAction(
+      loadedRevision,
+      stageRevision,
+      text !== loadedText,
+      selfSaveRevision,
+    );
     if (action === "reload") await loadText();
     if (action === "conflict") conflict = conflictMessage;
   }

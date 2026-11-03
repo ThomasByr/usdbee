@@ -25,12 +25,17 @@ export const editState = $state({
         invoke<LayerInfo[]>("list_dirty_layers", { stageId }),
         invoke<UndoState>("get_undo_state", { stageId }),
       ]);
+      // The active tab switched while the refresh was in flight: the answers
+      // belong to the previous stage, so they must not land elsewhere.
+      if (stageId !== stageState.activeStageId) return;
       this.editTarget = editTarget;
       this.dirtyLayers = dirtyLayers;
       this.canUndo = undoState.can_undo;
       this.canRedo = undoState.can_redo;
     } catch {
-      // No stage open (or it went away): nothing to edit.
+      // No stage open (or it went away): nothing to edit. A stale failure
+      // after a tab switch must leave the new stage's state alone.
+      if (stageId !== stageState.activeStageId) return;
       this.editTarget = null;
       this.dirtyLayers = [];
       this.canUndo = false;

@@ -64,6 +64,29 @@ describe("editState", () => {
     expect(editState.canRedo).toBe(false);
   });
 
+  it("refresh discards a stale answer after the active stage switched", async () => {
+    stageState.activeStageId = 5;
+    editState.editTarget = target;
+    editState.dirtyLayers = [sessionLayer];
+    editState.canUndo = true;
+    const staleTarget: EditTargetInfo = { ...target, is_usdz_stage: true };
+    let resolveTarget!: (t: EditTargetInfo) => void;
+    mockedInvoke.mockImplementationOnce(() => new Promise<EditTargetInfo>((res) => (resolveTarget = res)));
+    mockedInvoke.mockImplementationOnce(() => Promise.resolve([rootLayer]));
+    mockedInvoke.mockImplementationOnce(() => Promise.resolve(undoEmpty));
+
+    const pending = editState.refresh();
+    // The user switches tabs before the refresh resolves.
+    stageState.activeStageId = 7;
+    resolveTarget(staleTarget);
+    await pending;
+
+    // Stage A's edit state must not land on stage B's tab.
+    expect(editState.editTarget).toEqual(target);
+    expect(editState.dirtyLayers).toEqual([sessionLayer]);
+    expect(editState.canUndo).toBe(true);
+  });
+
   it("refresh clears the state when no stage is open", async () => {
     editState.editTarget = target;
     editState.dirtyLayers = [sessionLayer];
@@ -150,7 +173,10 @@ describe("editState", () => {
     const error = await editState.saveAsUsdz("/tmp/repacked.usdz");
 
     expect(error).toBeNull();
-    expect(mockedInvoke).toHaveBeenCalledWith("save_stage_as_usdz", { stageId: 0, path: "/tmp/repacked.usdz" });
+    expect(mockedInvoke).toHaveBeenCalledWith("save_stage_as_usdz", {
+      stageId: 0,
+      path: "/tmp/repacked.usdz",
+    });
     expect(mockedInvoke).toHaveBeenCalledTimes(1);
     // Not a layer save: the dirty layers stay dirty (no refresh happened).
     expect(editState.dirtyLayers).toEqual([sessionLayer]);
@@ -215,9 +241,7 @@ describe("editState", () => {
       if (name === "usd-stage-changed") handler = callback as (event: { payload: unknown }) => void;
       return () => {};
     });
-    mockedInvoke.mockResolvedValueOnce(target)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(undoEmpty); // get_undo_state
+    mockedInvoke.mockResolvedValueOnce(target).mockResolvedValueOnce([]).mockResolvedValueOnce(undoEmpty); // get_undo_state
 
     await editState.init();
 
