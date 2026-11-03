@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { themeState, setThemePreference, type ThemePreference } from "$lib/state/themeState.svelte";
+  import Icon from "$lib/components/icons/Icon.svelte";
+
   let {
     showWireframe = $bindable(),
     showGrid = $bindable(),
@@ -24,6 +27,24 @@
 </script>
 
 <div class="settings-panel">
+  <div class="settings-group">
+    <h3>Appearance</h3>
+    <label style="display: flex; align-items: center; justify-content: space-between; font-size: 13px;">
+      Theme
+      <select
+        class="dropdown"
+        style="width: auto"
+        value={themeState.preference}
+        onchange={(e) => setThemePreference(e.currentTarget.value as ThemePreference)}
+      >
+        <option value="system">System</option>
+        <option value="dark">Dark</option>
+        <option value="light">Light</option>
+      </select>
+    </label>
+    <div class="theme-hint">Currently {themeState.resolved === "light" ? "Light" : "Dark"} <Icon name={themeState.resolved === "light" ? "sun" : "moon"} /></div>
+  </div>
+
   <div class="settings-group">
     <h3>Viewport Overlays</h3>
     <label><input type="checkbox" bind:checked={showWireframe} /> Wireframe Mode</label>
@@ -66,7 +87,7 @@
       <input type="checkbox" bind:checked={invertMouseY} onchange={saveControlPreferences} /> Invert Mouse Y
     </label>
 
-    <div style="font-size: 11px; color: #888; text-transform: uppercase; margin: 8px 0 4px 0;">
+    <div style="font-size: 11px; color: var(--text-dim); text-transform: uppercase; margin: 8px 0 4px 0;">
       Mouse Actions
     </div>
     <label style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
@@ -109,7 +130,7 @@
       </select>
     </label>
 
-    <div style="font-size: 11px; color: #888; text-transform: uppercase; margin: 8px 0 4px 0;">Keyboard</div>
+    <div style="font-size: 11px; color: var(--text-dim); text-transform: uppercase; margin: 8px 0 4px 0;">Keyboard</div>
     {#each Object.entries(keybindings) as [action, key]}
       <div
         style="display: flex; align-items: center; justify-content: space-between; font-size: 13px; margin-bottom: 4px;"
@@ -153,7 +174,7 @@
         type="text"
         bind:value={omniverseUrl}
         onchange={updateOmniverseUrl}
-        style="flex: 1; padding: 4px; background: #333; color: white; border: 1px solid #555; border-radius: 4px;"
+        style="flex: 1; padding: 4px; background: var(--bg-sunken); color: var(--text-bright); border: 1px solid var(--border-strong); border-radius: 4px;"
         placeholder="http://localhost:34080"
       />
     </div>
@@ -179,3 +200,13 @@
     </div>
   {/if}
 </div>
+
+<style>
+  .theme-hint {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+</style>

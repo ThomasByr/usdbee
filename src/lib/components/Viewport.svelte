@@ -162,7 +162,7 @@
     <div class="timeline-overlay">
       <button
         class="icon-btn"
-        style="color: #d4d4d4"
+        style="color: var(--text-body)"
         onclick={() => (viewer.isPlayingAnim = !viewer.isPlayingAnim)}
         title={viewer.isPlayingAnim ? "Pause" : "Play"}
       >
@@ -212,7 +212,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #1e1e1e;
+    background: var(--bg);
     position: relative;
     overflow: hidden;
   }
@@ -236,7 +236,7 @@
     bottom: 20px;
     left: 50%;
     transform: translateX(-50%);
-    background: rgba(0, 0, 0, 0.7);
+    background: var(--overlay-strong);
     padding: 10px 20px;
     border-radius: 8px;
     z-index: 10;
@@ -246,7 +246,7 @@
     width: 60%;
     min-width: 300px;
     backdrop-filter: blur(4px);
-    border: 1px solid #333;
+    border: 1px solid var(--border);
   }
 
   .timeline-slider {
@@ -254,7 +254,7 @@
   }
 
   .timeline-time {
-    color: #4ec9b0;
+    color: var(--syntax-teal);
     font-family: monospace;
     font-size: 12px;
     min-width: 125px;
@@ -264,7 +264,7 @@
 
   .empty-state {
     text-align: center;
-    color: #666;
+    color: var(--text-faint);
     z-index: 2;
   }
 
@@ -272,11 +272,11 @@
     position: absolute;
     bottom: 20px;
     right: 20px;
-    background: rgba(0, 0, 0, 0.7);
+    background: var(--overlay-strong);
     padding: 10px 20px;
     border-radius: 6px;
     z-index: 2;
-    color: #4ec9b0;
+    color: var(--syntax-teal);
   }
 
   .empty-state p {
@@ -285,6 +285,6 @@
 
   .empty-state .subtitle {
     font-size: 13px;
-    color: #555;
+    color: var(--text-muted);
   }
 </style>

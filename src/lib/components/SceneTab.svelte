@@ -11,7 +11,7 @@
 <div style="display: flex; flex-direction: column; height: 100%;">
   {#if loadedGroup}
     <div
-      style="display: flex; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid #3e3e42; margin-bottom: 8px;"
+      style="display: flex; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border-split); margin-bottom: 8px;"
     >
       <button class="action-btn" onclick={() => toggleAllExpanded(true)} style="flex: 1; padding: 4px;">
         Expand All
@@ -32,7 +32,7 @@
     {#if loadedGroup}
       {@render treeNode(loadedGroup, 0)}
     {:else}
-      <p style="color: #666; text-align: center;">No USD scene loaded.</p>
+      <p style="color: var(--text-faint); text-align: center;">No USD scene loaded.</p>
     {/if}
   </div>
 </div>

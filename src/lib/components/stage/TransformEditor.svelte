@@ -131,7 +131,7 @@
 
   .transform-op-name {
     flex: 1;
-    color: #b8c0cc;
+    color: var(--text-input);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -146,9 +146,9 @@
   .transform-input {
     width: 4rem;
     padding: 0.1rem 0.25rem;
-    border: 1px solid rgba(255, 255, 255, 0.15);
+    border: 1px solid var(--input-border-soft);
     border-radius: 3px;
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--input-bg-soft);
     color: inherit;
     font: inherit;
     font-size: 0.78rem;
@@ -156,15 +156,15 @@
 
   .transform-input:focus {
     outline: none;
-    border-color: rgba(120, 170, 255, 0.7);
+    border-color: var(--focus-border);
   }
 
   .transform-input.value-error {
-    border-color: rgba(255, 100, 100, 0.8);
+    border-color: var(--danger-focus-border);
   }
 
   .transform-error {
-    color: #ff8080;
+    color: var(--danger-muted);
     font-size: 0.75rem;
   }
 </style>

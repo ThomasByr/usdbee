@@ -96,7 +96,7 @@
 
   <button
     class="tool-btn"
-    style={viewer.enableDamping ? "color: #0e639c;" : ""}
+    style={viewer.enableDamping ? "color: var(--accent);" : ""}
     onclick={() => {
       viewer.enableDamping = !viewer.enableDamping;
       if (viewer.controls) viewer.controls.enableDamping = viewer.enableDamping;
@@ -181,17 +181,17 @@
     transform: translateX(-50%);
     display: flex;
     gap: 8px;
-    background: rgba(30, 30, 30, 0.8);
+    background: var(--toolbar-bg);
     padding: 6px 12px;
     border-radius: 6px;
-    border: 1px solid #3c3c3c;
+    border: 1px solid var(--control-border);
     z-index: 10;
     backdrop-filter: blur(4px);
     align-items: center;
   }
 
   .gizmo-status {
-    color: #d19a5a;
+    color: var(--warning-soft);
     font-size: 13px;
     cursor: help;
   }
@@ -199,7 +199,7 @@
   .gizmo-sep {
     width: 1px;
     height: 18px;
-    background: #3c3c3c;
+    background: var(--control-bg);
   }
 
   .slider-dropdown {
@@ -208,11 +208,11 @@
     left: 50%;
     transform: translateX(-50%);
     margin-top: 8px;
-    background: #252526;
-    border: 1px solid #3c3c3c;
+    background: var(--panel);
+    border: 1px solid var(--control-border);
     padding: 10px 14px;
     border-radius: 6px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 4px 12px var(--shadow);
     display: flex;
     align-items: center;
     z-index: 20;
@@ -223,9 +223,9 @@
   .triangle-count {
     font-family: monospace;
     font-size: 12px;
-    color: #9cdcfe;
+    color: var(--syntax-cyan);
     padding-left: 8px;
-    border-left: 1px solid #3c3c3c;
+    border-left: 1px solid var(--control-border);
     display: flex;
     align-items: center;
     height: 20px;

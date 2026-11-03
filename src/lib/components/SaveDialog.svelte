@@ -254,9 +254,9 @@
     flex: 1 1 auto;
     padding: 4px 8px;
     font-size: 12px;
-    background: var(--bg-color, #1e1e1e);
+    background: var(--bg);
     color: inherit;
-    border: 1px solid #555;
+    border: 1px solid var(--border-strong);
     border-radius: 4px;
   }
 
@@ -266,7 +266,7 @@
   }
 
   .save-warning {
-    color: #e6a23c;
+    color: var(--warning-amber);
     font-size: 12px;
     white-space: nowrap;
   }

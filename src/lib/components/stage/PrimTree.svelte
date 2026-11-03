@@ -24,7 +24,7 @@
 <div style="display: flex; flex-direction: column; height: 100%;">
   {#if stageState.status === "ready"}
     <div
-      style="display: flex; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid #3e3e42; margin-bottom: 8px;"
+      style="display: flex; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border-split); margin-bottom: 8px;"
     >
       <button class="action-btn" onclick={() => setAllExpanded(true)} style="flex: 1; padding: 4px;">
         Expand All
@@ -48,11 +48,11 @@
         <PrimTreeNode {node} depth={0} {expandedPaths} forceOpen={filtering} {onHighlight} />
       {/each}
     {:else if stageState.status === "loading"}
-      <p style="color: #666; text-align: center;">Loading stage...</p>
+      <p style="color: var(--text-faint); text-align: center;">Loading stage...</p>
     {:else if stageState.status === "error"}
-      <p style="color: #a66; text-align: center;">Failed to load stage tree.</p>
+      <p style="color: var(--danger-faint); text-align: center;">Failed to load stage tree.</p>
     {:else}
-      <p style="color: #666; text-align: center;">No USD scene loaded.</p>
+      <p style="color: var(--text-faint); text-align: center;">No USD scene loaded.</p>
     {/if}
   </div>
 </div>

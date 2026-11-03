@@ -106,9 +106,9 @@
     min-width: 4rem;
     max-width: 14rem;
     padding: 0.1rem 0.3rem;
-    border: 1px solid rgba(255, 255, 255, 0.15);
+    border: 1px solid var(--input-border-soft);
     border-radius: 3px;
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--input-bg-soft);
     color: inherit;
     font: inherit;
     font-size: 0.85rem;
@@ -116,16 +116,16 @@
 
   .value-editor:focus {
     outline: none;
-    border-color: rgba(120, 170, 255, 0.7);
+    border-color: var(--focus-border);
   }
 
   .value-editor.value-error {
-    border-color: rgba(255, 100, 100, 0.8);
+    border-color: var(--danger-focus-border);
   }
 
   .value-editor-error {
     font-size: 0.72rem;
-    color: #ff8080;
+    color: var(--danger-muted);
     max-width: 14rem;
     overflow: hidden;
     text-overflow: ellipsis;

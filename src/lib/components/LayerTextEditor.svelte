@@ -202,9 +202,9 @@
     flex: 1 1 auto;
     padding: 4px 8px;
     font-size: 12px;
-    background: var(--bg-color, #1e1e1e);
+    background: var(--bg);
     color: inherit;
-    border: 1px solid #555;
+    border: 1px solid var(--border-strong);
     border-radius: 4px;
   }
 
@@ -221,16 +221,16 @@
     font-size: 12px;
     line-height: 1.4;
     padding: 8px;
-    background: var(--bg-color, #1e1e1e);
+    background: var(--bg);
     color: inherit;
-    border: 1px solid #555;
+    border: 1px solid var(--border-strong);
     border-radius: 4px;
     white-space: pre;
     overflow: auto;
   }
 
   .error-text {
-    color: #e05555;
+    color: var(--danger-edit);
     font-size: 12px;
     white-space: pre-wrap;
     max-height: 120px;

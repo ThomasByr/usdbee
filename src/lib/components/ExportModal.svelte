@@ -323,7 +323,7 @@
                       />
                     </div>
                     <div
-                      style="display: flex; justify-content: space-between; font-size: 0.8rem; color: #aaa;"
+                      style="display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-mid);"
                     >
                       <span>Start: {exportStartTime.toFixed(2)}</span>
                       <span>End: {exportEndTime.toFixed(2)}</span>
@@ -358,16 +358,16 @@
     <div class="export-footer">
       {#if isExporting}
         <div class="export-progress-container" style="flex: 1; margin-right: 15px;">
-          <div style="font-size: 0.85rem; margin-bottom: 5px; color: #ccc;">
+          <div style="font-size: 0.85rem; margin-bottom: 5px; color: var(--text);">
             {exportStage}
             {exportProgress}%
           </div>
           <div
             class="export-progress-bar"
-            style="background: #333; height: 8px; border-radius: 4px; overflow: hidden;"
+            style="background: var(--bg-sunken); height: 8px; border-radius: 4px; overflow: hidden;"
           >
             <div
-              style="background: #4caf50; height: 100%; width: {exportProgress}%; transition: width 0.1s linear;"
+              style="background: var(--success-strong); height: 100%; width: {exportProgress}%; transition: width 0.1s linear;"
             ></div>
           </div>
         </div>
@@ -388,7 +388,7 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.7);
+    background: var(--overlay-strong);
     display: flex;
     justify-content: center;
     align-items: center;
@@ -400,25 +400,25 @@
   }
 
   .export-modal-content {
-    background: #1e1e1e;
-    color: #e0e0e0;
+    background: var(--bg);
+    color: var(--text-strong);
     border-radius: 8px;
     width: 100%;
     max-width: 800px;
     max-height: 90vh;
     display: flex;
     flex-direction: column;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-    border: 1px solid #333;
+    box-shadow: 0 10px 30px var(--shadow);
+    border: 1px solid var(--border);
   }
 
   .export-header {
     padding: 16px 20px;
-    border-bottom: 1px solid #333;
+    border-bottom: 1px solid var(--border);
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: #252526;
+    background: var(--panel);
     border-radius: 8px 8px 0 0;
   }
 
@@ -430,14 +430,14 @@
   .export-close-btn {
     background: none;
     border: none;
-    color: #888;
+    color: var(--text-dim);
     font-size: 1.5rem;
     cursor: pointer;
     padding: 0;
   }
 
   .export-close-btn:hover {
-    color: #fff;
+    color: var(--text-bright);
   }
 
   .export-body {
@@ -464,9 +464,9 @@
   .format-btn {
     flex: 1;
     padding: 8px;
-    background: #333;
-    color: #ccc;
-    border: 1px solid #444;
+    background: var(--bg-sunken);
+    color: var(--text);
+    border: 1px solid var(--border-muted);
     border-radius: 4px;
     cursor: pointer;
     font-weight: bold;
@@ -474,13 +474,13 @@
   }
 
   .format-btn:hover {
-    background: #444;
+    background: var(--btn-secondary-bg);
   }
 
   .format-btn.active {
-    background: #0e639c;
-    color: white;
-    border-color: #1177bb;
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border-color: var(--accent-hover);
   }
 
   .setting-group {
@@ -495,23 +495,23 @@
   }
 
   .export-select {
-    background: #333;
-    color: white;
-    border: 1px solid #555;
+    background: var(--bg-sunken);
+    color: var(--text-bright);
+    border: 1px solid var(--border-strong);
     padding: 8px;
     border-radius: 4px;
   }
 
   .export-select:focus {
     outline: none;
-    border-color: #0e639c;
+    border-color: var(--accent);
   }
 
   .format-options {
-    background: #252525;
+    background: var(--panel-inset);
     padding: 16px;
     border-radius: 4px;
-    border: 1px solid #333;
+    border: 1px solid var(--border);
     min-height: 120px;
     flex: 1;
   }
@@ -534,7 +534,7 @@
   }
 
   .export-warning {
-    color: #d7ba7d;
+    color: var(--warning-pale);
     font-size: 0.8rem;
     margin-top: 10px;
   }
@@ -543,9 +543,9 @@
     flex: 1;
     display: flex;
     flex-direction: column;
-    background: #111;
+    background: var(--bg-deep);
     border-radius: 4px;
-    border: 1px solid #333;
+    border: 1px solid var(--border);
     position: relative;
     min-height: 300px;
     overflow: hidden;
@@ -555,11 +555,11 @@
     position: absolute;
     top: 8px;
     left: 8px;
-    background: rgba(0, 0, 0, 0.6);
+    background: var(--overlay);
     padding: 4px 8px;
     font-size: 0.8rem;
     border-radius: 4px;
-    color: #aaa;
+    color: var(--text-mid);
     z-index: 10;
     pointer-events: none;
   }
@@ -574,29 +574,29 @@
 
   .checkerboard {
     background-image:
-      linear-gradient(45deg, #222 25%, transparent 25%), linear-gradient(-45deg, #222 25%, transparent 25%),
-      linear-gradient(45deg, transparent 75%, #222 75%), linear-gradient(-45deg, transparent 75%, #222 75%);
+      linear-gradient(45deg, var(--checkerboard) 25%, transparent 25%), linear-gradient(-45deg, var(--checkerboard) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, var(--checkerboard) 75%), linear-gradient(-45deg, transparent 75%, var(--checkerboard) 75%);
     background-size: 20px 20px;
     background-position:
       0 0,
       0 10px,
       10px -10px,
       -10px 0px;
-    background-color: #1a1a1a;
+    background-color: var(--preview-bg);
   }
 
   .preview-img {
     max-width: 100%;
     max-height: 50vh;
     object-fit: contain;
-    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 5px 15px var(--shadow);
   }
 
   .mp4-placeholder {
     display: flex;
     flex-direction: column;
     align-items: center;
-    color: #666;
+    color: var(--text-faint);
   }
 
   .mp4-icon {
@@ -613,8 +613,8 @@
 
   .export-footer {
     padding: 16px 20px;
-    background: #252526;
-    border-top: 1px solid #333;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
     border-radius: 0 0 8px 8px;
     display: flex;
     justify-content: flex-end;
@@ -631,21 +631,21 @@
   }
 
   .export-btn.cancel {
-    background: #444;
-    color: #fff;
+    background: var(--btn-secondary-bg);
+    color: var(--text-bright);
   }
 
   .export-btn.cancel:hover {
-    background: #555;
+    background: var(--btn-secondary-hover);
   }
 
   .export-btn.confirm {
-    background: #0e639c;
-    color: #fff;
+    background: var(--accent);
+    color: var(--accent-contrast);
   }
 
   .export-btn.confirm:hover {
-    background: #1177bb;
+    background: var(--accent-hover);
   }
 
   @media (max-width: 600px) {
@@ -682,7 +682,7 @@
     width: 14px;
     height: 14px;
     border-radius: 50%;
-    background: #0e639c;
+    background: var(--accent);
     cursor: pointer;
   }
   .dual-slider-container input[type="range"]::-moz-range-thumb {
@@ -690,7 +690,7 @@
     width: 14px;
     height: 14px;
     border-radius: 50%;
-    background: #0e639c;
+    background: var(--accent);
     cursor: pointer;
     border: none;
   }
@@ -698,14 +698,14 @@
     position: absolute;
     width: 100%;
     height: 4px;
-    background: #333;
+    background: var(--bg-sunken);
     border-radius: 2px;
     z-index: 0;
   }
   .slider-track {
     position: absolute;
     height: 4px;
-    background: #0e639c;
+    background: var(--accent);
     border-radius: 2px;
     z-index: 1;
   }

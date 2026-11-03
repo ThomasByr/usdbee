@@ -67,7 +67,7 @@
             />
           </div>
         {:else}
-          <span class="size" style="color: #ff5555;">Broken Ref</span>
+          <span class="size" style="color: var(--danger);">Broken Ref</span>
         {/if}
       </li>
     {/each}

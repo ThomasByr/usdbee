@@ -1,4 +1,5 @@
 <script lang="ts">
+  import "../lib/styles/tokens.css";
   import "./page.css";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
@@ -28,6 +29,7 @@
   import { stageState } from "$lib/stage/stageState.svelte";
   import { editState } from "$lib/state/editState.svelte";
   import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
+  import { initTheme } from "$lib/state/themeState.svelte";
   import { confirmCloseNeeded } from "$lib/state/closeGuard";
   import { layerTextState } from "$lib/state/layerTextState.svelte";
   import { renderState, toAbsoluteTime } from "$lib/render/renderState.svelte";
@@ -222,6 +224,7 @@
 
     loadControlPreferences();
     loadGraphicsPreferences();
+    const stopThemeListener = initTheme();
     const savedWidth = localStorage.getItem("sidebarWidth");
     if (savedWidth) {
       let parsed = parseInt(savedWidth);
@@ -269,6 +272,7 @@
 
     // Cleanup listeners
     return () => {
+      stopThemeListener();
       window.removeEventListener("keydown", handleGlobalKeydown);
       window.removeEventListener("keyup", handleGlobalKeyup);
       unlisteners.forEach((u) => u.then((f) => f()));
@@ -492,7 +496,7 @@
       <button class="tool-btn" onclick={() => (showCloseConfirm = false)}>Cancel</button>
       <button
         class="primary-btn"
-        style="background: #a33;"
+        style="background: var(--danger-solid);"
         onclick={() => {
           showCloseConfirm = false;
           getCurrentWindow().destroy().catch(console.warn);

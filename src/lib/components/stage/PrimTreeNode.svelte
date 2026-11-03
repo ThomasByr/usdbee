@@ -59,12 +59,12 @@
     <span class="node-type" title={node.path}>[{node.type_name}]</span>
     <span class="node-name" title={node.path}>{node.name}</span>
     {#if node.is_instance}
-      <span style="font-size: 9px; padding: 1px 4px; border-radius: 3px; background: #3a3a1f; color: #dcdcaa;"
+      <span style="font-size: 9px; padding: 1px 4px; border-radius: 3px; background: var(--badge-instance-bg); color: var(--syntax-yellow);"
         >instance</span
       >
     {/if}
     {#if !node.is_active}
-      <span style="font-size: 9px; padding: 1px 4px; border-radius: 3px; background: #3a1f1f; color: #f48771;"
+      <span style="font-size: 9px; padding: 1px 4px; border-radius: 3px; background: var(--badge-off-bg); color: var(--danger-soft);"
         >inactive</span
       >
     {/if}
