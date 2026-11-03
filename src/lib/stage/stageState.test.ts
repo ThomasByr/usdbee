@@ -300,6 +300,36 @@ describe("stageState", () => {
     expect(await stageState.getMaterialInfo("/B")).toBeNull();
   });
 
+  it("clear resets the whole stage state for the no-stage empty view", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    await stageState.selectPrim("/A");
+
+    stageState.clear();
+
+    expect(stageState.activeStageId).toBe(0);
+    expect(stageState.stageInfo).toBeNull();
+    expect(stageState.tree).toEqual([]);
+    expect(stageState.selectedPath).toBeNull();
+    expect(stageState.details).toBeNull();
+    expect(stageState.status).toBe("idle");
+    expect(stageState.error).toBeNull();
+  });
+
+  it("clear invalidates an in-flight adopt", async () => {
+    const staleTree = deferred<never>();
+    mockedInvoke.mockReturnValueOnce(staleTree.promise);
+    const adopt = stageState.adoptOpenedStage(info as never);
+
+    stageState.clear();
+    staleTree.resolve([] as never);
+    await adopt;
+
+    expect(stageState.stageInfo).toBeNull();
+    expect(stageState.tree).toEqual([]);
+    expect(stageState.status).toBe("idle");
+  });
+
   it("refreshAfterEdit refetches the tree and re-selects the prim", async () => {
     mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
     await stageState.loadStage("/a.usda");

@@ -2,6 +2,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
+  import { tabsState } from "$lib/state/tabsState.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
   import { renderState, toAbsoluteTime } from "$lib/render/renderState.svelte";
   import {
@@ -134,6 +135,13 @@
     // step functions.
     const unlisteners = [
       loadOrchestrator.init({
+        resetScene: () => resetLoadedScene(viewer),
+        loadScene: () => loadRustScene(viewer),
+      }),
+      // Stage tabs (Task 11): switching tabs composes the active stage's
+      // scene through the same viewport-bound steps; closing the last tab
+      // resets to the empty view.
+      tabsState.init({
         resetScene: () => resetLoadedScene(viewer),
         loadScene: () => loadRustScene(viewer),
       }),

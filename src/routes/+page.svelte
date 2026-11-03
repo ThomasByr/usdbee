@@ -4,9 +4,11 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
   import { onMount } from "svelte";
   import { formatKeyName } from "$lib/utils/format";
   import ErrorModal from "$lib/components/ErrorModal.svelte";
+  import TabBar from "$lib/components/TabBar.svelte";
   import FilesTab from "$lib/components/tabs/FilesTab.svelte";
   import HierarchyTab from "$lib/components/tabs/HierarchyTab.svelte";
   import RenderingTab from "$lib/components/tabs/RenderingTab.svelte";
@@ -30,7 +32,8 @@
   import { editState } from "$lib/state/editState.svelte";
   import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
   import { initTheme } from "$lib/state/themeState.svelte";
-  import { confirmCloseNeeded } from "$lib/state/closeGuard";
+  import { windowCloseConfirmNeeded } from "$lib/state/closeGuard";
+  import type { StageSummary } from "$lib/stage/types";
   import { layerTextState } from "$lib/state/layerTextState.svelte";
   import { renderState, toAbsoluteTime } from "$lib/render/renderState.svelte";
   import type { GizmoMode } from "$lib/render/xformOps";
@@ -64,6 +67,10 @@
   // unsaved edits; the modal's confirm is the only path that destroys the
   // window.
   let showCloseConfirm = $state<boolean>(false);
+  // Task 11: the guard aggregates every open stage; these hold the totals
+  // the confirm modal shows.
+  let closeConfirmDirty = $state<number>(0);
+  let closeConfirmDraft = $state<boolean>(false);
   let isExporting = $state<boolean>(false);
   let exportProgress = $state<number>(0);
   let exportStage = $state<string>("Exporting...");
@@ -259,16 +266,33 @@
     // undo-state refresh) and primes the edit-target/dirty-layer snapshot.
     unlisteners.push(editState.init());
 
-    // Task 5: intercept the OS close request while any layer has unsaved
-    // edits — the confirm modal's button is the only thing that destroys
-    // the window then. The need-to-confirm logic itself is pure code in
+    // Task 11: the guard aggregates dirt across ALL open stages
+    // (list_stages dirty counts) plus the active stage's unapplied text
+    // draft — not just the active tab. preventDefault must run
+    // synchronously, so the clean path destroys the window explicitly
+    // once the check resolves; the decision logic is pure code in
     // closeGuard.ts (Vitest-pinned).
     unlisteners.push(
       getCurrentWindow().onCloseRequested((event) => {
-        if (confirmCloseNeeded(editState.dirtyLayers.length, layerTextState.draftDirty)) {
-          event.preventDefault();
-          showCloseConfirm = true;
-        }
+        event.preventDefault();
+        void (async () => {
+          const summaries = (await invoke<StageSummary[]>("list_stages").catch(() => null)) ?? [
+            {
+              stage_id: stageState.activeStageId,
+              root_identifier: "",
+              dirty_count: editState.dirtyLayers.length,
+            },
+          ];
+          if (windowCloseConfirmNeeded(summaries, layerTextState.draftDirty)) {
+            closeConfirmDirty = summaries.reduce((total, s) => total + s.dirty_count, 0);
+            closeConfirmDraft = layerTextState.draftDirty;
+            showCloseConfirm = true;
+          } else {
+            // destroy() bypasses the close-time window-state save.
+            await saveWindowState(StateFlags.ALL).catch(console.warn);
+            getCurrentWindow().destroy().catch(console.warn);
+          }
+        })();
       }),
     );
 
@@ -311,153 +335,162 @@
   }
 </script>
 
-<main class="app-layout" class:resizing={isResizing}>
-  <!-- Sidebar for Dependency Tree -->
-  <aside class="sidebar" style="width: {sidebarWidth}px;">
-    <div class="sidebar-header">
-      <h2>
-        USDA / Asset Graph
-        {#if editState.dirtyLayers.length > 0}
-          <span
-            class="dirty-dot"
-            title="{editState.dirtyLayers.length} layer(s) with unsaved changes — Ctrl+S to save"
-          ></span>
-        {/if}
-      </h2>
-      <div class="header-actions">
-        <button class="primary-btn" onclick={() => void loadOrchestrator.openUsdFile()} title="Open USD File">
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
+<div class="app-shell">
+  <TabBar />
+  <main class="app-layout" class:resizing={isResizing}>
+    <!-- Sidebar for Dependency Tree -->
+    <aside class="sidebar" style="width: {sidebarWidth}px;">
+      <div class="sidebar-header">
+        <h2>
+          USDA / Asset Graph
+          {#if editState.dirtyLayers.length > 0}
+            <span
+              class="dirty-dot"
+              title="{editState.dirtyLayers.length} layer(s) with unsaved changes — Ctrl+S to save"
+            ></span>
+          {/if}
+        </h2>
+        <div class="header-actions">
+          <button
+            class="primary-btn"
+            onclick={() => void loadOrchestrator.openUsdFile()}
+            title="Open USD File"
           >
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-          </svg>
-          Open
-        </button>
-        <button
-          class="primary-btn"
-          onclick={() => (showExportModal = true)}
-          disabled={loadOrchestrator.loadingProgress !== null || loadOrchestrator.rootFile === null}
-          title="Export Scene"
-        >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+            </svg>
+            Open
+          </button>
+          <button
+            class="primary-btn"
+            onclick={() => (showExportModal = true)}
+            disabled={loadOrchestrator.loadingProgress !== null || loadOrchestrator.rootFile === null}
+            title="Export Scene"
           >
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-            <polyline points="7 10 12 15 17 10"></polyline>
-            <line x1="12" y1="15" x2="12" y2="3"></line>
-          </svg>
-          Export
-        </button>
-      </div>
-    </div>
-
-    <div class="tab-bar">
-      <button class="tab-btn" class:active={activeTab === "files"} onclick={() => (activeTab = "files")}
-        >Files</button
-      >
-      <button class="tab-btn" class:active={activeTab === "scene"} onclick={() => (activeTab = "scene")}
-        >Hierarchy</button
-      >
-      <button
-        class="tab-btn"
-        class:active={activeTab === "rendering"}
-        onclick={() => (activeTab = "rendering")}>Rendering</button
-      >
-      <button class="tab-btn" class:active={activeTab === "layers"} onclick={() => (activeTab = "layers")}
-        >Layer Text</button
-      >
-      <button class="tab-btn" class:active={activeTab === "settings"} onclick={() => (activeTab = "settings")}
-        >Settings</button
-      >
-    </div>
-
-    {#if loadOrchestrator.loadingProgress}
-      <div class="progress-box">
-        <p>{loadOrchestrator.loadingProgress.stage}</p>
-        <div class="progress-bar">
-          <div class="progress-fill" style="width: {loadOrchestrator.loadingProgress.percent}%"></div>
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            Export
+          </button>
         </div>
       </div>
-    {/if}
 
-    <div class="dependency-tree">
-      {#if activeTab === "files"}
-        <FilesTab {viewer} />
-      {/if}
-      {#if activeTab === "scene"}
-        <HierarchyTab {viewer} />
+      <div class="tab-bar">
+        <button class="tab-btn" class:active={activeTab === "files"} onclick={() => (activeTab = "files")}
+          >Files</button
+        >
+        <button class="tab-btn" class:active={activeTab === "scene"} onclick={() => (activeTab = "scene")}
+          >Hierarchy</button
+        >
+        <button
+          class="tab-btn"
+          class:active={activeTab === "rendering"}
+          onclick={() => (activeTab = "rendering")}>Rendering</button
+        >
+        <button class="tab-btn" class:active={activeTab === "layers"} onclick={() => (activeTab = "layers")}
+          >Layer Text</button
+        >
+        <button
+          class="tab-btn"
+          class:active={activeTab === "settings"}
+          onclick={() => (activeTab = "settings")}>Settings</button
+        >
+      </div>
+
+      {#if loadOrchestrator.loadingProgress}
+        <div class="progress-box">
+          <p>{loadOrchestrator.loadingProgress.stage}</p>
+          <div class="progress-bar">
+            <div class="progress-fill" style="width: {loadOrchestrator.loadingProgress.percent}%"></div>
+          </div>
+        </div>
       {/if}
 
-      {#if activeTab === "rendering"}
-        <RenderingTab
-          bind:maxFps={viewerSettings.maxFps}
-          bind:renderScale={viewerSettings.renderScale}
-          {saveGraphicsPreferences}
-          bind:toneMapping={viewerSettings.toneMapping}
-          bind:toneExposure={viewerSettings.toneExposure}
-          bind:ambientIntensity={viewerSettings.ambientIntensity}
-          bind:dirIntensity={viewerSettings.dirIntensity}
-          bind:shadowsEnabled={viewerSettings.shadowsEnabled}
-          bind:shadowMapSize={viewerSettings.shadowMapSize}
-          bind:shadowMapType={viewerSettings.shadowMapType}
-          bind:anisotropy={viewerSettings.anisotropy}
-          bind:envMapIntensity={viewerSettings.envMapIntensity}
-          bind:backgroundColor={viewer.backgroundColor}
-          bind:lightAzimuth
-          bind:lightElevation
-        />
-      {/if}
-      {#if activeTab === "layers"}
-        <LayerTextTab />
-      {/if}
-      {#if activeTab === "settings"}
-        <SettingsTab
-          bind:showWireframe={viewer.showWireframe}
-          bind:showGrid={viewer.showGrid}
-          bind:showBoundingBox={viewer.showBoundingBox}
-          bind:moveSpeedFactor={controlsState.moveSpeedFactor}
-          bind:rotSpeedFactor={controlsState.rotSpeedFactor}
-          bind:invertMouseX={controlsState.invertMouseX}
-          bind:invertMouseY={controlsState.invertMouseY}
-          bind:mouseButtonLeft={controlsState.mouseButtonLeft}
-          bind:mouseButtonMiddle={controlsState.mouseButtonMiddle}
-          bind:mouseButtonRight={controlsState.mouseButtonRight}
-          bind:keybindings={controlsState.keybindings}
-          bind:backgroundColor={viewer.backgroundColor}
-          bind:activeCameraIndex={viewer.activeCameraIndex}
-          bind:omniverseUrl
-          usdCameras={viewer.usdCameras}
-          triangleCount={viewer.triangleCount}
-          {saveControlPreferences}
-          {formatKeyName}
-          keysPressed={viewer.keysPressed}
-          {updateOmniverseUrl}
-        />
-      {/if}
-    </div>
-  </aside>
+      <div class="dependency-tree">
+        {#if activeTab === "files"}
+          <FilesTab {viewer} />
+        {/if}
+        {#if activeTab === "scene"}
+          <HierarchyTab {viewer} />
+        {/if}
 
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <div class="resize-handle" onmousedown={startResize} role="separator" tabindex="0"></div>
+        {#if activeTab === "rendering"}
+          <RenderingTab
+            bind:maxFps={viewerSettings.maxFps}
+            bind:renderScale={viewerSettings.renderScale}
+            {saveGraphicsPreferences}
+            bind:toneMapping={viewerSettings.toneMapping}
+            bind:toneExposure={viewerSettings.toneExposure}
+            bind:ambientIntensity={viewerSettings.ambientIntensity}
+            bind:dirIntensity={viewerSettings.dirIntensity}
+            bind:shadowsEnabled={viewerSettings.shadowsEnabled}
+            bind:shadowMapSize={viewerSettings.shadowMapSize}
+            bind:shadowMapType={viewerSettings.shadowMapType}
+            bind:anisotropy={viewerSettings.anisotropy}
+            bind:envMapIntensity={viewerSettings.envMapIntensity}
+            bind:backgroundColor={viewer.backgroundColor}
+            bind:lightAzimuth
+            bind:lightElevation
+          />
+        {/if}
+        {#if activeTab === "layers"}
+          <LayerTextTab />
+        {/if}
+        {#if activeTab === "settings"}
+          <SettingsTab
+            bind:showWireframe={viewer.showWireframe}
+            bind:showGrid={viewer.showGrid}
+            bind:showBoundingBox={viewer.showBoundingBox}
+            bind:moveSpeedFactor={controlsState.moveSpeedFactor}
+            bind:rotSpeedFactor={controlsState.rotSpeedFactor}
+            bind:invertMouseX={controlsState.invertMouseX}
+            bind:invertMouseY={controlsState.invertMouseY}
+            bind:mouseButtonLeft={controlsState.mouseButtonLeft}
+            bind:mouseButtonMiddle={controlsState.mouseButtonMiddle}
+            bind:mouseButtonRight={controlsState.mouseButtonRight}
+            bind:keybindings={controlsState.keybindings}
+            bind:backgroundColor={viewer.backgroundColor}
+            bind:activeCameraIndex={viewer.activeCameraIndex}
+            bind:omniverseUrl
+            usdCameras={viewer.usdCameras}
+            triangleCount={viewer.triangleCount}
+            {saveControlPreferences}
+            {formatKeyName}
+            keysPressed={viewer.keysPressed}
+            {updateOmniverseUrl}
+          />
+        {/if}
+      </div>
+    </aside>
 
-  <!-- Main View for 3D Render Surface -->
-  <Viewport {viewer} bind:gizmoMode {lightAzimuth} {lightElevation} />
-</main>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div class="resize-handle" onmousedown={startResize} role="separator" tabindex="0"></div>
+
+    <!-- Main View for 3D Render Surface -->
+    <Viewport {viewer} bind:gizmoMode {lightAzimuth} {lightElevation} />
+  </main>
+</div>
 
 {#if loadOrchestrator.modalError}
   <ErrorModal error={loadOrchestrator.modalError} onClose={loadOrchestrator.closeErrorModal} />
@@ -493,7 +526,11 @@
     closeOnBackdrop={false}
     onClose={() => (showCloseConfirm = false)}
   >
-    <p>{editState.dirtyLayers.length} layer(s) have unsaved edits. Close anyway and lose them?</p>
+    <p>
+      {closeConfirmDirty} layer(s) with unsaved edits across open stages{closeConfirmDraft
+        ? " and an unapplied text draft"
+        : ""}. Quit anyway and lose them?
+    </p>
     <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;">
       <button class="tool-btn" onclick={() => (showCloseConfirm = false)}>Cancel</button>
       <button
@@ -501,7 +538,9 @@
         style="background: var(--danger-solid);"
         onclick={() => {
           showCloseConfirm = false;
-          getCurrentWindow().destroy().catch(console.warn);
+          void saveWindowState(StateFlags.ALL)
+            .catch(console.warn)
+            .finally(() => getCurrentWindow().destroy().catch(console.warn));
         }}>Close anyway</button
       >
     </div>

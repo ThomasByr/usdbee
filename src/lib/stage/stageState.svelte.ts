@@ -44,6 +44,21 @@ export const stageState = $state({
     }
   },
 
+  // Reset to the no-stage empty view (Task 11: closing the last tab).
+  // Bumps both generations so in-flight loads/adopts cannot repopulate
+  // cleared state.
+  clear(): void {
+    ++loadGeneration;
+    ++selectionGeneration;
+    this.activeStageId = 0;
+    this.stageInfo = null;
+    this.tree = [];
+    this.selectedPath = null;
+    this.details = null;
+    this.status = "idle";
+    this.error = null;
+  },
+
   async adoptOpenedStage(stageInfo: StageInfo): Promise<void> {
     const generation = ++loadGeneration;
     selectionGeneration += 1;
