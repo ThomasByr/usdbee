@@ -1,6 +1,7 @@
 use crate::fetcher::get_usdbee_cache_dir;
 use crate::models::{ProgressEvent, UsdDependencyNode, UsdSceneData};
 use crate::parser::{resolve_remote_dependencies, scan_dependencies, DependencyScan};
+use crate::stage::StageInfo;
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -18,8 +19,6 @@ pub async fn trigger_open_usd_dialog(app: tauri::AppHandle) -> Result<(), String
         .pick_file(move |file_path| {
             if let Some(path) = file_path {
                 let path_str = path.to_string();
-                let _ = app.emit("usd-load-start", path_str.clone());
-
                 let app_clone = app.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = process_usd_file(app_clone.clone(), path_str).await {
@@ -155,7 +154,16 @@ async fn unpack_usdz(path: &str) -> Result<(String, std::path::PathBuf), String>
     }
 }
 
-async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(), String> {
+// The shared open orchestration for the dialog flow and the path-based
+// command: emits the full usd-load-* event stream (start/progress/scene-
+// loaded/stage-opened) and returns the opened stage's info.
+async fn process_usd_file<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    mut path: String,
+) -> Result<StageInfo, String> {
+    app.emit("usd-load-start", path.clone())
+        .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-start: {}", e));
+
     app.emit(
         "usd-load-progress",
         ProgressEvent {
@@ -329,9 +337,21 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
     .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
     app.emit("usd-scene-loaded", scene)
         .unwrap_or_else(|e| eprintln!("Failed to emit usd-scene-loaded: {}", e));
-    app.emit("usd-stage-opened", stage_info)
+    app.emit("usd-stage-opened", &stage_info)
         .unwrap_or_else(|e| eprintln!("Failed to emit usd-stage-opened: {}", e));
-    Ok(())
+    Ok(stage_info)
+}
+
+// Path-based open (drag-drop, recent files): the SAME orchestration the
+// dialog flow runs — usdz extraction, dependency scan + remote fetch,
+// fallback-color population, usd-load-* events — with the error returned
+// to the caller instead of the usd-load-error event.
+#[tauri::command]
+pub async fn open_usd_file_path<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    path: String,
+) -> Result<StageInfo, String> {
+    process_usd_file(app, path).await
 }
 
 #[tauri::command]

@@ -4,6 +4,8 @@ pub use fetcher::get_usdbee_cache_dir;
 pub mod materials;
 mod models;
 mod omniverse;
+pub use commands::open_usd_file_path;
+pub use omniverse::AppState;
 pub mod parser;
 pub mod stage;
 pub mod tessellation;
@@ -87,6 +89,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::trigger_open_usd_dialog,
+            commands::open_usd_file_path,
             commands::set_fallback_color,
             commands::read_file_bytes,
             commands::save_file_bytes,
