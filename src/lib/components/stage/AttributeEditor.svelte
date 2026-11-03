@@ -50,10 +50,12 @@
       suppressNextBlur = true;
       return;
     }
-    // Nothing changed: just clear the error state. Color arrays compare
-    // by content (both sides are fresh JSON arrays).
+    // Nothing changed: just clear the error state. Color arrays compare by
+    // the hex forms (both sides use the 8-bit hex grid), so a quantized
+    // round trip (e.g. 0.5 -> #808080 -> 128/255) never commits a no-op
+    // edit; an edited hex that differs from the original still does.
     const unchanged = wasColor
-      ? JSON.stringify(result.value.data) === JSON.stringify(value.data)
+      ? colorArrayHex(result.value) === colorArrayHex(value)
       : result.value.data === value.data;
     if (unchanged) {
       error = null;

@@ -487,6 +487,13 @@ fn payload_single_color_element(payload: &ValuePayload) -> Result<gf::Vec3f, Str
     let triple = single
         .as_array()
         .ok_or_else(|| format!("{} element is not an [r, g, b] list", payload.r#type))?;
+    if triple.len() != 3 {
+        return Err(format!(
+            "{} element needs exactly 3 components, got {}",
+            payload.r#type,
+            triple.len()
+        ));
+    }
     let mut out = [0.0; 3];
     for (index, item) in triple.iter().enumerate() {
         out[index] = item

@@ -261,6 +261,28 @@ fn float3_array_authors_one_element_and_refuses_longer_arrays() {
         .expect_err("multi-element arrays must refuse");
         assert!(error.contains("not editable"), "{tag}: {}", error);
     }
+
+    // A malformed single element (wrong component count) refuses readably.
+    for (tag, data) in [
+        ("color3f_array", serde_json::json!([[0.1, 0.2, 0.3, 0.4]])),
+        ("color3f_array", serde_json::json!([[0.1, 0.2]])),
+        ("float3_array", serde_json::json!([[0.1, 0.2, 0.3, 0.4]])),
+        ("float3_array", serde_json::json!([[0.1, 0.2]])),
+    ] {
+        let error = request_set_value(
+            &state,
+            "/World/Ball",
+            "primvars:displayColor",
+            payload(tag, data),
+            None,
+        )
+        .expect_err("malformed single elements must refuse");
+        assert!(
+            error.contains("needs exactly 3 components"),
+            "{tag}: {}",
+            error
+        );
+    }
 }
 
 #[test]
