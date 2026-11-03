@@ -8,6 +8,7 @@
   import { layerDisplayName } from "$lib/stage/layerText";
 
   let { onClose } = $props<{ onClose: () => void }>();
+  let modal = $state<Modal>();
 
   // usdz-opened stages cannot save layers (the backend refuses); the only
   // write path is Save As usdz — repack the composed stage into a NEW
@@ -123,13 +124,14 @@
   function onKeydown(e: KeyboardEvent) {
     // Escape is owned by the shared Modal shell (top-most wins); Enter stays
     // the confirm shortcut.
-    if (e.key === "Enter") void onConfirm();
+    if (e.key === "Enter" && modal?.isTop()) void onConfirm();
   }
 </script>
 
 <svelte:window onkeydown={onKeydown} />
 
 <Modal
+  bind:this={modal}
   title={isUsdzStage ? "Save As usdz" : "Save Layers"}
   contentClass="save-dialog"
   closeOnBackdrop={false}

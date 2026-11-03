@@ -64,7 +64,9 @@
     }
   }
 
-  const isTop = (): boolean => stack[stack.length - 1] === token;
+  export function isTop(): boolean {
+    return stack[stack.length - 1] === token;
+  }
 
   function onWindowKeydown(e: KeyboardEvent): void {
     // Only the top-most modal reacts to keys: a lower modal must not steal

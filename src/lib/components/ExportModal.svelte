@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { WebGLRenderer, PerspectiveCamera, Scene } from "three";
   import * as THREE from "three";
+  import Modal from "$lib/components/Modal.svelte";
 
   let {
     renderer = null,
@@ -173,271 +174,224 @@
   };
 </script>
 
-<div
-  class="modal-overlay"
-  onclick={(e) => e.target === e.currentTarget && close()}
-  role="button"
-  tabindex="0"
-  onkeydown={(e) => e.key === "Escape" && close()}
->
-  <div class="export-modal-content">
-    <div class="export-header">
-      <h2>Export Scene</h2>
-      <button onclick={close} class="export-close-btn">&times;</button>
-    </div>
+<Modal title="Export Scene" contentClass="export-modal-content" onClose={close}>
+  <div class="export-body">
+    <!-- Settings Panel -->
+    <div class="export-settings">
+      <!-- Format Selection -->
+      <div class="format-buttons">
+        {#each hasAnimation ? ["png", "jpg", "mp4"] : ["png", "jpg"] as f}
+          <button
+            class="format-btn {format === f ? 'active' : ''}"
+            onclick={() => (format = f as "jpg" | "png" | "mp4")}
+          >
+            {f}
+          </button>
+        {/each}
+      </div>
 
-    <div class="export-body">
-      <!-- Settings Panel -->
-      <div class="export-settings">
-        <!-- Format Selection -->
-        <div class="format-buttons">
-          {#each hasAnimation ? ["png", "jpg", "mp4"] : ["png", "jpg"] as f}
-            <button
-              class="format-btn {format === f ? 'active' : ''}"
-              onclick={() => (format = f as "jpg" | "png" | "mp4")}
-            >
-              {f}
-            </button>
+      <!-- Resolution -->
+      <div class="setting-group">
+        <label for="resolution_select">Resolution & Aspect Ratio</label>
+        <select id="resolution_select" bind:value={resolution} class="export-select">
+          {#each resolutions as res}
+            <option value={res.value}>{res.label} ({res.width}x{res.height})</option>
           {/each}
-        </div>
+        </select>
+      </div>
 
-        <!-- Resolution -->
-        <div class="setting-group">
-          <label for="resolution_select">Resolution & Aspect Ratio</label>
-          <select id="resolution_select" bind:value={resolution} class="export-select">
-            {#each resolutions as res}
-              <option value={res.value}>{res.label} ({res.width}x{res.height})</option>
-            {/each}
-          </select>
-        </div>
-
-        <!-- Format-specific options -->
-        <div class="format-options">
-          {#if format === "jpg"}
+      <!-- Format-specific options -->
+      <div class="format-options">
+        {#if format === "jpg"}
+          <div class="setting-group">
+            <label class="range-label" for="quality_slider">
+              <span>Quality</span>
+              <span>{quality.toFixed(1)}</span>
+            </label>
+            <input
+              id="quality_slider"
+              type="range"
+              min="0.1"
+              max="1"
+              step="0.1"
+              bind:value={quality}
+              class="export-slider"
+            />
+          </div>
+          {#if hasAnimation}
             <div class="setting-group">
-              <label class="range-label" for="quality_slider">
-                <span>Quality</span>
-                <span>{quality.toFixed(1)}</span>
+              <label class="range-label" for="time_slider">
+                <span>Timestamp</span>
+                <span>{exportTime.toFixed(2)}</span>
               </label>
               <input
-                id="quality_slider"
+                id="time_slider"
                 type="range"
-                min="0.1"
-                max="1"
-                step="0.1"
-                bind:value={quality}
+                min="0"
+                max={animationDuration}
+                step="0.01"
+                bind:value={exportTime}
                 class="export-slider"
               />
             </div>
-            {#if hasAnimation}
-              <div class="setting-group">
-                <label class="range-label" for="time_slider">
-                  <span>Timestamp</span>
-                  <span>{exportTime.toFixed(2)}</span>
-                </label>
-                <input
-                  id="time_slider"
-                  type="range"
-                  min="0"
-                  max={animationDuration}
-                  step="0.01"
-                  bind:value={exportTime}
-                  class="export-slider"
-                />
-              </div>
-            {/if}
-          {:else if format === "png"}
+          {/if}
+        {:else if format === "png"}
+          <div class="setting-group">
+            <label class="checkbox-label">
+              <input type="checkbox" bind:checked={bgTransparent} />
+              Transparent Background
+            </label>
+          </div>
+          {#if hasAnimation}
             <div class="setting-group">
+              <label class="range-label" for="time_slider_png">
+                <span>Timestamp</span>
+                <span>{exportTime.toFixed(2)}</span>
+              </label>
+              <input
+                id="time_slider_png"
+                type="range"
+                min="0"
+                max={animationDuration}
+                step="0.01"
+                bind:value={exportTime}
+                class="export-slider"
+              />
+            </div>
+          {/if}
+        {:else if format === "mp4"}
+          <div class="setting-group">
+            <label
+              class="checkbox-label"
+              title="Appends MP4 metadata to tell video players to loop the video endlessly"
+            >
+              <input type="checkbox" bind:checked={loop} />
+              Infinite Loop Playback Metadata
+            </label>
+            {#if hasAnimation}
               <label class="checkbox-label">
-                <input type="checkbox" bind:checked={bgTransparent} />
-                Transparent Background
+                <input type="checkbox" bind:checked={crop} />
+                Crop Timeline to Content
               </label>
-            </div>
-            {#if hasAnimation}
-              <div class="setting-group">
-                <label class="range-label" for="time_slider_png">
-                  <span>Timestamp</span>
-                  <span>{exportTime.toFixed(2)}</span>
-                </label>
-                <input
-                  id="time_slider_png"
-                  type="range"
-                  min="0"
-                  max={animationDuration}
-                  step="0.01"
-                  bind:value={exportTime}
-                  class="export-slider"
-                />
-              </div>
-            {/if}
-          {:else if format === "mp4"}
-            <div class="setting-group">
-              <label
-                class="checkbox-label"
-                title="Appends MP4 metadata to tell video players to loop the video endlessly"
-              >
-                <input type="checkbox" bind:checked={loop} />
-                Infinite Loop Playback Metadata
-              </label>
-              {#if hasAnimation}
-                <label class="checkbox-label">
-                  <input type="checkbox" bind:checked={crop} />
-                  Crop Timeline to Content
-                </label>
-                {#if crop}
-                  <div class="setting-group time-crop-group">
-                    <label class="range-label" for="crop_start_time">
-                      <span>Crop Timeline</span>
-                    </label>
-                    <div class="dual-slider-container">
-                      <div class="slider-track-bg"></div>
-                      <div
-                        class="slider-track"
-                        style="left: {(exportStartTime / animationDuration) * 100}%; right: {100 -
-                          (exportEndTime / animationDuration) * 100}%;"
-                      ></div>
-                      <input
-                        id="crop_start_time"
-                        type="range"
-                        class="dual-range"
-                        min="0"
-                        max={animationDuration}
-                        step="0.01"
-                        bind:value={exportStartTime}
-                        oninput={() => {
-                          if (exportStartTime > exportEndTime) exportStartTime = exportEndTime;
-                          previewTarget = "start";
-                        }}
-                      />
-                      <input
-                        type="range"
-                        class="dual-range"
-                        min="0"
-                        max={animationDuration}
-                        step="0.01"
-                        bind:value={exportEndTime}
-                        oninput={() => {
-                          if (exportEndTime < exportStartTime) exportEndTime = exportStartTime;
-                          previewTarget = "end";
-                        }}
-                      />
-                    </div>
+              {#if crop}
+                <div class="setting-group time-crop-group">
+                  <label class="range-label" for="crop_start_time">
+                    <span>Crop Timeline</span>
+                  </label>
+                  <div class="dual-slider-container">
+                    <div class="slider-track-bg"></div>
                     <div
-                      style="display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-mid);"
-                    >
-                      <span>Start: {exportStartTime.toFixed(2)}</span>
-                      <span>End: {exportEndTime.toFixed(2)}</span>
-                    </div>
+                      class="slider-track"
+                      style="left: {(exportStartTime / animationDuration) * 100}%; right: {100 -
+                        (exportEndTime / animationDuration) * 100}%;"
+                    ></div>
+                    <input
+                      id="crop_start_time"
+                      type="range"
+                      class="dual-range"
+                      min="0"
+                      max={animationDuration}
+                      step="0.01"
+                      bind:value={exportStartTime}
+                      oninput={() => {
+                        if (exportStartTime > exportEndTime) exportStartTime = exportEndTime;
+                        previewTarget = "start";
+                      }}
+                    />
+                    <input
+                      type="range"
+                      class="dual-range"
+                      min="0"
+                      max={animationDuration}
+                      step="0.01"
+                      bind:value={exportEndTime}
+                      oninput={() => {
+                        if (exportEndTime < exportStartTime) exportEndTime = exportStartTime;
+                        previewTarget = "end";
+                      }}
+                    />
                   </div>
-                {/if}
+                  <div
+                    style="display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-mid);"
+                  >
+                    <span>Start: {exportStartTime.toFixed(2)}</span>
+                    <span>End: {exportEndTime.toFixed(2)}</span>
+                  </div>
+                </div>
               {/if}
-              <p class="export-warning">MP4 Export requires rendering all frames.</p>
-            </div>
-          {/if}
-        </div>
-      </div>
-
-      <!-- Preview Panel -->
-      <div class="export-preview-panel">
-        <div class="preview-badge">Preview</div>
-        <div class="preview-container checkerboard">
-          {#if previewUrl}
-            <img src={previewUrl} alt="Export Preview" class="preview-img" />
-          {:else}
-            <div class="mp4-placeholder">
-              <span class="mp4-icon">▶</span>
-              <span>Preview not available for MP4</span>
-              <span class="mp4-sub">Video will be rendered directly.</span>
-            </div>
-          {/if}
-        </div>
+            {/if}
+            <p class="export-warning">MP4 Export requires rendering all frames.</p>
+          </div>
+        {/if}
       </div>
     </div>
 
-    <!-- Footer Actions -->
-    <div class="export-footer">
-      {#if isExporting}
-        <div class="export-progress-container" style="flex: 1; margin-right: 15px;">
-          <div style="font-size: 0.85rem; margin-bottom: 5px; color: var(--text);">
-            {exportStage}
-            {exportProgress}%
+    <!-- Preview Panel -->
+    <div class="export-preview-panel">
+      <div class="preview-badge">Preview</div>
+      <div class="preview-container checkerboard">
+        {#if previewUrl}
+          <img src={previewUrl} alt="Export Preview" class="preview-img" />
+        {:else}
+          <div class="mp4-placeholder">
+            <span class="mp4-icon">▶</span>
+            <span>Preview not available for MP4</span>
+            <span class="mp4-sub">Video will be rendered directly.</span>
           </div>
-          <div
-            class="export-progress-bar"
-            style="background: var(--bg-sunken); height: 8px; border-radius: 4px; overflow: hidden;"
-          >
-            <div
-              style="background: var(--success-strong); height: 100%; width: {exportProgress}%; transition: width 0.1s linear;"
-            ></div>
-          </div>
-        </div>
-      {:else}
-        <button class="export-btn cancel" onclick={close} disabled={isExporting}>Cancel</button>
-        <button class="export-btn confirm" onclick={doExport} disabled={isExporting}
-          >Export {format.toUpperCase()}</button
-        >
-      {/if}
+        {/if}
+      </div>
     </div>
   </div>
-</div>
+
+  <!-- Footer Actions -->
+  <div class="export-footer">
+    {#if isExporting}
+      <div class="export-progress-container" style="flex: 1; margin-right: 15px;">
+        <div style="font-size: 0.85rem; margin-bottom: 5px; color: var(--text);">
+          {exportStage}
+          {exportProgress}%
+        </div>
+        <div
+          class="export-progress-bar"
+          style="background: var(--bg-sunken); height: 8px; border-radius: 4px; overflow: hidden;"
+        >
+          <div
+            style="background: var(--success-strong); height: 100%; width: {exportProgress}%; transition: width 0.1s linear;"
+          ></div>
+        </div>
+      </div>
+    {:else}
+      <button class="export-btn cancel" onclick={close} disabled={isExporting}>Cancel</button>
+      <button class="export-btn confirm" onclick={doExport} disabled={isExporting}
+        >Export {format.toUpperCase()}</button
+      >
+    {/if}
+  </div>
+</Modal>
 
 <style>
-  .modal-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: var(--overlay-strong);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    z-index: 1000;
-    font-family:
-      system-ui,
-      -apple-system,
-      sans-serif;
-  }
-
-  .export-modal-content {
+  :global(.export-modal-content) {
     background: var(--bg);
     color: var(--text-strong);
     border-radius: 8px;
     width: 100%;
     max-width: 800px;
     max-height: 90vh;
+    padding: 0;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
     box-shadow: 0 10px 30px var(--shadow);
     border: 1px solid var(--border);
   }
 
-  .export-header {
+  :global(.export-modal-content > h3) {
+    margin: 0;
     padding: 16px 20px;
     border-bottom: 1px solid var(--border);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
     background: var(--panel);
     border-radius: 8px 8px 0 0;
-  }
-
-  .export-header h2 {
-    margin: 0;
     font-size: 1.2rem;
-  }
-
-  .export-close-btn {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-size: 1.5rem;
-    cursor: pointer;
-    padding: 0;
-  }
-
-  .export-close-btn:hover {
-    color: var(--text-bright);
   }
 
   .export-body {
@@ -555,14 +509,13 @@
     position: absolute;
     top: 8px;
     left: 8px;
-    background: var(--overlay);
+    background: var(--accent);
     padding: 4px 8px;
     font-size: 0.8rem;
     border-radius: 4px;
-    color: var(--overlay-text-dim);
+    color: var(--accent-contrast);
     z-index: 10;
     pointer-events: none;
-    /* shortcut: ~2:1 contrast on the light mp4 placeholder in light mode, restyle with the export preview's design pass */
   }
 
   .preview-container {
@@ -575,8 +528,10 @@
 
   .checkerboard {
     background-image:
-      linear-gradient(45deg, var(--checkerboard) 25%, transparent 25%), linear-gradient(-45deg, var(--checkerboard) 25%, transparent 25%),
-      linear-gradient(45deg, transparent 75%, var(--checkerboard) 75%), linear-gradient(-45deg, transparent 75%, var(--checkerboard) 75%);
+      linear-gradient(45deg, var(--checkerboard) 25%, transparent 25%),
+      linear-gradient(-45deg, var(--checkerboard) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, var(--checkerboard) 75%),
+      linear-gradient(-45deg, transparent 75%, var(--checkerboard) 75%);
     background-size: 20px 20px;
     background-position:
       0 0,

@@ -2568,7 +2568,10 @@ fn set_prim_texture_binds_a_preview_surface_network() {
     // The existing read path reports the texture: the authored network
     // must be complete enough for the viewport material flow.
     let material = material_via_owner(&state, "/World/Ball");
-    assert_eq!(material.name, "Ball_Mat", "the bound material serializes");
+    assert_eq!(
+        material.name, "World_Ball_Mat",
+        "the full prim path names the bound material"
+    );
     let surface = material
         .surface
         .expect("a UsdPreviewSurface composes from the authored network");
@@ -2581,12 +2584,12 @@ fn set_prim_texture_binds_a_preview_surface_network() {
         "diffuseColor arrives via the texture connection, not a value"
     );
 
-    // The per-prim material prims live at /Looks/<Name>_Mat under a scope
+    // The per-prim material path encodes the full prim path under /Looks
     // (a sibling of the default prim at the layer root).
     let tree = request_stage_tree(&state.sender()).expect("tree should serialize");
     let looks = child_node(&tree, "/Looks");
     assert_eq!(looks.type_name, "Scope");
-    let mat = child_node(&looks.children, "/Looks/Ball_Mat");
+    let mat = child_node(&looks.children, "/Looks/World_Ball_Mat");
     assert_eq!(mat.type_name, "Material");
     assert_eq!(mat.children.len(), 2, "surface + texture shaders: {:?}", mat.children);
 
@@ -2618,12 +2621,51 @@ fn set_prim_texture_clear_removes_the_binding_but_keeps_the_material() {
     // The material prims stay (documented shortcut: no prim-removal path).
     let tree = request_stage_tree(&state.sender()).expect("tree should serialize");
     let looks = child_node(&tree, "/Looks");
-    assert_eq!(child_node(&looks.children, "/Looks/Ball_Mat").type_name, "Material");
+    assert_eq!(
+        child_node(&looks.children, "/Looks/World_Ball_Mat").type_name,
+        "Material"
+    );
 
     let paths = events
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("usd-stage-changed fires for the clear");
     assert_eq!(paths, vec!["/World/Ball".to_string()]);
+}
+
+#[test]
+fn same_named_prims_keep_independent_texture_materials_and_undo() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "same_named_prims.usda");
+    let texture_a = checker_texture();
+    let texture_b = "/textures/a-different-image.png";
+
+    request_set_texture(&state, "/A/Mesh", Some(&texture_a)).expect("first binding should succeed");
+    request_set_texture(&state, "/B/Mesh", Some(texture_b)).expect("second binding should succeed");
+
+    let material_a = material_via_owner(&state, "/A/Mesh");
+    let material_b = material_via_owner(&state, "/B/Mesh");
+    assert_ne!(material_a.name, material_b.name);
+    assert_eq!(
+        material_a.surface.expect("A stays bound").textures[0].file_path,
+        texture_a
+    );
+    assert_eq!(
+        material_b.surface.expect("B is bound").textures[0].file_path,
+        texture_b
+    );
+
+    assert!(request_undo(&state).expect("undo B"));
+    assert!(material_via_owner(&state, "/B/Mesh").surface.is_none());
+    assert_eq!(
+        material_via_owner(&state, "/A/Mesh")
+            .surface
+            .expect("A remains bound after undoing B")
+            .textures[0]
+            .file_path,
+        texture_a
+    );
+    assert!(request_undo(&state).expect("undo A"));
+    assert!(material_via_owner(&state, "/A/Mesh").surface.is_none());
 }
 
 #[test]

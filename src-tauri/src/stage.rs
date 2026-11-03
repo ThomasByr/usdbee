@@ -1595,8 +1595,8 @@ fn variant_selection_err(path: &str, variant_set: &str, error: impl std::fmt::Di
 
 /// Author (or clear, with `None`) the texture material for the prim at
 /// `path`. `Some(texture)` builds, under a `/Looks` scope, the per-prim
-/// network — a Material at `/Looks/<Name>_Mat` holding a UsdPreviewSurface
-/// shader and a UsdUVTexture shader, `inputs:file` ← the texture (authored
+/// network — a Material at a stable full-prim-path-derived `/Looks` path
+/// holding a UsdPreviewSurface shader and a UsdUVTexture shader, `inputs:file` ← the texture (authored
 /// verbatim; resolution is read-time), `outputs:rgb` →
 /// `inputs:diffuseColor`, `outputs:surface` → the Material's terminal — and
 /// binds it via MaterialBindingAPI. `None` clears the prim's
@@ -1619,23 +1619,44 @@ fn author_prim_texture(
 /// throwaway stage with the crate's shade API, its forward diffs merge into
 /// one Diff, and a single `apply_diff` replays it onto the current edit
 /// target — the same commit seam the redo arm uses.
+fn texture_material_path(path: &str) -> String {
+    let mut name = path
+        .trim_matches('/')
+        .split('/')
+        .map(|segment| {
+            let mut encoded = String::new();
+            for byte in segment.bytes() {
+                if byte.is_ascii_alphanumeric() {
+                    encoded.push(char::from(byte));
+                } else {
+                    // Underscores are escaped too, so joining segments with
+                    // '_' cannot make two distinct prim paths collide.
+                    encoded.push_str(&format!("_{:02X}", byte));
+                }
+            }
+            encoded
+        })
+        .collect::<Vec<_>>()
+        .join("_");
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        name.insert(0, '_');
+    }
+    format!("/Looks/{}_Mat", name)
+}
+
 fn bind_prim_texture(
     stage: &Stage,
     prim: &openusd::usd::Prim,
     path: &str,
     texture: &str,
 ) -> Result<(), String> {
-    let name = prim
-        .path()
-        .name()
-        .ok_or_else(|| format!("cannot author the texture material on {}", path))?;
     let scratch = ReplayStage::from(
         Stage::builder()
             .schema_registry(openusd_schemas::schema_registry())
             .in_memory("texture-material-scratch.usda")
             .map_err(|e| texture_err(path, e))?,
     );
-    let material_path = format!("/Looks/{}_Mat", name);
+    let material_path = texture_material_path(path);
     let author = || -> openusd::Result<()> {
         scratch.define_typed_prim("/Looks", "Scope")?;
         let material = Material::define(&scratch, material_path.clone())?;
@@ -1683,8 +1704,8 @@ fn bind_prim_texture(
 }
 
 /// shortcut: no verified prim-removal API — the material prims under
-/// /Looks stay once created (only the binding is cleared); remove
-/// /Looks/<Name>_Mat when one lands. Rel targets list-compose, so a
+/// /Looks stay once created (only the binding is cleared); remove the
+/// path-derived material when one lands. Rel targets list-compose, so a
 /// binding authored on a layer weaker than the current edit target can
 /// survive the clear; v1 clears what set_prim_texture itself authored.
 fn clear_prim_texture(prim: &openusd::usd::Prim, path: &str) -> Result<(), String> {

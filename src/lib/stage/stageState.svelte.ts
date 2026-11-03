@@ -228,7 +228,7 @@ export const stageState = $state({
   },
 
   // Author (or clear, with null) a texture material for `path`: the backend
-  // builds a /Looks/<Name>_Mat PreviewSurface network under a Looks scope
+  // builds a full-prim-path-derived PreviewSurface network under /Looks
   // and binds it to the prim. The explicit path (not the selection) serves
   // branch application, which loops over many gprims.
   async setPrimTexture(
