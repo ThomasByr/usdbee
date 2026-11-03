@@ -113,16 +113,20 @@ export const stageState = $state({
   // the page (it owns scene integration).
   async refreshAfterEdit(): Promise<void> {
     if (this.status !== "ready") return;
+    const generation = loadGeneration;
+    const stageId = this.activeStageId;
+    const selectedPath = this.selectedPath;
+    const isCurrent = () =>
+      generation === loadGeneration && stageId === this.activeStageId && this.status === "ready";
     try {
-      const tree = await invoke<PrimNode[]>("get_stage_tree", {
-        stageId: this.activeStageId,
-      });
-      if (this.status !== "ready") return;
+      const tree = await invoke<PrimNode[]>("get_stage_tree", { stageId });
+      if (!isCurrent()) return;
       this.tree = tree;
     } catch {
       // The tree refetch is best-effort; details still refresh below.
+      if (!isCurrent()) return;
     }
-    if (this.selectedPath) await this.selectPrim(this.selectedPath);
+    if (selectedPath && this.selectedPath === selectedPath) await this.selectPrim(selectedPath);
   },
 
   // Composed details for an arbitrary prim, without moving the selection —
@@ -163,12 +167,13 @@ export const stageState = $state({
     value: ValuePayload,
     time: number | null = renderState.time,
     path: string | null = null,
+    stageId: number | null = null,
   ): Promise<string | null> {
     const target = path ?? this.selectedPath;
     if (!target) return "no prim selected";
     try {
       await invoke("set_attribute_value", {
-        stageId: this.activeStageId,
+        stageId: stageId ?? this.activeStageId,
         path: target,
         name,
         value,
@@ -187,12 +192,13 @@ export const stageState = $state({
     key: string,
     value: ValuePayload,
     path: string | null = null,
+    stageId: number | null = null,
   ): Promise<string | null> {
     const target = path ?? this.selectedPath;
     if (!target) return "no prim selected";
     try {
       await invoke("set_prim_metadata", {
-        stageId: this.activeStageId,
+        stageId: stageId ?? this.activeStageId,
         path: target,
         key,
         value,
@@ -225,10 +231,14 @@ export const stageState = $state({
   // builds a /Looks/<Name>_Mat PreviewSurface network under a Looks scope
   // and binds it to the prim. The explicit path (not the selection) serves
   // branch application, which loops over many gprims.
-  async setPrimTexture(path: string, texture: string | null): Promise<string | null> {
+  async setPrimTexture(
+    path: string,
+    texture: string | null,
+    stageId: number | null = null,
+  ): Promise<string | null> {
     try {
       await invoke("set_prim_texture", {
-        stageId: this.activeStageId,
+        stageId: stageId ?? this.activeStageId,
         path,
         texturePath: texture,
       });

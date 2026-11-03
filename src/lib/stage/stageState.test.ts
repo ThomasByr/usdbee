@@ -330,6 +330,22 @@ describe("stageState", () => {
     expect(stageState.status).toBe("idle");
   });
 
+  it("drops a stale edit refresh after the active stage changes", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    const staleTree = deferred<never>();
+    mockedInvoke.mockReturnValueOnce(staleTree.promise);
+
+    const refresh = stageState.refreshAfterEdit();
+    mockedInvoke.mockResolvedValueOnce([]);
+    await stageState.adoptOpenedStage({ ...info, stage_id: 8 } as never);
+    staleTree.resolve([{ path: "/Old" }] as never);
+    await refresh;
+
+    expect(stageState.activeStageId).toBe(8);
+    expect(stageState.tree).toEqual([]);
+  });
+
   it("refreshAfterEdit refetches the tree and re-selects the prim", async () => {
     mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
     await stageState.loadStage("/a.usda");

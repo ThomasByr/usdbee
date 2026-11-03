@@ -29,8 +29,11 @@
   let error = $state<string | null>(null);
   // The stage id the displayed layers/draft belong to; -1 = none yet.
   let layersStageId = -1;
+  let layersGeneration = 0;
+  let textGeneration = 0;
 
   async function refreshLayers(): Promise<void> {
+    const generation = ++layersGeneration;
     const stageId = stageState.activeStageId;
     const stageSwitched = layersStageId !== stageId;
     if (stageSwitched) {
@@ -45,9 +48,8 @@
       error = null;
     }
     try {
-      const listed = await invoke<LayerInfo[]>("list_stage_layers", {
-        stageId,
-      });
+      const listed = await invoke<LayerInfo[]>("list_stage_layers", { stageId });
+      if (generation !== layersGeneration || stageId !== stageState.activeStageId) return;
       layers = listed;
       layersStageId = stageId;
       // Selection changes load their layer; same-selection revision handling
@@ -57,6 +59,7 @@
         await loadText();
       }
     } catch {
+      if (generation !== layersGeneration || stageId !== stageState.activeStageId) return;
       // No stage open (or it went away): nothing to edit.
       layers = [];
       layersStageId = -1;
@@ -69,7 +72,10 @@
   }
 
   async function loadText(): Promise<void> {
-    if (selectedId === null) {
+    const generation = ++textGeneration;
+    const stageId = stageState.activeStageId;
+    const identifier = selectedId;
+    if (identifier === null) {
       text = "";
       loadedText = "";
       loadedRevision = stageRevision;
@@ -79,22 +85,23 @@
     selfSaveRevision = null; // a manual reload supersedes any pending self-save mark
     loading = true;
     error = null;
+    const isCurrent = () =>
+      generation === textGeneration && stageId === stageState.activeStageId && identifier === selectedId;
     try {
-      const exported = await invoke<string>("export_layer_text", {
-        stageId: stageState.activeStageId,
-        identifier: selectedId,
-      });
+      const exported = await invoke<string>("export_layer_text", { stageId, identifier });
+      if (!isCurrent()) return;
       text = exported;
       loadedText = exported;
       loadedRevision = stageRevision;
       conflict = null;
     } catch (e) {
+      if (!isCurrent()) return;
       text = "";
       loadedText = "";
       loadedRevision = stageRevision;
       error = typeof e === "string" ? e : String(e);
     } finally {
-      loading = false;
+      if (generation === textGeneration) loading = false;
     }
   }
 

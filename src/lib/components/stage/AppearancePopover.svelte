@@ -104,13 +104,15 @@
   }
 
   async function applyColor(value: ValuePayload): Promise<string | null> {
+    const stageId = stageState.activeStageId;
     return commitEach((path) =>
-      stageState.setAttributeValue("primvars:displayColor", value, colorTime, path),
+      stageState.setAttributeValue("primvars:displayColor", value, colorTime, path, stageId),
     );
   }
 
   async function applyTexture(texture: string | null): Promise<string | null> {
-    const error = await commitEach((path) => stageState.setPrimTexture(path, texture));
+    const stageId = stageState.activeStageId;
+    const error = await commitEach((path) => stageState.setPrimTexture(path, texture, stageId));
     if (error !== null) message = error;
     return null;
   }
@@ -131,9 +133,10 @@
   }
 
   async function toggleVisibility() {
+    const stageId = stageState.activeStageId;
     const next = visibility === "invisible" ? "inherited" : "invisible";
     const error = await commitEach((path) =>
-      stageState.setPrimMetadata("visibility", { type: "token", data: next }, path),
+      stageState.setPrimMetadata("visibility", { type: "token", data: next }, path, stageId),
     );
     if (error !== null) message = error;
   }

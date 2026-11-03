@@ -33,6 +33,31 @@ export interface LoadHooks {
   loadScene: () => Promise<void>;
 }
 
+interface OpenSnapshot {
+  rootFile: string | null;
+  requestedPath: string | null;
+  dependencies: DependencyMap | null;
+}
+
+interface ActiveOpen {
+  snapshot: OpenSnapshot | null;
+  completion: Promise<void>;
+  resolve: () => void;
+}
+
+const OPEN_IN_FLIGHT_MESSAGE = "A USD file is already opening. Wait for it to finish before opening another.";
+let activeOpen: ActiveOpen | null = null;
+let sceneHooks: LoadHooks | null = null;
+
+function startOpen(): ActiveOpen {
+  let resolve!: () => void;
+  const completion = new Promise<void>((done) => {
+    resolve = done;
+  });
+  activeOpen = { snapshot: null, completion, resolve };
+  return activeOpen;
+}
+
 export function loadErrorMessage(payload: string): string {
   return "Failed to extract or load USD: " + payload;
 }
@@ -73,18 +98,68 @@ export const loadOrchestrator = $state({
   // Ask the backend to show the file-open dialog; the chosen path comes
   // back through the usd-load-start / usd-scene-loaded event stream.
   async openUsdFile(): Promise<void> {
-    await invoke("trigger_open_usd_dialog");
+    if (activeOpen) {
+      this.openErrorModal(OPEN_IN_FLIGHT_MESSAGE);
+      return;
+    }
+    try {
+      await invoke("trigger_open_usd_dialog");
+    } catch (e) {
+      this.openErrorModal("Failed to open USD:\n\n" + (typeof e === "string" ? e : String(e)));
+    }
+  },
+
+  // Path opens reserve the single open slot before invoking the backend,
+  // so two synchronous callers cannot both get through. The promise resolves
+  // only after the tab has adopted the stage (or the failure was restored).
+  beginPathOpen(): Promise<void> | null {
+    if (activeOpen) {
+      this.openErrorModal(OPEN_IN_FLIGHT_MESSAGE);
+      return null;
+    }
+    return startOpen().completion;
+  },
+
+  finishOpen(): void {
+    const operation = activeOpen;
+    activeOpen = null;
+    operation?.resolve();
+  },
+
+  async failOpen(message: string): Promise<void> {
+    const operation = activeOpen;
+    this.loadingProgress = null;
+    this.openErrorModal(message);
+    try {
+      if (operation?.snapshot) {
+        this.rootFile = operation.snapshot.rootFile;
+        this.requestedPath = operation.snapshot.requestedPath;
+        this.dependencies = operation.snapshot.dependencies;
+        await sceneHooks?.loadScene();
+      }
+    } finally {
+      if (activeOpen === operation) {
+        activeOpen = null;
+        operation?.resolve();
+      }
+    }
   },
 
   // Subscribe to the Rust load events; the page calls this in onMount and
   // unlistens everything on destroy.
   async init(hooks: LoadHooks): Promise<() => void> {
+    sceneHooks = hooks;
     const unlistens = await Promise.all([
       listen<string>("usd-load-error", (event) => {
-        this.loadingProgress = null;
-        this.openErrorModal(loadErrorMessage(event.payload));
+        void this.failOpen(loadErrorMessage(event.payload));
       }),
       listen<string>("usd-load-start", (event) => {
+        const operation = activeOpen ?? startOpen();
+        operation.snapshot ??= {
+          rootFile: this.rootFile,
+          requestedPath: this.requestedPath,
+          dependencies: this.dependencies,
+        };
         this.rootFile = event.payload;
         this.requestedPath = event.payload;
         this.loadingProgress = { stage: "Starting...", percent: 0 };
@@ -117,7 +192,8 @@ export const loadOrchestrator = $state({
     hooks: LoadHooks,
   ): Promise<void> {
     this.loadingProgress = null;
-    this.rootFile = payload.root_file;
+    // rootFile/requestedPath stay on the user-facing path from load-start;
+    // payload.root_file is the resolved layer (an extracted path for usdz).
     this.dependencies = payload.dependencies;
     await hooks.loadScene();
   },

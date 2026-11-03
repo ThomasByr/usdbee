@@ -23,6 +23,14 @@ const textarea = (): HTMLTextAreaElement =>
 
 let instance: ReturnType<typeof mount> | null = null;
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   mockedInvoke.mockReset();
   stageState.activeStageId = 1;
@@ -36,6 +44,44 @@ afterEach(() => {
 });
 
 describe("LayerTextEditor stage switch", () => {
+  it("ignores a layer list from the previous stage", async () => {
+    const staleLayers = deferred<LayerInfo[]>();
+    mockedInvoke.mockReturnValueOnce(staleLayers.promise);
+    instance = mount(LayerTextEditor, { target: document.body });
+    await vi.waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith("list_stage_layers", { stageId: 1 }));
+
+    stageState.activeStageId = 2;
+    mockedInvoke.mockResolvedValueOnce([sharedLayer]).mockResolvedValueOnce("stage two text");
+    await vi.waitFor(() => expect(textarea().value).toBe("stage two text"));
+
+    staleLayers.resolve([{ ...sharedLayer, identifier: "/scene/stale.usda" }]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(document.querySelector<HTMLSelectElement>("select")!.value).toBe(sharedLayer.identifier);
+    expect(textarea().value).toBe("stage two text");
+  });
+
+  it("ignores layer text from the previous stage", async () => {
+    const staleText = deferred<string>();
+    mockedInvoke.mockResolvedValueOnce([sharedLayer]).mockReturnValueOnce(staleText.promise);
+    instance = mount(LayerTextEditor, { target: document.body });
+    await vi.waitFor(() =>
+      expect(mockedInvoke).toHaveBeenCalledWith("export_layer_text", {
+        stageId: 1,
+        identifier: sharedLayer.identifier,
+      }),
+    );
+
+    stageState.activeStageId = 2;
+    mockedInvoke.mockResolvedValueOnce([sharedLayer]).mockResolvedValueOnce("stage two text");
+    await vi.waitFor(() => expect(textarea().value).toBe("stage two text"));
+
+    staleText.resolve("stage one stale text");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(textarea().value).toBe("stage two text");
+  });
+
   it("discards an unapplied draft on a stage switch with an identical layer identifier", async () => {
     mockedInvoke
       .mockResolvedValueOnce([sharedLayer]) // stage 1: list_stage_layers

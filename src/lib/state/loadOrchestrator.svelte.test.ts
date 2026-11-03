@@ -43,9 +43,11 @@ const deps: Record<string, DependencyInfo> = {
 const noHooks = { resetScene: () => {}, loadScene: async () => {} };
 
 beforeEach(() => {
+  loadOrchestrator.finishOpen();
   mockedInvoke.mockReset();
   mockedListen.mockReset();
   loadOrchestrator.rootFile = null;
+  loadOrchestrator.requestedPath = null;
   loadOrchestrator.loadingProgress = null;
   loadOrchestrator.dependencies = null;
   loadOrchestrator.filterText = "";
@@ -131,6 +133,26 @@ describe("init event subscriptions", () => {
     expect(loadOrchestrator.dependencies).toBeNull();
   });
 
+  it("restores the active tab and reloads its scene when a dialog open fails", async () => {
+    const loadScene = vi.fn().mockResolvedValue(undefined);
+    await loadOrchestrator.init({ resetScene: () => {}, loadScene });
+    loadOrchestrator.rootFile = "/scene/current.usda";
+    loadOrchestrator.requestedPath = "/scene/current.usda";
+    loadOrchestrator.dependencies = { ...deps };
+
+    handlerFor["usd-load-start"]({ payload: "/scene/broken.usdz" });
+    expect(loadOrchestrator.rootFile).toBe("/scene/broken.usdz");
+    expect(loadOrchestrator.dependencies).toBeNull();
+
+    handlerFor["usd-load-error"]({ payload: "bad archive" });
+    await vi.waitFor(() => expect(loadScene).toHaveBeenCalledTimes(1));
+
+    expect(loadOrchestrator.rootFile).toBe("/scene/current.usda");
+    expect(loadOrchestrator.requestedPath).toBe("/scene/current.usda");
+    expect(loadOrchestrator.dependencies).toEqual(deps);
+    expect(loadOrchestrator.loadingProgress).toBeNull();
+  });
+
   it("usd-load-progress mirrors the backend payload", async () => {
     await loadOrchestrator.init(noHooks);
 
@@ -153,6 +175,7 @@ describe("init event subscriptions", () => {
     const loadScene = vi.fn().mockResolvedValue(undefined);
     await loadOrchestrator.init({ resetScene: () => {}, loadScene });
 
+    handlerFor["usd-load-start"]({ payload: "/scene/bike.usda" });
     handlerFor["usd-scene-loaded"]({
       payload: { root_file: "/scene/bike.usda", dependencies: deps },
     });
@@ -168,9 +191,7 @@ describe("init event subscriptions", () => {
     mockedInvoke.mockResolvedValueOnce([]);
 
     handlerFor["usd-stage-opened"]({ payload: stageInfo });
-    await vi.waitFor(() =>
-      expect(mockedInvoke).toHaveBeenCalledWith("get_stage_tree", { stageId: 3 }),
-    );
+    await vi.waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith("get_stage_tree", { stageId: 3 }));
 
     expect(stageState.stageInfo).toEqual(stageInfo);
     expect(stageState.status).toBe("ready");

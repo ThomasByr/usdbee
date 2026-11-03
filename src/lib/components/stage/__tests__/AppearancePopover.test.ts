@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   setPrimMetadata: vi.fn(),
   setPrimTexture: vi.fn(),
   tree: [] as unknown[],
+  activeStageId: 1,
 }));
 
 vi.mock("$lib/stage/stageState.svelte", () => ({
@@ -22,6 +23,9 @@ vi.mock("$lib/stage/stageState.svelte", () => ({
     setPrimTexture: mocks.setPrimTexture,
     get tree() {
       return mocks.tree;
+    },
+    get activeStageId() {
+      return mocks.activeStageId;
     },
   },
 }));
@@ -70,6 +74,14 @@ const unbound = { name: "Ball", surface: null };
 
 let instance: ReturnType<typeof mount> | null = null;
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   mocks.fetchPrimDetails.mockReset().mockResolvedValue(details());
   mocks.getMaterialInfo.mockReset().mockResolvedValue(unbound);
@@ -77,6 +89,7 @@ beforeEach(() => {
   mocks.setPrimMetadata.mockReset().mockResolvedValue(null);
   mocks.setPrimTexture.mockReset().mockResolvedValue(null);
   mocks.tree = [mesh("/World", "World")];
+  mocks.activeStageId = 1;
 });
 
 afterEach(() => {
@@ -131,6 +144,7 @@ describe("AppearancePopover commit wiring", () => {
       { type: "color3f_array", data: [[1, 0, 0]] },
       undefined,
       "/World/Ball",
+      1,
     );
   });
 
@@ -161,7 +175,35 @@ describe("AppearancePopover commit wiring", () => {
       { type: "color3f_array", data: [[0, 1, 0]] },
       undefined,
       "/World/Ball",
+      1,
     );
+  });
+
+  it("pins every deferred branch commit to the source stage", async () => {
+    mocks.tree = [
+      mesh("/World", "World", {
+        type_name: "Xform",
+        children: [mesh("/World/Ball", "Ball"), mesh("/World/Other", "Other")],
+      }),
+    ];
+    const firstCommit = deferred<string | null>();
+    mocks.setAttributeValue.mockImplementationOnce(() => firstCommit.promise);
+    mocks.getMaterialInfo.mockResolvedValue({ name: "World", surface: null });
+    await mountPopover("/World");
+    branchCheckbox().click();
+    await tick();
+
+    const input = hexInput();
+    input.value = "#00ff00";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(mocks.setAttributeValue).toHaveBeenCalledTimes(1));
+    mocks.activeStageId = 2;
+    firstCommit.resolve(null);
+    await vi.waitFor(() => expect(mocks.setAttributeValue).toHaveBeenCalledTimes(2));
+
+    expect(mocks.setAttributeValue.mock.calls[0][4]).toBe(1);
+    expect(mocks.setAttributeValue.mock.calls[1][4]).toBe(1);
   });
 
   it("continues a branch past a failing prim and summarizes the failures", async () => {
@@ -191,7 +233,7 @@ describe("AppearancePopover commit wiring", () => {
     document.querySelector<HTMLButtonElement>("button.popover-clear-texture")!.click();
     await tick();
 
-    expect(mocks.setPrimTexture).toHaveBeenCalledWith("/World/Ball", null);
+    expect(mocks.setPrimTexture).toHaveBeenCalledWith("/World/Ball", null, 1);
   });
 
   it("toggles authored visibility through the shared metadata wrapper", async () => {
@@ -204,6 +246,7 @@ describe("AppearancePopover commit wiring", () => {
       "visibility",
       { type: "token", data: "invisible" },
       "/World/Ball",
+      1,
     );
   });
 });

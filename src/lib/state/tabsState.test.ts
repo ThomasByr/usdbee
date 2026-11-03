@@ -24,6 +24,14 @@ let nextStageId = 0;
 const dirtyOverrides = new Map<number, number>();
 const badPaths = new Set<string>();
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 function stageInfoFor(id: number, path: string): StageInfo {
   return {
     stage_id: id,
@@ -44,7 +52,10 @@ function commands(cmd: string, args?: Record<string, unknown>): unknown {
   switch (cmd) {
     case "open_usd_file_path": {
       const path = (args?.path ?? "") as string;
-      if (badPaths.has(path)) throw new Error("cannot open: " + path);
+      if (badPaths.has(path)) {
+        for (const h of handlers["usd-load-start"] ?? []) h({ payload: path });
+        throw new Error("cannot open: " + path);
+      }
       nextStageId += 1;
       const info = stageInfoFor(nextStageId, path);
       // The command emits the same event stream as the dialog flow.
@@ -140,6 +151,7 @@ beforeEach(async () => {
 
   layerTextState.draftDirty = false;
   loadOrchestrator.rootFile = null;
+  loadOrchestrator.requestedPath = null;
   loadOrchestrator.dependencies = null;
   loadOrchestrator.loadingProgress = null;
   loadOrchestrator.modalError = null;
@@ -174,6 +186,47 @@ describe("openTab", () => {
     expect(tabsState.loadScene).toHaveBeenCalled();
   });
 
+  it("refuses a second open while the first is unresolved", async () => {
+    const pending = deferred<StageInfo>();
+    mockedInvoke.mockImplementationOnce(() => pending.promise);
+
+    const first = tabsState.openTab("/scene/slow.usda");
+    await tabsState.openTab("/scene/fast.usda");
+
+    expect(mockedInvoke.mock.calls.filter(([cmd]) => cmd === "open_usd_file_path")).toHaveLength(1);
+    expect(loadOrchestrator.modalError).toContain("already opening");
+    expect(recentFiles.entries).toEqual([]);
+
+    const info = stageInfoFor(1, "/scene/slow.usda");
+    fireEvent("usd-load-start", "/scene/slow.usda");
+    fireEvent("usd-scene-loaded", { root_file: "/scene/slow.usda", dependencies: {} });
+    fireEvent("usd-stage-opened", info);
+    pending.resolve(info);
+    await first;
+
+    expect(tabsState.stages.map((tab) => tab.root_file)).toEqual(["/scene/slow.usda"]);
+    expect(tabsState.activeId).toBe(1);
+    expect(loadOrchestrator.dependencies).toEqual({});
+    expect(recentFiles.entries.map((entry) => entry.path)).toEqual(["/scene/slow.usda"]);
+  });
+
+  it("keeps the requested usdz path instead of the extracted layer path", async () => {
+    const info = stageInfoFor(7, "/tmp/usdbee/extracted/root.usda");
+    fireEvent("usd-load-start", "/scene/archive.usdz");
+    fireEvent("usd-scene-loaded", {
+      root_file: "/tmp/usdbee/extracted/root.usda",
+      dependencies: {},
+    });
+    fireEvent("usd-stage-opened", info);
+
+    await vi.waitFor(() => expect(tabsState.activeId).toBe(7));
+
+    expect(tabsState.stages[0].root_file).toBe("/scene/archive.usdz");
+    expect(loadOrchestrator.rootFile).toBe("/scene/archive.usdz");
+    expect(loadOrchestrator.requestedPath).toBe("/scene/archive.usdz");
+    expect(recentFiles.entries[0].path).toBe("/scene/archive.usdz");
+  });
+
   it("records the opened file in recent files", async () => {
     await openTab("/scene/a.usda");
 
@@ -192,6 +245,7 @@ describe("openTab", () => {
   it("keeps the current tab and surfaces the error when the open fails", async () => {
     await openTab("/scene/a.usda");
     badPaths.add("/bad.usda");
+    (tabsState.loadScene as ReturnType<typeof vi.fn>).mockClear();
 
     await tabsState.openTab("/bad.usda");
 
@@ -201,6 +255,9 @@ describe("openTab", () => {
     expect(loadOrchestrator.modalError).toContain("cannot open: /bad.usda");
     expect(loadOrchestrator.loadingProgress).toBeNull();
     expect(loadOrchestrator.rootFile).toBe("/scene/a.usda");
+    expect(loadOrchestrator.requestedPath).toBe("/scene/a.usda");
+    expect(loadOrchestrator.dependencies).toEqual({});
+    expect(tabsState.loadScene).toHaveBeenCalledTimes(1);
     expect(recentFiles.entries.map((e) => e.path)).not.toContain("/bad.usda");
   });
 });
@@ -221,6 +278,29 @@ describe("setActive", () => {
     expect(stageState.activeStageId).toBe(1);
     expect(stageState.stageInfo?.stage_id).toBe(1);
     expect(stageState.selectedPath).toBeNull();
+  });
+
+  it("does not load a scene for a stale activation", async () => {
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    (tabsState.loadScene as ReturnType<typeof vi.fn>).mockClear();
+    const staleTree = deferred<unknown[]>();
+    mockedInvoke.mockImplementation((cmd, args) => {
+      if (cmd === "get_stage_tree" && (args as Record<string, unknown> | undefined)?.stageId === 1) {
+        return staleTree.promise;
+      }
+      return Promise.resolve(commands(cmd, (args ?? {}) as Record<string, unknown>));
+    });
+
+    const staleActivation = tabsState.setActive(1);
+    await vi.waitFor(() => expect(stageState.activeStageId).toBe(1));
+    await tabsState.setActive(2);
+    staleTree.resolve([]);
+    await staleActivation;
+
+    expect(tabsState.activeId).toBe(2);
+    expect(stageState.activeStageId).toBe(2);
+    expect(tabsState.loadScene).toHaveBeenCalledTimes(1);
   });
 
   it("no-ops for the already active tab", async () => {

@@ -14,6 +14,8 @@ import type { StageInfo, StageSummary } from "../stage/types";
 // metadata the frontend cannot re-query (StageInfo, the dependency scan)
 // is snapshotted on the tab record at open time.
 
+let activationGeneration = 0;
+
 export interface TabRecord extends StageSummary {
   stage_info: StageInfo;
   // The path the user opened (the pre-extraction path for usdz dialog opens).
@@ -89,11 +91,16 @@ export const tabsState = $state({
   // The extra loadScene supersedes whatever the usd-scene-loaded step
   // started: an open always ends with the viewport showing its stage.
   async adoptOpened(info: StageInfo): Promise<void> {
-    // The user-facing path (pre-extraction for usdz) is what recent files
-    // records; the tab's root_file keeps the load-time snapshot below.
-    recentFiles.add(loadOrchestrator.requestedPath ?? info.root_layer);
-    this.register(info, loadOrchestrator.rootFile ?? info.root_layer, loadOrchestrator.dependencies);
-    await this.setActive(info.stage_id);
+    // The user-facing path (pre-extraction for usdz) is what recent files,
+    // containing-folder reveal and the tab record all keep.
+    const rootFile = loadOrchestrator.requestedPath ?? info.root_layer;
+    recentFiles.add(rootFile);
+    this.register(info, rootFile, loadOrchestrator.dependencies);
+    try {
+      await this.setActive(info.stage_id);
+    } finally {
+      loadOrchestrator.finishOpen();
+    }
   },
 
   register(info: StageInfo, rootFile: string, dependencies: DependencyMap | null): void {
@@ -115,11 +122,13 @@ export const tabsState = $state({
   // other open, and big files show progress. The command's Err carries
   // the readable failure message.
   async openTab(path: string): Promise<void> {
+    const completion = loadOrchestrator.beginPathOpen();
+    if (!completion) return;
     try {
       await invoke<StageInfo>("open_usd_file_path", { path });
+      await completion;
     } catch (e) {
-      loadOrchestrator.loadingProgress = null;
-      loadOrchestrator.openErrorModal("Failed to open USD:\n\n" + (typeof e === "string" ? e : String(e)));
+      await loadOrchestrator.failOpen("Failed to open USD:\n\n" + (typeof e === "string" ? e : String(e)));
     }
   },
 
@@ -129,10 +138,13 @@ export const tabsState = $state({
   async setActive(id: number): Promise<void> {
     const tab = this.find(id);
     if (!tab || id === this.activeId) return;
+    const generation = ++activationGeneration;
     this.activeId = id;
     loadOrchestrator.rootFile = tab.root_file;
+    loadOrchestrator.requestedPath = tab.root_file;
     loadOrchestrator.dependencies = tab.dependencies;
     await stageState.adoptOpenedStage(tab.stage_info);
+    if (generation !== activationGeneration || id !== this.activeId) return;
     void editState.refresh();
     await this.loadScene();
   },
@@ -172,6 +184,7 @@ export const tabsState = $state({
     if (next) {
       await this.setActive(next.stage_id);
     } else {
+      ++activationGeneration;
       this.activeId = 0;
       stageState.clear();
       loadOrchestrator.rootFile = null;
