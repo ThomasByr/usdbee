@@ -153,6 +153,41 @@ describe("init event subscriptions", () => {
     expect(loadOrchestrator.loadingProgress).toBeNull();
   });
 
+  it("does not restore a failed open over a different active stage", async () => {
+    const loadScene = vi.fn().mockResolvedValue(undefined);
+    await loadOrchestrator.init({ resetScene: () => {}, loadScene });
+    stageState.activeStageId = 1;
+    loadOrchestrator.rootFile = "/scene/a.usda";
+    loadOrchestrator.requestedPath = "/scene/a.usda";
+    loadOrchestrator.dependencies = { ...deps };
+
+    handlerFor["usd-load-start"]({ payload: "/scene/broken.usdz" });
+    stageState.activeStageId = 2;
+    loadOrchestrator.rootFile = "/scene/b.usda";
+    loadOrchestrator.requestedPath = "/scene/b.usda";
+    loadOrchestrator.dependencies = {};
+    handlerFor["usd-load-error"]({ payload: "bad archive" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(loadOrchestrator.rootFile).toBe("/scene/b.usda");
+    expect(loadOrchestrator.requestedPath).toBe("/scene/b.usda");
+    expect(loadOrchestrator.dependencies).toEqual({});
+    expect(loadScene).not.toHaveBeenCalled();
+  });
+
+  it("does not reload an empty scene after the first open fails", async () => {
+    const loadScene = vi.fn().mockResolvedValue(undefined);
+    await loadOrchestrator.init({ resetScene: () => {}, loadScene });
+    stageState.activeStageId = 0;
+
+    handlerFor["usd-load-start"]({ payload: "/scene/broken.usdz" });
+    handlerFor["usd-load-error"]({ payload: "bad archive" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(loadOrchestrator.rootFile).toBeNull();
+    expect(loadScene).not.toHaveBeenCalled();
+  });
+
   it("usd-load-progress mirrors the backend payload", async () => {
     await loadOrchestrator.init(noHooks);
 

@@ -34,6 +34,7 @@ export interface LoadHooks {
 }
 
 interface OpenSnapshot {
+  stageId: number;
   rootFile: string | null;
   requestedPath: string | null;
   dependencies: DependencyMap | null;
@@ -131,11 +132,11 @@ export const loadOrchestrator = $state({
     this.loadingProgress = null;
     this.openErrorModal(message);
     try {
-      if (operation?.snapshot) {
+      if (operation?.snapshot && operation.snapshot.stageId === stageState.activeStageId) {
         this.rootFile = operation.snapshot.rootFile;
         this.requestedPath = operation.snapshot.requestedPath;
         this.dependencies = operation.snapshot.dependencies;
-        await sceneHooks?.loadScene();
+        if (operation.snapshot.rootFile !== null) await sceneHooks?.loadScene();
       }
     } finally {
       if (activeOpen === operation) {
@@ -156,6 +157,7 @@ export const loadOrchestrator = $state({
       listen<string>("usd-load-start", (event) => {
         const operation = activeOpen ?? startOpen();
         operation.snapshot ??= {
+          stageId: stageState.activeStageId,
           rootFile: this.rootFile,
           requestedPath: this.requestedPath,
           dependencies: this.dependencies,
