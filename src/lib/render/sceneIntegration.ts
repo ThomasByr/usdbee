@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
 import { stageState } from "$lib/stage/stageState.svelte";
-import { renderState, toPlayheadOffset } from "$lib/render/renderState.svelte";
+import { renderState, advanceStageTime, toPlayheadOffset } from "$lib/render/renderState.svelte";
 import { disposeScene } from "$lib/render/sceneBuilder";
 import { upAxisRotation } from "$lib/stage/upAxis";
 import { viewerSettings } from "$lib/state/viewerSettings.svelte";
@@ -137,6 +137,22 @@ export async function refreshSceneAfterEdit(viewer: RendererKit, paths: string[]
   resetLoadedScene(viewer);
   const group = await renderState.loadRenderScene(renderState.time ?? 0, loadOrchestrator.dependencies ?? {});
   if (group) integrateScene(viewer, group);
+}
+
+export function installPlaybackDriver(viewer: RendererKit) {
+  // Task 6 playback driver: the render loop advances the stage playhead
+  // in USD time codes. The seconds -> time-code rate conversion lives
+  // ONLY here and in the exporter (spec §8) — advanceStageTime.
+  viewer.onAdvanceTime = (deltaSeconds: number) => {
+    const info = stageState.stageInfo;
+    const start = info?.start_time_code ?? 0;
+    const end = info?.end_time_code ?? 0;
+    if (end <= start) return;
+    const tcps = info?.time_codes_per_second ?? 24;
+    const next = advanceStageTime(renderState.time ?? start, deltaSeconds, tcps, start, end);
+    viewer.animationProgress = toPlayheadOffset(next, start);
+    void renderState.setStageTime(next);
+  };
 }
 
 export function syncGraphicsSettings(viewer: RendererKit) {

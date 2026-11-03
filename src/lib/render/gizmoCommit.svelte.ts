@@ -1,0 +1,161 @@
+import * as THREE from "three";
+import { TransformGizmo, type GizmoCommit } from "$lib/render/transformGizmo";
+import { composeOpUpdate, evaluateGizmoGate, matricesClose, type GizmoMode } from "$lib/render/xformOps";
+import { stageState } from "$lib/stage/stageState.svelte";
+import type { RendererKit } from "$lib/three/RendererKit.svelte";
+
+// Transform gizmo editing policy (Phase 3 Task 4), moved out of the
+// viewport component: anchor sync, commit lock + error state and the
+// commit math. The Viewport calls these functions synchronously from
+// $effect / onMount, so the stage reads inside them stay tracked. The
+// gizmo lives with the renderer kit's camera/scene/orbit: drag events
+// come off the same canvas, and the orbit disables while a gizmo drag
+// is active.
+
+let gizmoViewer: RendererKit | null = null;
+let mode: () => GizmoMode = () => "translate";
+
+// The gate logic is pure code in xformOps.ts (Vitest-pinned): a prim
+// with no authored xformOpOrder reports identity transforms and stays
+// editable, so the create-op path can author the op AND xformOpOrder
+// from scratch; only genuinely unsupported stacks disable the gizmo.
+export function getGizmoGate() {
+  return evaluateGizmoGate(stageState.selectedPath, stageState.details);
+}
+
+export const gizmoPolicy = $state({
+  kit: null as TransformGizmo | null,
+  error: null as string | null,
+});
+
+export function getGizmoError() {
+  return gizmoPolicy.error;
+}
+
+// The prim's world matrix in VIEWPORT space: the USD world transform
+// composed with the loaded group's recentering + up-axis transform.
+export function gizmoWorldMatrix(viewer: RendererKit): THREE.Matrix4 | null {
+  const details = stageState.details;
+  if (!details?.world_transform) return null;
+  const world = new THREE.Matrix4().fromArray(details.world_transform);
+  const group = viewer.loadedGroup;
+  if (group) {
+    group.updateMatrixWorld();
+    world.premultiply(group.matrixWorld);
+  }
+  return world;
+}
+
+// Commit errors clear with the next selection; a fresh anchor snaps the
+// proxy back to stage truth (also the failure path: a refused commit
+// leaves details unchanged, so the re-anchor undoes the drag).
+export function clearGizmoError() {
+  const _path = stageState.details?.path;
+  gizmoPolicy.error = null;
+}
+
+// Attach, re-anchor or detach: called synchronously from the Viewport's
+// effect, so every stage read inside is tracked.
+export function syncGizmoAnchor(viewer: RendererKit, gizmoMode: GizmoMode) {
+  const kit = gizmoPolicy.kit;
+  if (!kit) return;
+  kit.controls.setMode(gizmoMode);
+  if (!getGizmoGate().attachable) {
+    kit.detach();
+    return;
+  }
+  const world = gizmoWorldMatrix(viewer);
+  if (world) kit.attach(world);
+}
+
+// Plain (non-$state) lock: it is only ever read inside the commit
+// handler and is never rendered, so a rune adds nothing there.
+let gizmoCommitInFlight = false;
+
+export function initGizmo(viewer: RendererKit, getMode: () => GizmoMode) {
+  gizmoViewer = viewer;
+  mode = getMode;
+  // On a component remount this restores the old component-local state
+  // semantics: a fresh commit lock and no stale error message.
+  gizmoPolicy.error = null;
+  gizmoCommitInFlight = false;
+  gizmoPolicy.kit = new TransformGizmo(
+    viewer.camera,
+    viewer.renderer.domElement,
+    viewer.scene,
+    viewer.controls,
+  );
+  gizmoPolicy.kit.onCommit = handleGizmoCommit;
+  // Effects created here run inside the component's initialization
+  // (initGizmo is called from onMount), so they live and die with it.
+  $effect(() => clearGizmoError());
+  $effect(() => syncGizmoAnchor(viewer, mode()));
+}
+
+export function disposeGizmo() {
+  gizmoPolicy.kit?.dispose();
+  gizmoPolicy.kit = null;
+}
+
+// Drag end -> desired USD local matrix -> the op(s) to author. The
+// parent/world chain cancels in the start/end ratio, so no ancestor
+// walk is needed: L' = L * inv(startWorld) * endWorld.
+async function handleGizmoCommit(commit: GizmoCommit) {
+  // initGizmo always runs first (onCommit is only wired there), so the
+  // captured viewer is never null when a commit fires.
+  const viewer = gizmoViewer!;
+  const gizmo = gizmoPolicy.kit;
+  const gizmoMode = mode();
+  const details = stageState.details;
+  if (gizmoCommitInFlight || !details?.local_transform || !details.world_transform) return;
+  gizmoCommitInFlight = true;
+  if (gizmo) gizmo.controls.enabled = false;
+  try {
+    const local = new THREE.Matrix4().fromArray(details.local_transform);
+    const target = local
+      .clone()
+      .multiply(commit.startWorld.clone().invert())
+      .multiply(commit.endWorld)
+      .toArray() as number[];
+    if (matricesClose(target, details.local_transform)) {
+      gizmo?.attach(gizmoWorldMatrix(viewer) ?? commit.endWorld);
+      return;
+    }
+    const orderAttribute = details.attributes.find((a) => a.name === "xformOpOrder");
+    const order = Array.isArray(orderAttribute?.value.data) ? (orderAttribute!.value.data as string[]) : [];
+    const result = composeOpUpdate({
+      mode: gizmoMode,
+      order,
+      attrs: details.attributes,
+      localMatrix: details.local_transform,
+      targetLocalMatrix: target,
+    });
+    if (!result.ok) {
+      gizmoPolicy.error = result.error;
+      gizmo?.attach(gizmoWorldMatrix(viewer) ?? commit.endWorld);
+      return;
+    }
+    let failed = false;
+    for (const write of result.writes) {
+      // xformOpOrder is uniform: it authors its default, never a time
+      // sample; the op values author at the viewer's current time code.
+      const error = await stageState.setAttributeValue(
+        write.name,
+        { type: write.type, data: write.data },
+        write.name === "xformOpOrder" ? null : undefined,
+      );
+      if (error !== null) {
+        gizmoPolicy.error = error;
+        failed = true;
+        break;
+      }
+    }
+    // Keep commits disabled until fresh details land; a second drag must
+    // never compute from the pre-commit local transform.
+    if (!failed) await stageState.refreshAfterEdit();
+    gizmo?.attach(failed ? (gizmoWorldMatrix(viewer) ?? commit.endWorld) : commit.endWorld);
+  } finally {
+    gizmoCommitInFlight = false;
+    if (gizmo) gizmo.controls.enabled = true;
+  }
+}

@@ -3,22 +3,18 @@
   import { onMount } from "svelte";
   import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
-  import {
-    renderState,
-    advanceStageTime,
-    toAbsoluteTime,
-    toPlayheadOffset,
-  } from "$lib/render/renderState.svelte";
+  import { renderState, toAbsoluteTime } from "$lib/render/renderState.svelte";
   import {
     integrateScene,
     loadRustScene,
+    installPlaybackDriver,
     refreshSceneAfterEdit,
     resetLoadedScene,
     syncGraphicsSettings,
     syncLightRig,
   } from "$lib/render/sceneIntegration";
-  import { TransformGizmo, type GizmoCommit } from "$lib/render/transformGizmo";
-  import { composeOpUpdate, evaluateGizmoGate, matricesClose, type GizmoMode } from "$lib/render/xformOps";
+  import { disposeGizmo, getGizmoError, getGizmoGate, initGizmo } from "$lib/render/gizmoCommit.svelte";
+  import type { GizmoMode } from "$lib/render/xformOps";
   import type { RendererKit } from "$lib/three/RendererKit.svelte";
   import { controlsState } from "$lib/state/controlsState.svelte";
   import * as THREE from "three";
@@ -41,119 +37,14 @@
 
   let canvas: HTMLCanvasElement;
 
-  // Transform gizmo (Phase 3 Task 4): attached to a scene-root proxy at the
-  // selected prim's world transform; commits author through set_attribute_value
-  // and the usd-stage-changed refresh re-anchors it.
-  let gizmo = $state<TransformGizmo | null>(null);
-  let gizmoError = $state<string | null>(null);
-  let gizmoCommitInFlight = $state(false);
-
-  // The gate logic is pure code in xformOps.ts (Vitest-pinned): a prim
-  // with no authored xformOpOrder reports identity transforms and stays
-  // editable, so the create-op path can author the op AND xformOpOrder
-  // from scratch; only genuinely unsupported stacks disable the gizmo.
-  const gizmoGate = $derived(evaluateGizmoGate(stageState.selectedPath, stageState.details));
-
-  const gizmoMessage = $derived(gizmoError ?? gizmoGate.message);
+  const gizmoGate = $derived(getGizmoGate());
+  const gizmoMessage = $derived(getGizmoError() ?? gizmoGate.message);
 
   // Review fix (playhead units): the timeline works in 0..(end-start)
   // offsets; this is the boundary to the absolute USD time codes that
   // setStageTime speaks. (The page keeps its own copy for export ranges.)
   function startTimeCode(): number {
     return stageState.stageInfo?.start_time_code ?? 0;
-  }
-
-  // The prim's world matrix in VIEWPORT space: the USD world transform
-  // composed with the loaded group's recentering + up-axis transform.
-  function gizmoWorldMatrix(): THREE.Matrix4 | null {
-    const details = stageState.details;
-    if (!details?.world_transform) return null;
-    const world = new THREE.Matrix4().fromArray(details.world_transform);
-    const group = viewer.loadedGroup;
-    if (group) {
-      group.updateMatrixWorld();
-      world.premultiply(group.matrixWorld);
-    }
-    return world;
-  }
-
-  // Commit errors clear with the next selection; a fresh anchor snaps the
-  // proxy back to stage truth (also the failure path: a refused commit
-  // leaves details unchanged, so the re-anchor undoes the drag).
-  $effect(() => {
-    const _path = stageState.details?.path;
-    gizmoError = null;
-  });
-
-  $effect(() => {
-    const kit = gizmo;
-    const gate = gizmoGate;
-    if (!kit) return;
-    kit.controls.setMode(gizmoMode);
-    if (!gate.attachable) {
-      kit.detach();
-      return;
-    }
-    const world = gizmoWorldMatrix();
-    if (world) kit.attach(world);
-  });
-
-  // Drag end -> desired USD local matrix -> the op(s) to author. The
-  // parent/world chain cancels in the start/end ratio, so no ancestor
-  // walk is needed: L' = L * inv(startWorld) * endWorld.
-  async function handleGizmoCommit(commit: GizmoCommit) {
-    const details = stageState.details;
-    if (gizmoCommitInFlight || !details?.local_transform || !details.world_transform) return;
-    gizmoCommitInFlight = true;
-    if (gizmo) gizmo.controls.enabled = false;
-    try {
-      const local = new THREE.Matrix4().fromArray(details.local_transform);
-      const target = local
-        .clone()
-        .multiply(commit.startWorld.clone().invert())
-        .multiply(commit.endWorld)
-        .toArray() as number[];
-      if (matricesClose(target, details.local_transform)) {
-        gizmo?.attach(gizmoWorldMatrix() ?? commit.endWorld);
-        return;
-      }
-      const orderAttribute = details.attributes.find((a) => a.name === "xformOpOrder");
-      const order = Array.isArray(orderAttribute?.value.data) ? (orderAttribute!.value.data as string[]) : [];
-      const result = composeOpUpdate({
-        mode: gizmoMode,
-        order,
-        attrs: details.attributes,
-        localMatrix: details.local_transform,
-        targetLocalMatrix: target,
-      });
-      if (!result.ok) {
-        gizmoError = result.error;
-        gizmo?.attach(gizmoWorldMatrix() ?? commit.endWorld);
-        return;
-      }
-      let failed = false;
-      for (const write of result.writes) {
-        // xformOpOrder is uniform: it authors its default, never a time
-        // sample; the op values author at the viewer's current time code.
-        const error = await stageState.setAttributeValue(
-          write.name,
-          { type: write.type, data: write.data },
-          write.name === "xformOpOrder" ? null : undefined,
-        );
-        if (error !== null) {
-          gizmoError = error;
-          failed = true;
-          break;
-        }
-      }
-      // Keep commits disabled until fresh details land; a second drag must
-      // never compute from the pre-commit local transform.
-      if (!failed) await stageState.refreshAfterEdit();
-      gizmo?.attach(failed ? (gizmoWorldMatrix() ?? commit.endWorld) : commit.endWorld);
-    } finally {
-      gizmoCommitInFlight = false;
-      if (gizmo) gizmo.controls.enabled = true;
-    }
   }
 
   $effect(() => {
@@ -233,27 +124,10 @@
 
     if (canvas) {
       viewer.init(canvas);
-      // The gizmo lives with the renderer kit's camera/scene/orbit: drag
-      // events come off the same canvas, and the orbit disables while a
-      // gizmo drag is active. The editing POLICY (gating, anchor, commit
-      // math) stays with the viewer here.
-      gizmo = new TransformGizmo(viewer.camera, viewer.renderer.domElement, viewer.scene, viewer.controls);
-      gizmo.onCommit = handleGizmoCommit;
+      initGizmo(viewer, () => gizmoMode);
     }
 
-    // Task 6 playback driver: the render loop advances the stage playhead
-    // in USD time codes. The seconds -> time-code rate conversion lives
-    // ONLY here and in the exporter (spec §8) — advanceStageTime.
-    viewer.onAdvanceTime = (deltaSeconds: number) => {
-      const info = stageState.stageInfo;
-      const start = info?.start_time_code ?? 0;
-      const end = info?.end_time_code ?? 0;
-      if (end <= start) return;
-      const tcps = info?.time_codes_per_second ?? 24;
-      const next = advanceStageTime(renderState.time ?? start, deltaSeconds, tcps, start, end);
-      viewer.animationProgress = toPlayheadOffset(next, start);
-      void renderState.setStageTime(next);
-    };
+    installPlaybackDriver(viewer);
 
     // Loading orchestration lives in loadOrchestrator; the viewport-bound
     // steps it can't own are handed back through the sceneIntegration
@@ -271,8 +145,7 @@
 
     return () => {
       unlisteners.forEach((u) => u.then((f) => f()));
-      gizmo?.dispose();
-      gizmo = null;
+      disposeGizmo();
       viewer.dispose();
     };
   });
