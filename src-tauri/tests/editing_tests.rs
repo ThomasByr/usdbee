@@ -1464,6 +1464,91 @@ fn save_stage_as_usdz_preserves_value_clips() {
     assert_eq!(size, Some(42.0), "the clip schedule and clip layer survive");
 }
 
+/// Nested usdz-inside-usdz (Task 13): the root layer references a layer
+/// packaged inside ANOTHER usdz; Save As repackages that usdz as a file
+/// inside the new archive. Reopening the result must still compose through
+/// the nested package.
+#[test]
+fn save_stage_as_usdz_survives_nested_usdz_dependencies() {
+    let (state, _events) = owner_with_events();
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    // inner.usdz packages one text layer defining /Pinned (defaultPrim set so
+    // the bare reference resolves, per the fixture gotchas).
+    let packaged = "#usda 1.0\n(\n    defaultPrim = \"Pinned\"\n)\n\ndef Xform \"Pinned\"\n{\n    custom double depth = 7.5\n}\n";
+    let mut archive_bytes = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut archive_bytes);
+    let mut writer = openusd::usdz::ArchiveWriter::new(&mut cursor);
+    writer
+        .add_layer("packaged.usda", packaged.as_bytes())
+        .expect("layer packages into the archive");
+    writer.finish().expect("archive finalizes");
+    std::fs::write(dir.path().join("inner.usdz"), &archive_bytes)
+        .expect("inner archive writes");
+
+    let root = dir.path().join("root.usda");
+    std::fs::write(
+        &root,
+        "#usda 1.0\ndef \"R\" (references = @./inner.usdz[packaged.usda]@)\n{\n}\n",
+    )
+    .expect("root layer writes");
+
+    let info = state.open(&root);
+    assert_eq!(info.composition_errors, Vec::<String>::new());
+    let out = dir.path().join("nested-out.usdz");
+    usdbee_lib::stage::request_save_stage_as_usdz(&state.sender(), out.to_string_lossy().as_ref())
+        .expect("save as usdz with a nested usdz dependency should succeed");
+
+    // The saved package really contains the inner archive as a file —
+    // nested through the two-pass flow's intermediate package.
+    fn contains_entry_with_suffix(bytes: &[u8], suffix: &str) -> bool {
+        let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else {
+            return false;
+        };
+        for index in 0..zip.len() {
+            let Ok(mut entry) = zip.by_index(index) else { continue };
+            let name = entry.name().to_string();
+            if name.ends_with(suffix) {
+                return true;
+            }
+            if name.ends_with(".usdz") {
+                let mut contents = Vec::new();
+                if entry.read_to_end(&mut contents).is_ok()
+                    && contains_entry_with_suffix(&contents, suffix)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    let saved = std::fs::read(&out).expect("package reads");
+    assert!(
+        contains_entry_with_suffix(&saved, "inner.usdz"),
+        "the nested archive must be packaged inside the result"
+    );
+
+    // Reopen: composition through the nested package must still resolve.
+    let reopened = openusd::usd::Stage::open(out.to_string_lossy().as_ref())
+        .expect("the repacked archive reopens");
+    reopened
+        .traverse(openusd::usd::PrimPredicate::ALL, |_| {})
+        .expect("reopened stage composes");
+    let errors = reopened.composition_errors();
+    assert!(
+        errors.is_empty(),
+        "composition through the nested package must be clean: {errors:?}"
+    );
+    // The bare reference maps the packaged /Pinned prim ONTO /R (explicit
+    // prim paths and defaultPrim both compose onto the referencing prim).
+    let depth = reopened
+        .attribute("/R.depth")
+        .expect("depth attribute")
+        .get_at::<f64>(openusd::usd::TimeCode::new(0.0))
+        .expect("depth reads");
+    assert_eq!(depth, Some(7.5), "the nested layer's opinion survives");
+}
+
 #[test]
 fn save_stage_as_usdz_rejects_the_original_archive() {
     let (state, _events) = owner_with_events();
