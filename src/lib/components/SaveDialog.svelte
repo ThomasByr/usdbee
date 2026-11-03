@@ -1,9 +1,10 @@
 <script lang="ts">
   import { save } from "@tauri-apps/plugin-dialog";
+  import { invoke } from "@tauri-apps/api/core";
+  import Modal from "$lib/components/Modal.svelte";
   import { editState } from "$lib/state/editState.svelte";
   import type { LayerSaveRequest, LayerInfo } from "$lib/stage/types";
   import { layerDisplayName } from "$lib/stage/layerText";
-  import { invoke } from "@tauri-apps/api/core";
 
   let { onClose } = $props<{ onClose: () => void }>();
 
@@ -32,6 +33,9 @@
   }
 
   $effect(() => {
+    // Track the dirty set so the edit-target list refreshes on open (the
+    // dialog mounts then) and whenever dirtyLayers changes while open.
+    void editState.dirtyLayers;
     void refreshTargetLayers();
   });
 
@@ -114,118 +118,113 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") onClose();
+    // Escape is owned by the shared Modal shell (top-most wins); Enter stays
+    // the confirm shortcut.
     if (e.key === "Enter") void onConfirm();
   }
 </script>
 
 <svelte:window onkeydown={onKeydown} />
 
-<div class="modal-overlay" role="presentation">
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal-content save-dialog" onclick={(e) => e.stopPropagation()}>
-    <h3>{isUsdzStage ? "Save As usdz" : "Save Layers"}</h3>
-
-    <div class="save-row">
-      <label class="save-layer-name" for="edit-target">Edit target</label>
-      <select
-        id="edit-target"
-        class="save-path-input"
-        value={editState.editTarget?.layer_identifier ?? ""}
-        disabled={targetLayers.length === 0}
-        onchange={(event) => void changeEditTarget(event)}
-      >
-        {#each targetLayers as layer (layer.identifier)}
-          <option value={layer.identifier}>{layerDisplayName(layer)}</option>
-        {/each}
-      </select>
-    </div>
-    {#if editTargetError}
-      <div class="error-text">{editTargetError}</div>
-    {/if}
-
-    {#if isUsdzStage}
-      <div class="error-text">
-        This stage was opened from a .usdz package — its layers cannot be saved in place. Save As usdz repacks
-        the stage (session edits included) into a new .usdz archive; the original file is never modified.
-      </div>
-      <div class="save-row">
-        <div class="save-layer-name">usdz destination</div>
-        <input
-          type="text"
-          class="save-path-input"
-          bind:value={usdzPath}
-          placeholder="new .usdz package path"
-        />
-        <button class="save-browse-btn" onclick={() => void browseUsdz()}>Browse…</button>
-      </div>
-      {#if usdzPath.trim() !== "" && !isUsdz(usdzPath.trim())}
-        <span class="save-warning">must be .usdz</span>
-      {/if}
-    {:else if editState.dirtyLayers.length === 0}
-      <div class="error-text">No layers with unsaved edits.</div>
-    {:else}
-      {#if regularLayers.length > 0}
-        <div class="save-section">Layers</div>
-        {#each regularLayers as layer (layer.identifier)}
-          <div class="save-row">
-            <div class="save-layer-name" title={layer.identifier}>
-              {layer.identifier}
-            </div>
-            <input
-              type="text"
-              class="save-path-input"
-              bind:value={paths[layer.identifier]}
-              placeholder="destination path (.usda / .usdc / .usd)"
-            />
-            <button class="save-browse-btn" onclick={() => browse(layer)}>Browse…</button>
-          </div>
-        {/each}
-      {/if}
-
-      {#if sessionLayers.length > 0}
-        <div class="save-section">Session layers (save as a new .usda file)</div>
-        {#each sessionLayers as layer (layer.identifier)}
-          <div class="save-row">
-            <div class="save-layer-name" title={layer.identifier}>
-              {layer.identifier}
-            </div>
-            <input
-              type="text"
-              class="save-path-input"
-              bind:value={paths[layer.identifier]}
-              placeholder="new .usda path — session layers never overwrite a composed file"
-            />
-            {#if paths[layer.identifier] !== "" && !isUsda(paths[layer.identifier])}
-              <span class="save-warning">must be .usda</span>
-            {:else}
-              <button class="save-browse-btn" onclick={() => browse(layer)}>Browse…</button>
-            {/if}
-          </div>
-        {/each}
-      {/if}
-    {/if}
-
-    {#if editState.saveError}
-      <div class="error-text">{editState.saveError}</div>
-    {/if}
-
-    <div class="save-actions">
-      <button class="close-btn" onclick={onClose}>Cancel</button>
-      <button
-        class="primary-btn"
-        disabled={editState.saving || (isUsdzStage ? !isUsdz(usdzPath.trim()) : requests().length === 0)}
-        onclick={() => void onConfirm()}
-      >
-        {editState.saving ? "Saving…" : isUsdzStage ? "Save As usdz" : "Save"}
-      </button>
-    </div>
+<Modal
+  title={isUsdzStage ? "Save As usdz" : "Save Layers"}
+  contentClass="save-dialog"
+  closeOnBackdrop={false}
+  {onClose}
+>
+  <div class="save-row">
+    <label class="save-layer-name" for="edit-target">Edit target</label>
+    <select
+      id="edit-target"
+      class="save-path-input"
+      value={editState.editTarget?.layer_identifier ?? ""}
+      disabled={targetLayers.length === 0}
+      onchange={(event) => void changeEditTarget(event)}
+    >
+      {#each targetLayers as layer (layer.identifier)}
+        <option value={layer.identifier}>{layerDisplayName(layer)}</option>
+      {/each}
+    </select>
   </div>
-</div>
+  {#if editTargetError}
+    <div class="error-text">{editTargetError}</div>
+  {/if}
+
+  {#if isUsdzStage}
+    <div class="error-text">
+      This stage was opened from a .usdz package — its layers cannot be saved in place. Save As usdz repacks
+      the stage (session edits included) into a new .usdz archive; the original file is never modified.
+    </div>
+    <div class="save-row">
+      <div class="save-layer-name">usdz destination</div>
+      <input type="text" class="save-path-input" bind:value={usdzPath} placeholder="new .usdz package path" />
+      <button class="save-browse-btn" onclick={() => void browseUsdz()}>Browse…</button>
+    </div>
+    {#if usdzPath.trim() !== "" && !isUsdz(usdzPath.trim())}
+      <span class="save-warning">must be .usdz</span>
+    {/if}
+  {:else if editState.dirtyLayers.length === 0}
+    <div class="error-text">No layers with unsaved edits.</div>
+  {:else}
+    {#if regularLayers.length > 0}
+      <div class="save-section">Layers</div>
+      {#each regularLayers as layer (layer.identifier)}
+        <div class="save-row">
+          <div class="save-layer-name" title={layer.identifier}>
+            {layer.identifier}
+          </div>
+          <input
+            type="text"
+            class="save-path-input"
+            bind:value={paths[layer.identifier]}
+            placeholder="destination path (.usda / .usdc / .usd)"
+          />
+          <button class="save-browse-btn" onclick={() => browse(layer)}>Browse…</button>
+        </div>
+      {/each}
+    {/if}
+
+    {#if sessionLayers.length > 0}
+      <div class="save-section">Session layers (save as a new .usda file)</div>
+      {#each sessionLayers as layer (layer.identifier)}
+        <div class="save-row">
+          <div class="save-layer-name" title={layer.identifier}>
+            {layer.identifier}
+          </div>
+          <input
+            type="text"
+            class="save-path-input"
+            bind:value={paths[layer.identifier]}
+            placeholder="new .usda path — session layers never overwrite a composed file"
+          />
+          {#if paths[layer.identifier] !== "" && !isUsda(paths[layer.identifier])}
+            <span class="save-warning">must be .usda</span>
+          {:else}
+            <button class="save-browse-btn" onclick={() => browse(layer)}>Browse…</button>
+          {/if}
+        </div>
+      {/each}
+    {/if}
+  {/if}
+
+  {#if editState.saveError}
+    <div class="error-text">{editState.saveError}</div>
+  {/if}
+
+  <div class="save-actions">
+    <button class="close-btn" onclick={onClose}>Cancel</button>
+    <button
+      class="primary-btn"
+      disabled={editState.saving || (isUsdzStage ? !isUsdz(usdzPath.trim()) : requests().length === 0)}
+      onclick={() => void onConfirm()}
+    >
+      {editState.saving ? "Saving…" : isUsdzStage ? "Save As usdz" : "Save"}
+    </button>
+  </div>
+</Modal>
 
 <style>
-  .save-dialog {
+  :global(.save-dialog) {
     min-width: 480px;
     max-width: 720px;
   }

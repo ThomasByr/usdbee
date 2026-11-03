@@ -33,6 +33,7 @@
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@tauri-apps/cli": "^2",
     "@types/three": "^0.183.1",
+    "happy-dom": "^21.0.4",
     "prettier": "^3.8.1",
     "prettier-plugin-svelte": "^3.5.1",
     "release-it": "^19.2.4",

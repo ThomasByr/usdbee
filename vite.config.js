@@ -1,12 +1,16 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
 
-// @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [sveltekit()],
+
+  // Vitest resolves bare imports with SSR conditions, which lands on
+  // svelte's server runtime (mount is unavailable there). Pin the browser
+  // condition so component tests can mount real components.
+  ...(process.env.VITEST ? { resolve: { conditions: ["browser"] } } : {}),
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
@@ -35,17 +39,17 @@ export default defineConfig(async () => ({
       output: {
         /** @param {string} id */
         manualChunks(id) {
-          if (id.includes('node_modules/svelte/')) {
-            return 'svelte';
+          if (id.includes("node_modules/svelte/")) {
+            return "svelte";
           }
-          if (id.includes('node_modules/three/')) {
-            return 'three';
+          if (id.includes("node_modules/three/")) {
+            return "three";
           }
-        }
-      }
-    }
+        },
+      },
+    },
   },
   optimizeDeps: {
-    exclude: ["@ffmpeg/ffmpeg", "@ffmpeg/util"]
-  }
+    exclude: ["@ffmpeg/ffmpeg", "@ffmpeg/util"],
+  },
 }));

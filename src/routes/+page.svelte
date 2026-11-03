@@ -12,6 +12,7 @@
   import LayerTextTab from "$lib/components/tabs/LayerTextTab.svelte";
   import SettingsTab from "$lib/components/tabs/SettingsTab.svelte";
   import ExportModal from "$lib/components/ExportModal.svelte";
+  import Modal from "$lib/components/Modal.svelte";
   import SaveDialog from "$lib/components/SaveDialog.svelte";
   import { runExport } from "$lib/three/VideoExporter";
   import {
@@ -91,7 +92,6 @@
   }
 
   async function handleExport(detail: any) {
-    if (detail instanceof CustomEvent) detail = detail.detail;
     console.log("handleExport called with", detail);
 
     isExporting = true;
@@ -464,30 +464,30 @@
 {/if}
 
 {#if showCloseConfirm}
-  <div class="modal-overlay" role="dialog" aria-modal="true">
-    <div class="modal-content close-confirm-box">
-      <h3>Unsaved changes</h3>
-      <p>
-        {editState.dirtyLayers.length} layer(s) have unsaved edits. Close anyway and lose them?
-      </p>
-      <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;">
-        <button class="tool-btn" onclick={() => (showCloseConfirm = false)}>Cancel</button>
-        <button
-          class="primary-btn"
-          style="background: #a33;"
-          onclick={() => {
-            showCloseConfirm = false;
-            getCurrentWindow().destroy().catch(console.warn);
-          }}>Close anyway</button
-        >
-      </div>
+  <Modal
+    title="Unsaved changes"
+    contentClass="close-confirm-box"
+    closeOnBackdrop={false}
+    onClose={() => (showCloseConfirm = false)}
+  >
+    <p>{editState.dirtyLayers.length} layer(s) have unsaved edits. Close anyway and lose them?</p>
+    <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;">
+      <button class="tool-btn" onclick={() => (showCloseConfirm = false)}>Cancel</button>
+      <button
+        class="primary-btn"
+        style="background: #a33;"
+        onclick={() => {
+          showCloseConfirm = false;
+          getCurrentWindow().destroy().catch(console.warn);
+        }}>Close anyway</button
+      >
     </div>
-  </div>
+  </Modal>
 {/if}
 
 {#if showExportModal}
   <ExportModal
-    on:close={() => !isExporting && (showExportModal = false)}
+    onClose={() => !isExporting && (showExportModal = false)}
     renderer={viewer.renderer}
     scene={viewer.scene}
     camera={viewer.camera}
@@ -498,6 +498,6 @@
     {isExporting}
     {exportProgress}
     {exportStage}
-    on:export={handleExport}
+    onExport={handleExport}
   />
 {/if}

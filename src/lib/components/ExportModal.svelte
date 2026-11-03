@@ -1,42 +1,58 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from "svelte";
   import type { WebGLRenderer, PerspectiveCamera, Scene } from "three";
   import * as THREE from "three";
 
-  export let renderer: WebGLRenderer | null = null;
-  export let scene: Scene | null = null;
-  export let camera: PerspectiveCamera | null = null;
-  export let hasAnimation: boolean = false;
-  export let animationDuration: number = 0;
-  export let animationProgress: number = 0;
-  // Task 6: steps the stage playhead to `t` — a 0-based offset from
-  // start_time_code (the modal's range inputs are offsets) — and waits for
-  // the animated refresh before rendering a preview frame. The caller
-  // (+page) converts to absolute USD time codes.
-  export let previewAt: ((t: number) => Promise<void>) | null = null;
-  export let isExporting: boolean = false;
-  export let exportProgress: number = 0;
-  export let exportStage: string = "Exporting...";
+  let {
+    renderer = null,
+    scene = null,
+    camera = null,
+    hasAnimation = false,
+    animationDuration = 0,
+    animationProgress = 0,
+    // Task 6: steps the stage playhead to `t` — a 0-based offset from
+    // start_time_code (the modal's range inputs are offsets) — and waits for
+    // the animated refresh before rendering a preview frame. The caller
+    // (+page) converts to absolute USD time codes.
+    previewAt = null,
+    isExporting = false,
+    exportProgress = 0,
+    exportStage = "Exporting...",
+    onClose,
+    onExport,
+  }: {
+    renderer: WebGLRenderer | null;
+    scene: Scene | null;
+    camera: PerspectiveCamera | null;
+    hasAnimation: boolean;
+    animationDuration: number;
+    animationProgress: number;
+    previewAt: ((t: number) => Promise<void>) | null;
+    isExporting: boolean;
+    exportProgress: number;
+    exportStage: string;
+    onClose: () => void;
+    onExport: (detail: ExportRequest) => void;
+  } = $props();
 
-  const dispatch = createEventDispatcher();
+  let format = $state<"jpg" | "png" | "mp4">("png");
+  let quality = $state(0.9);
+  let resolution = $state("1920x1080");
+  let bgTransparent = $state(true);
+  let previewUrl = $state<string | null>(null);
+  let previewGeneration = $state(0);
 
-  let format: "jpg" | "png" | "mp4" = "png";
-  let quality = 0.9;
-  let resolution = "1920x1080";
-  let bgTransparent = true;
-  let previewUrl: string | null = null;
-  let previewGeneration = 0;
+  let exportTime = $state(0);
+  let crop = $state(false);
+  let exportStartTime = $state(0);
+  let exportEndTime = $state(0);
+  let previewTarget = $state<"start" | "end">("start");
+  let loop = $state(false);
 
-  let exportTime = 0;
-  let crop = false;
-  let exportStartTime = 0;
-  let exportEndTime = 0;
-  let previewTarget: "start" | "end" = "start";
-  let loop = false;
-
-  $: if (animationDuration > 0 && exportEndTime === 0) {
-    exportEndTime = animationDuration;
-  }
+  $effect(() => {
+    if (animationDuration > 0 && exportEndTime === 0) {
+      exportEndTime = animationDuration;
+    }
+  });
 
   const resolutions = [
     { label: "480p (4:3)", value: "640x480", width: 640, height: 480 },
@@ -47,7 +63,7 @@
   ];
 
   function close() {
-    dispatch("close");
+    onClose();
   }
 
   async function updatePreview() {
@@ -111,24 +127,25 @@
     }
   }
 
-  onMount(() => {
+  $effect(() => {
     if (renderer && scene && camera) {
-      setTimeout(updatePreview, 50);
+      const timer = setTimeout(updatePreview, 50);
+      return () => clearTimeout(timer);
     }
   });
 
-  $: if (
-    format ||
-    resolution ||
-    quality ||
-    bgTransparent ||
-    exportTime ||
-    exportStartTime ||
-    exportEndTime ||
-    previewTarget
-  ) {
-    setTimeout(updatePreview, 50);
-  }
+  $effect(() => {
+    format;
+    resolution;
+    quality;
+    bgTransparent;
+    exportTime;
+    exportStartTime;
+    exportEndTime;
+    previewTarget;
+    const timer = setTimeout(updatePreview, 50);
+    return () => clearTimeout(timer);
+  });
 
   async function doExport() {
     const res = resolutions.find((r) => r.value === resolution);
@@ -143,21 +160,30 @@
       mp4Crop: format === "mp4" && crop ? { start: exportStartTime, end: exportEndTime } : undefined,
       loop: format === "mp4" ? loop : undefined,
     };
-    dispatch("export", data);
+    onExport(data);
   }
+  type ExportRequest = {
+    format: "jpg" | "png" | "mp4";
+    quality: number | undefined;
+    resolution: { width: number; height: number };
+    bgTransparent: boolean;
+    timestamp: number | undefined;
+    mp4Crop: { start: number; end: number } | undefined;
+    loop: boolean | undefined;
+  };
 </script>
 
 <div
   class="modal-overlay"
-  on:click|self={close}
+  onclick={(e) => e.target === e.currentTarget && close()}
   role="button"
   tabindex="0"
-  on:keydown={(e) => e.key === "Escape" && close()}
+  onkeydown={(e) => e.key === "Escape" && close()}
 >
   <div class="export-modal-content">
     <div class="export-header">
       <h2>Export Scene</h2>
-      <button on:click={close} class="export-close-btn">&times;</button>
+      <button onclick={close} class="export-close-btn">&times;</button>
     </div>
 
     <div class="export-body">
@@ -166,7 +192,10 @@
         <!-- Format Selection -->
         <div class="format-buttons">
           {#each hasAnimation ? ["png", "jpg", "mp4"] : ["png", "jpg"] as f}
-            <button class="format-btn {format === f ? 'active' : ''}" on:click={() => (format = f as any)}>
+            <button
+              class="format-btn {format === f ? 'active' : ''}"
+              onclick={() => (format = f as "jpg" | "png" | "mp4")}
+            >
               {f}
             </button>
           {/each}
@@ -275,7 +304,7 @@
                         max={animationDuration}
                         step="0.01"
                         bind:value={exportStartTime}
-                        on:input={() => {
+                        oninput={() => {
                           if (exportStartTime > exportEndTime) exportStartTime = exportEndTime;
                           previewTarget = "start";
                         }}
@@ -287,7 +316,7 @@
                         max={animationDuration}
                         step="0.01"
                         bind:value={exportEndTime}
-                        on:input={() => {
+                        oninput={() => {
                           if (exportEndTime < exportStartTime) exportEndTime = exportStartTime;
                           previewTarget = "end";
                         }}
@@ -343,8 +372,8 @@
           </div>
         </div>
       {:else}
-        <button class="export-btn cancel" on:click={close} disabled={isExporting}>Cancel</button>
-        <button class="export-btn confirm" on:click={doExport} disabled={isExporting}
+        <button class="export-btn cancel" onclick={close} disabled={isExporting}>Cancel</button>
+        <button class="export-btn confirm" onclick={doExport} disabled={isExporting}
           >Export {format.toUpperCase()}</button
         >
       {/if}
