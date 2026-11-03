@@ -29,6 +29,21 @@
 
   let popoverOpen = $state(false);
   let popoverAnchor = $state<HTMLButtonElement | null>(null);
+  let rowInvisible = $state(false);
+
+  // The eye reflects visibility state that is already loaded: the selected
+  // prim's details (the inspector's fetch) or the value this row's own
+  // toggle just authored. Unloaded rows keep the neutral eye — no per-row
+  // fetching.
+  const authoredInvisible = $derived.by(() => {
+    const details = stageState.details;
+    if (details && details.path === node.path) {
+      return (
+        (details.metadata.find(([field]) => field === "visibility")?.[1].data as string) === "invisible"
+      );
+    }
+    return rowInvisible;
+  });
 
   function select() {
     stageState.selectPrim(node.path);
@@ -45,7 +60,11 @@
       (details.metadata.find(([field]) => field === "visibility")?.[1].data as string) === "invisible";
     const next = invisible ? "inherited" : "invisible";
     const error = await stageState.setPrimMetadata("visibility", { type: "token", data: next }, node.path);
-    if (error !== null) console.warn(`usdbee: visibility toggle on ${node.path} failed:`, error);
+    if (error !== null) {
+      console.warn(`usdbee: visibility toggle on ${node.path} failed:`, error);
+      return;
+    }
+    rowInvisible = next === "invisible";
   }
 
   // The row's Enter/Space selection must not fire from the action buttons.
@@ -120,7 +139,7 @@
           }}
           onkeydown={keepRowKeys}
         >
-          <Icon name="eye" size={13} />
+          <Icon name={authoredInvisible ? "eye-off" : "eye"} size={13} />
         </button>
       </span>
     {/if}
