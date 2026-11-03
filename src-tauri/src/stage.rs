@@ -5,7 +5,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use openusd::ar::DefaultResolver;
@@ -40,6 +40,10 @@ pub enum StageRequest {
         // Original archive for collision checks; direct opens can derive it
         // from `path`, while the extraction flow supplies it explicitly.
         source_usdz: Option<PathBuf>,
+        // The dialog flow's extraction dir: owned by this stage for
+        // cleanup — the owner thread deletes it (with the session layer
+        // file) on Shutdown. Direct opens pass None.
+        extraction_dir: Option<PathBuf>,
         reply: mpsc::Sender<Result<StageInfo, String>>,
     },
     GetTree {
@@ -149,6 +153,17 @@ pub enum StageRequest {
     },
     ListStageLayers {
         reply: mpsc::Sender<Result<Vec<LayerInfo>, String>>,
+    },
+    // Close: the owner deletes its session layer file and its extraction
+    // dir (the cleanup paths the open recorded), drops the stage, replies,
+    // and exits. The map entry is removed by the close_stage caller.
+    Shutdown {
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    // One list_stages entry: the owner reports its own id, root layer and
+    // dirty-layer count from its ledger.
+    GetSummary {
+        reply: mpsc::Sender<Result<StageSummary, String>>,
     },
 }
 
@@ -268,34 +283,211 @@ pub struct LayerSaveRequest {
     pub path: String,
 }
 
+/// Map-level `usd-stage-changed` emitter: called with the stage's id and
+/// the edited prim paths after each successful mutation. lib.rs bridges it
+/// to the Tauri event (payload `{ "stage_id", "paths" }`); tests capture
+/// it in a channel. Arc so StageState can hand one clone to every spawned
+/// owner thread.
+pub type StageEventSink = Arc<dyn Fn(u64, &[String]) + Send + Sync>;
+
+/// A sink that swallows every emission (tests that ignore events).
+pub fn noop_sink() -> StageEventSink {
+    Arc::new(|_stage_id: u64, _paths: &[String]| {})
+}
+
+/// The keyed stage map: one entry per open stage, each owning a fresh
+/// owner thread (and its caches). The id counter starts at 1 — 0 stays
+/// reserved as the frontend's "no stage".
 pub struct StageState {
-    pub sender: mpsc::Sender<StageRequest>,
-    // Tessellations the owner's MeshCache filled since the last Open. Shared
-    // handle so tests (and any introspection) can count real tessellation
-    // work without reaching into the owner thread; used by the dedup pin.
+    stages: Mutex<HashMap<u64, StageHandle>>,
+    next_id: AtomicU64,
+    sink: StageEventSink,
+}
+
+struct StageHandle {
+    sender: mpsc::Sender<StageRequest>,
+    // Tessellations the owner's MeshCache filled since the last Open.
+    // Shared handle so tests (and any introspection) can count real
+    // tessellation work without reaching into the owner thread; used by
+    // the dedup pin.
     tessellations: Arc<AtomicUsize>,
 }
 
 impl StageState {
-    pub fn mesh_tessellations(&self) -> usize {
-        self.tessellations.load(Ordering::Relaxed)
+    pub fn new(sink: StageEventSink) -> Self {
+        StageState {
+            stages: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            sink,
+        }
+    }
+
+    /// The sender of one open stage — every stage-scoped command routes
+    /// through this lookup, so an unknown or closed id is one readable
+    /// error for every command shape.
+    pub fn sender(&self, stage_id: u64) -> Result<mpsc::Sender<StageRequest>, String> {
+        self.stages
+            .lock()
+            .map_err(|_| "stage map lock poisoned".to_string())?
+            .get(&stage_id)
+            .map(|handle| handle.sender.clone())
+            .ok_or_else(|| format!("no stage {}", stage_id))
+    }
+
+    pub fn mesh_tessellations(&self, stage_id: u64) -> Result<usize, String> {
+        self.stages
+            .lock()
+            .map_err(|_| "stage map lock poisoned".to_string())?
+            .get(&stage_id)
+            .map(|handle| handle.tessellations.load(Ordering::Relaxed))
+            .ok_or_else(|| format!("no stage {}", stage_id))
+    }
+
+    /// Open a stage as a NEW map entry: mint the id, spawn a fresh owner
+    /// thread, send the Open, and wait for the reply. A failed open removes
+    /// only the entry it created (and shuts the fresh owner down, cleaning
+    /// up what it recorded); every other stage is untouched.
+    pub fn open(
+        &self,
+        path: &Path,
+        is_usdz: bool,
+        source_usdz: Option<&Path>,
+        extraction_dir: Option<&Path>,
+    ) -> Result<StageInfo, String> {
+        let stage_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        let tessellations = Arc::new(AtomicUsize::new(0));
+        spawn_stage_owner_for(
+            stage_id,
+            self.sink.clone(),
+            receiver,
+            tessellations.clone(),
+        );
+        self.stages
+            .lock()
+            .map_err(|_| "stage map lock poisoned".to_string())?
+            .insert(
+                stage_id,
+                StageHandle {
+                    sender: sender.clone(),
+                    tessellations,
+                },
+            );
+        let (reply, response) = mpsc::channel();
+        if sender
+            .send(StageRequest::Open {
+                path: path.to_path_buf(),
+                is_usdz,
+                source_usdz: source_usdz.map(Path::to_path_buf),
+                extraction_dir: extraction_dir.map(Path::to_path_buf),
+                reply,
+            })
+            .is_err()
+        {
+            // The fresh owner died before accepting the open: leave no
+            // entry behind (nothing was opened, nothing to clean up).
+            self.abandon(stage_id, sender);
+            return Err("stage service unavailable".to_string());
+        }
+        match response.recv() {
+            Ok(Ok(info)) => Ok(info),
+            Ok(Err(error)) => {
+                self.abandon(stage_id, sender);
+                Err(error)
+            }
+            Err(_) => {
+                self.abandon(stage_id, sender);
+                Err("stage service unavailable".to_string())
+            }
+        }
+    }
+
+    /// Remove a failed open's entry and shut its fresh owner down so the
+    /// thread (and its recorded cleanup paths) cannot outlive the error.
+    fn abandon(&self, stage_id: u64, sender: mpsc::Sender<StageRequest>) {
+        if let Ok(mut stages) = self.stages.lock() {
+            stages.remove(&stage_id);
+        }
+        let (reply, response) = mpsc::channel();
+        if sender.send(StageRequest::Shutdown { reply }).is_ok() {
+            let _ = response.recv();
+        }
+    }
+
+    /// Close one stage: remove the map entry first (commands against the
+    /// id fail readably from here on), then let the owner delete its
+    /// session file and extraction dir, drop the stage, and exit. Closing
+    /// the last stage is fine — the frontend shows its empty state.
+    pub fn close_stage(&self, stage_id: u64) -> Result<(), String> {
+        let handle = {
+            let mut stages = self
+                .stages
+                .lock()
+                .map_err(|_| "stage map lock poisoned".to_string())?;
+            stages
+                .remove(&stage_id)
+                .ok_or_else(|| format!("no stage {}", stage_id))?
+        };
+        let (reply, response) = mpsc::channel();
+        handle
+            .sender
+            .send(StageRequest::Shutdown { reply })
+            .map_err(|_| "stage service unavailable".to_string())?;
+        response
+            .recv()
+            .map_err(|_| "stage service unavailable".to_string())?
+    }
+
+    /// Every open stage with its root layer and dirty-layer count. Owners
+    /// answer through their channels; a dead owner is skipped, not fatal.
+    pub fn list_stages(&self) -> Result<Vec<StageSummary>, String> {
+        let senders: Vec<(u64, mpsc::Sender<StageRequest>)> = {
+            let stages = self
+                .stages
+                .lock()
+                .map_err(|_| "stage map lock poisoned".to_string())?;
+            stages
+                .iter()
+                .map(|(stage_id, handle)| (*stage_id, handle.sender.clone()))
+                .collect()
+        };
+        let mut summaries = Vec::with_capacity(senders.len());
+        for (stage_id, sender) in senders {
+            let (reply, response) = mpsc::channel();
+            if sender.send(StageRequest::GetSummary { reply }).is_err() {
+                continue;
+            }
+            if let Ok(Ok(summary)) = response.recv() {
+                summaries.push(summary);
+            } else {
+                eprintln!("usdbee: stage {} did not report a summary", stage_id);
+            }
+        }
+        Ok(summaries)
     }
 }
 
 /// Actor-side `usd-stage-changed` emitter: called with the edited prim
 /// paths after each successful mutation. lib.rs bridges it to the Tauri
-/// event (payload `{ "paths": [...] }`); tests capture it in a channel.
+/// event; tests capture it in a channel.
 pub type StageChangeSink = Box<dyn Fn(&[String]) + Send>;
 
-pub fn spawn_stage_owner() -> StageState {
-    spawn_stage_owner_with_sink(None)
-}
-
-pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState {
-    let (sender, receiver) = mpsc::channel();
-    let tessellations = Arc::new(AtomicUsize::new(0));
+/// Spawn the owner thread of one stage id. The per-thread actor is
+/// unchanged from the single-stage era: one thread, one stage, one cache
+/// set; only the entry point is keyed now.
+fn spawn_stage_owner_for(
+    stage_id: u64,
+    event_sink: StageEventSink,
+    receiver: mpsc::Receiver<StageRequest>,
+    tessellations: Arc<AtomicUsize>,
+) {
     let owner_counter = tessellations.clone();
     thread::spawn(move || {
+        // Bind the map-level (id, paths) sink to this stage's id so the
+        // loop's emission call sites stay one-arg.
+        let sink: Option<StageChangeSink> = Some(Box::new(move |paths: &[String]| {
+            event_sink(stage_id, paths)
+        }));
         // The stage lives wrapped in openusd's capture recorders: the
         // UndoStage (inverse diffs, bounded UNDO_DEPTH) and the ReplayStage
         // (forward diffs) both install their sinks on the one underlying
@@ -331,16 +523,27 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
         // measured 0.4 ms/call (Task 1 profile c): memoizing turns repeats
         // and batch dups into map lookups.
         let mut resolve_memo = ResolveMemo::new();
+        // Cleanup paths this owner owns: the session layer file its open
+        // wrote and the dialog flow's extraction dir. Deleted on Shutdown
+        // (close_stage or a failed open's cleanup).
+        let mut session_path: Option<PathBuf> = None;
+        let mut extraction_dir: Option<PathBuf> = None;
         while let Ok(request) = receiver.recv() {
             match request {
                 StageRequest::Open {
                     path,
                     is_usdz,
                     source_usdz,
+                    extraction_dir: requested_extraction_dir,
                     reply,
                 } => {
+                    // Recorded before the attempt: a failed open shuts this
+                    // fresh owner down (StageState::open), and the cleanup
+                    // then removes the extraction dir with it.
+                    extraction_dir = requested_extraction_dir;
                     let response = catch_unwind(AssertUnwindSafe(|| {
-                        let (stage, info) = open_stage(&path)?;
+                        let (stage, mut info) = open_stage(&path)?;
+                        info.stage_id = stage_id;
                         // Both wrappers install their sinks on the one
                         // stage before either replaces the old slots, so a
                         // panic between the wraps cannot strand recorders
@@ -367,6 +570,15 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                         undo_journal.clear();
                         redo_stack.clear();
                         owner_counter.store(0, Ordering::Relaxed);
+                        // The session layer file this open created: the
+                        // owner deletes it on Shutdown (the ride-along
+                        // temp-file cleanup — session edits are never
+                        // saved, so close is the only cleanup they need).
+                        session_path = current_stage.as_ref().and_then(|stage| {
+                            stage
+                                .session_layer()
+                                .and_then(|layer| layer.resolved_path().map(PathBuf::from))
+                        });
                     }
                     let _ = reply.send(response);
                 }
@@ -847,13 +1059,49 @@ pub fn spawn_stage_owner_with_sink(sink: Option<StageChangeSink>) -> StageState 
                     };
                     let _ = reply.send(response);
                 }
+                StageRequest::Shutdown { reply } => {
+                    // The owner's own cleanup: the session layer file this
+                    // open wrote and the extraction dir it recorded. The
+                    // stage drops when the loop below breaks and the
+                    // thread's state falls away with it.
+                    if let Some(path) = session_path.take() {
+                        if let Err(e) = fs::remove_file(&path) {
+                            eprintln!(
+                                "usdbee: could not remove the session layer {}: {}",
+                                path.display(),
+                                e
+                            );
+                        }
+                    }
+                    if let Some(dir) = extraction_dir.take() {
+                        if let Err(e) = fs::remove_dir_all(&dir) {
+                            eprintln!(
+                                "usdbee: could not remove the extraction dir {}: {}",
+                                dir.display(),
+                                e
+                            );
+                        }
+                    }
+                    let _ = reply.send(Ok(()));
+                    break;
+                }
+                StageRequest::GetSummary { reply } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            Ok(StageSummary {
+                                stage_id,
+                                root_identifier: stage.root_layer().identifier().to_owned(),
+                                dirty_count: dirty_ledger.dirty().len() as u32,
+                            })
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
             }
         }
     });
-    StageState {
-        sender,
-        tessellations,
-    }
 }
 
 fn panic_reply<T>(payload: Box<dyn Any + Send>) -> Result<T, String> {
@@ -867,6 +1115,10 @@ fn panic_reply<T>(payload: Box<dyn Any + Send>) -> Result<T, String> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageInfo {
+    // The keyed map's id of the stage this info describes; 0 only in infos
+    // built before an owner stamps the real id (the free open_stage
+    // entry point used by read-only tests).
+    pub stage_id: u64,
     pub root_layer: String,
     pub time_codes_per_second: f64,
     pub start_time_code: f64,
@@ -876,6 +1128,16 @@ pub struct StageInfo {
     // back to "Y", the USD spec default (fail-soft with a warn).
     #[serde(default)]
     pub up_axis: String,
+}
+
+/// One open stage as list_stages reports it: the id commands address it
+/// by, its root layer identifier, and how many of its layers carry
+/// unsaved edits (from the owner's dirty ledger).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageSummary {
+    pub stage_id: u64,
+    pub root_identifier: String,
+    pub dirty_count: u32,
 }
 
 fn normalized_up_axis(token: &str) -> String {
@@ -981,6 +1243,7 @@ pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
     }
 
     let info = StageInfo {
+        stage_id: 0,
         root_layer: stage.root_layer().identifier().to_owned(),
         time_codes_per_second: stage.time_codes_per_second(),
         start_time_code: stage.start_time_code(),
@@ -2837,8 +3100,11 @@ fn geometry_bytes(
 // Async command so Tauri runs it off the main thread; the body stays
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
-pub async fn get_stage_tree(state: tauri::State<'_, StageState>) -> Result<Vec<PrimNode>, String> {
-    request_stage_tree(&state.sender)
+pub async fn get_stage_tree(
+    stage_id: u64,
+    state: tauri::State<'_, StageState>,
+) -> Result<Vec<PrimNode>, String> {
+    request_stage_tree(&state.sender(stage_id)?)
 }
 
 pub fn request_stage_tree(sender: &mpsc::Sender<StageRequest>) -> Result<Vec<PrimNode>, String> {
@@ -2855,11 +3121,12 @@ pub fn request_stage_tree(sender: &mpsc::Sender<StageRequest>) -> Result<Vec<Pri
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn get_prim_details(
+    stage_id: u64,
     path: String,
     time: Option<f64>,
     state: tauri::State<'_, StageState>,
 ) -> Result<PrimDetails, String> {
-    request_stage_details(&state.sender, &path, time)
+    request_stage_details(&state.sender(stage_id)?, &path, time)
 }
 
 pub fn request_stage_details(
@@ -2884,10 +3151,11 @@ pub fn request_stage_details(
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn get_scene_manifest(
+    stage_id: u64,
     time: Option<f64>,
     state: tauri::State<'_, StageState>,
 ) -> Result<Vec<RenderNode>, String> {
-    request_scene_manifest(&state.sender, time)
+    request_scene_manifest(&state.sender(stage_id)?, time)
 }
 
 pub fn request_scene_manifest(
@@ -2909,11 +3177,12 @@ pub fn request_scene_manifest(
 // delivers to the frontend `invoke` as an ArrayBuffer.
 #[tauri::command]
 pub async fn get_geometry_data(
+    stage_id: u64,
     path: String,
     time: Option<f64>,
     state: tauri::State<'_, StageState>,
 ) -> Result<tauri::ipc::Response, String> {
-    request_geometry_data(&state.sender, &path, time).map(tauri::ipc::Response::new)
+    request_geometry_data(&state.sender(stage_id)?, &path, time).map(tauri::ipc::Response::new)
 }
 
 pub fn request_geometry_data(
@@ -2941,11 +3210,12 @@ pub fn request_geometry_data(
 // is retained for step refetches/previews.
 #[tauri::command]
 pub async fn get_geometry_batch(
+    stage_id: u64,
     paths: Vec<String>,
     time: Option<f64>,
     state: tauri::State<'_, StageState>,
 ) -> Result<tauri::ipc::Response, String> {
-    request_geometry_batch(&state.sender, &paths, time).map(tauri::ipc::Response::new)
+    request_geometry_batch(&state.sender(stage_id)?, &paths, time).map(tauri::ipc::Response::new)
 }
 
 pub fn request_geometry_batch(
@@ -2970,10 +3240,11 @@ pub fn request_geometry_batch(
 // (its `material:binding` is resolved inside) or the material itself.
 #[tauri::command]
 pub async fn get_material_data(
+    stage_id: u64,
     path: String,
     state: tauri::State<'_, StageState>,
 ) -> Result<MaterialInfo, String> {
-    request_material_data(&state.sender, &path)
+    request_material_data(&state.sender(stage_id)?, &path)
 }
 
 pub fn request_material_data(
@@ -2996,13 +3267,14 @@ pub fn request_material_data(
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn set_attribute_value(
+    stage_id: u64,
     path: String,
     name: String,
     value: ValuePayload,
     time: Option<f64>,
     state: tauri::State<'_, StageState>,
 ) -> Result<(), String> {
-    request_set_attribute_value(&state.sender, &path, &name, &value, time)
+    request_set_attribute_value(&state.sender(stage_id)?, &path, &name, &value, time)
 }
 
 pub fn request_set_attribute_value(
@@ -3031,12 +3303,13 @@ pub fn request_set_attribute_value(
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn set_prim_metadata(
+    stage_id: u64,
     path: String,
     key: String,
     value: ValuePayload,
     state: tauri::State<'_, StageState>,
 ) -> Result<(), String> {
-    request_set_prim_metadata(&state.sender, &path, &key, &value)
+    request_set_prim_metadata(&state.sender(stage_id)?, &path, &key, &value)
 }
 
 pub fn request_set_prim_metadata(
@@ -3063,12 +3336,13 @@ pub fn request_set_prim_metadata(
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn set_variant_selection(
+    stage_id: u64,
     path: String,
     variant_set: String,
     selection: Option<String>,
     state: tauri::State<'_, StageState>,
 ) -> Result<(), String> {
-    request_set_variant_selection(&state.sender, &path, &variant_set, selection.as_deref())
+    request_set_variant_selection(&state.sender(stage_id)?, &path, &variant_set, selection.as_deref())
 }
 
 pub fn request_set_variant_selection(
@@ -3095,11 +3369,12 @@ pub fn request_set_variant_selection(
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn set_prim_texture(
+    stage_id: u64,
     path: String,
     texture_path: Option<String>,
     state: tauri::State<'_, StageState>,
 ) -> Result<(), String> {
-    request_set_prim_texture(&state.sender, &path, texture_path.as_deref())
+    request_set_prim_texture(&state.sender(stage_id)?, &path, texture_path.as_deref())
 }
 
 pub fn request_set_prim_texture(
@@ -3122,54 +3397,40 @@ pub fn request_set_prim_texture(
 
 // Async command so Tauri runs it off the main thread; the body stays
 // synchronous and blocks its runtime worker until the stage owner replies.
+// Every open spawns a FRESH owner thread and mints the next stage id.
 #[tauri::command]
 pub async fn open_usd_path(
     path: String,
     state: tauri::State<'_, StageState>,
 ) -> Result<StageInfo, String> {
-    request_stage_open(&PathBuf::from(path), false, &state.sender)
+    state.open(&PathBuf::from(path), false, None, None)
 }
 
-/// `is_usdz` carries the archive origin the dialog flow knows (it opens the
-/// extracted cache copy, not the archive); plain callers pass false and rely
-/// on the Open arm's suffix derivation for direct `.usdz` opens.
-pub fn request_stage_open(
-    path: &Path,
-    is_usdz: bool,
-    sender: &mpsc::Sender<StageRequest>,
-) -> Result<StageInfo, String> {
-    request_stage_open_with_origin(path, is_usdz, None, sender)
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn close_stage(
+    stage_id: u64,
+    state: tauri::State<'_, StageState>,
+) -> Result<(), String> {
+    state.close_stage(stage_id)
 }
 
-/// Open through the extraction flow while retaining the original archive
-/// path, so Save As usdz can never replace that source file.
-pub fn request_stage_open_with_origin(
-    path: &Path,
-    is_usdz: bool,
-    source_usdz: Option<&Path>,
-    sender: &mpsc::Sender<StageRequest>,
-) -> Result<StageInfo, String> {
-    let (reply, response) = mpsc::channel();
-    sender
-        .send(StageRequest::Open {
-            path: path.to_path_buf(),
-            is_usdz,
-            source_usdz: source_usdz.map(Path::to_path_buf),
-            reply,
-        })
-        .map_err(|_| "stage service unavailable".to_string())?;
-    response
-        .recv()
-        .map_err(|_| "stage service unavailable".to_string())?
+#[tauri::command]
+pub async fn list_stages(
+    state: tauri::State<'_, StageState>,
+) -> Result<Vec<StageSummary>, String> {
+    state.list_stages()
 }
 
 // Async command so Tauri runs it off the main thread; the body stays
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn get_edit_target(
+    stage_id: u64,
     state: tauri::State<'_, StageState>,
 ) -> Result<EditTargetInfo, String> {
-    request_edit_target(&state.sender)
+    request_edit_target(&state.sender(stage_id)?)
 }
 
 pub fn request_edit_target(sender: &mpsc::Sender<StageRequest>) -> Result<EditTargetInfo, String> {
@@ -3186,10 +3447,11 @@ pub fn request_edit_target(sender: &mpsc::Sender<StageRequest>) -> Result<EditTa
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn set_edit_target(
+    stage_id: u64,
     identifier: Option<String>,
     state: tauri::State<'_, StageState>,
 ) -> Result<(), String> {
-    request_set_edit_target(&state.sender, identifier.as_deref())
+    request_set_edit_target(&state.sender(stage_id)?, identifier.as_deref())
 }
 
 pub fn request_set_edit_target(
@@ -3212,9 +3474,10 @@ pub fn request_set_edit_target(
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn list_dirty_layers(
+    stage_id: u64,
     state: tauri::State<'_, StageState>,
 ) -> Result<Vec<LayerInfo>, String> {
-    request_list_dirty_layers(&state.sender)
+    request_list_dirty_layers(&state.sender(stage_id)?)
 }
 
 pub fn request_list_dirty_layers(
@@ -3233,10 +3496,11 @@ pub fn request_list_dirty_layers(
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn save_layers(
+    stage_id: u64,
     requests: Vec<LayerSaveRequest>,
     state: tauri::State<'_, StageState>,
 ) -> Result<(), String> {
-    request_save_layers(&state.sender, &requests)
+    request_save_layers(&state.sender(stage_id)?, &requests)
 }
 
 pub fn request_save_layers(
@@ -3259,10 +3523,11 @@ pub fn request_save_layers(
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn save_stage_as_usdz(
+    stage_id: u64,
     path: String,
     state: tauri::State<'_, StageState>,
 ) -> Result<(), String> {
-    request_save_stage_as_usdz(&state.sender, &path)
+    request_save_stage_as_usdz(&state.sender(stage_id)?, &path)
 }
 
 /// Save As usdz: repack the composed stage into a NEW `.usdz` archive. The
@@ -3287,8 +3552,11 @@ pub fn request_save_stage_as_usdz(
 // Async command so Tauri runs it off the main thread; the body stays
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
-pub async fn undo_stage_edit(state: tauri::State<'_, StageState>) -> Result<bool, String> {
-    request_undo(&state.sender)
+pub async fn undo_stage_edit(
+    stage_id: u64,
+    state: tauri::State<'_, StageState>,
+) -> Result<bool, String> {
+    request_undo(&state.sender(stage_id)?)
 }
 
 /// Revert the most recent mutation. `Ok(false)` = nothing to undo.
@@ -3305,8 +3573,11 @@ pub fn request_undo(sender: &mpsc::Sender<StageRequest>) -> Result<bool, String>
 // Async command so Tauri runs it off the main thread; the body stays
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
-pub async fn redo_stage_edit(state: tauri::State<'_, StageState>) -> Result<bool, String> {
-    request_redo(&state.sender)
+pub async fn redo_stage_edit(
+    stage_id: u64,
+    state: tauri::State<'_, StageState>,
+) -> Result<bool, String> {
+    request_redo(&state.sender(stage_id)?)
 }
 
 /// Re-apply the newest undone mutation. `Ok(false)` = nothing to redo.
@@ -3323,8 +3594,11 @@ pub fn request_redo(sender: &mpsc::Sender<StageRequest>) -> Result<bool, String>
 // Async command so Tauri runs it off the main thread; the body stays
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
-pub async fn get_undo_state(state: tauri::State<'_, StageState>) -> Result<UndoState, String> {
-    request_undo_state(&state.sender)
+pub async fn get_undo_state(
+    stage_id: u64,
+    state: tauri::State<'_, StageState>,
+) -> Result<UndoState, String> {
+    request_undo_state(&state.sender(stage_id)?)
 }
 
 /// Whether an undo/redo is available (`UndoState { can_undo, can_redo }`).
@@ -3342,10 +3616,11 @@ pub fn request_undo_state(sender: &mpsc::Sender<StageRequest>) -> Result<UndoSta
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn export_layer_text(
+    stage_id: u64,
     identifier: String,
     state: tauri::State<'_, StageState>,
 ) -> Result<String, String> {
-    request_export_layer_text(&state.sender, &identifier)
+    request_export_layer_text(&state.sender(stage_id)?, &identifier)
 }
 
 /// The usda text of one stage layer (a pure read — never a file write).
@@ -3369,11 +3644,12 @@ pub fn request_export_layer_text(
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn import_layer_text(
+    stage_id: u64,
     identifier: String,
     text: String,
     state: tauri::State<'_, StageState>,
 ) -> Result<(), String> {
-    request_import_layer_text(&state.sender, &identifier, &text)
+    request_import_layer_text(&state.sender(stage_id)?, &identifier, &text)
 }
 
 /// Replace a stage layer's in-memory content with parsed usda text. A
@@ -3401,9 +3677,10 @@ pub fn request_import_layer_text(
 // synchronous and blocks its runtime worker until the stage owner replies.
 #[tauri::command]
 pub async fn list_stage_layers(
+    stage_id: u64,
     state: tauri::State<'_, StageState>,
 ) -> Result<Vec<LayerInfo>, String> {
-    request_list_stage_layers(&state.sender)
+    request_list_stage_layers(&state.sender(stage_id)?)
 }
 
 /// Every layer of the stage (session, root, sublayers), dirty or not.

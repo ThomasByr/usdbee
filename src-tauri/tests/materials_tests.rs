@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
+mod common;
+
+use common::spawn_stage_owner;
 use usdbee_lib::materials::{material_info, MaterialInfo};
-use usdbee_lib::stage::{
-    open_stage, request_material_data, spawn_stage_owner, StageRequest, StageState,
-};
+use usdbee_lib::stage::{open_stage, request_material_data};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -11,21 +12,8 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn open_via_owner(state: &StageState, name: &str) {
-    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-    state
-        .sender
-        .send(StageRequest::Open {
-            path: fixture(name),
-            is_usdz: false,
-            source_usdz: None,
-            reply: reply_tx,
-        })
-        .expect("stage owner should accept an open request");
-    reply_rx
-        .recv()
-        .expect("stage owner should reply")
-        .expect("stage should open");
+fn open_via_owner(state: &common::TestOwner, name: &str) {
+    state.open(&fixture(name));
 }
 
 #[test]
@@ -33,7 +21,7 @@ fn mesh_entry_resolves_the_bound_preview_surface() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "material_scene.usda");
 
-    let info = request_material_data(&state.sender, "/World/PlasticBall").expect("material data");
+    let info = request_material_data(&state.sender(), "/World/PlasticBall").expect("material data");
     assert_eq!(info.name, "Plastic");
     let surface = info.surface.expect("Plastic is a UsdPreviewSurface");
     assert_eq!(surface.roughness, Some(0.35f32 as f64));
@@ -54,7 +42,7 @@ fn material_entry_serializes_the_material_directly() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "material_scene.usda");
 
-    let info = request_material_data(&state.sender, "/World/Looks/Plastic")
+    let info = request_material_data(&state.sender(), "/World/Looks/Plastic")
         .expect("material prim serializes");
     assert_eq!(info.name, "Plastic");
     let surface = info.surface.expect("direct material entry");
@@ -68,7 +56,7 @@ fn textured_surface_resolves_file_paths_and_primvar() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "material_scene.usda");
 
-    let info = request_material_data(&state.sender, "/World/TexturedBall")
+    let info = request_material_data(&state.sender(), "/World/TexturedBall")
         .expect("textured material data");
     assert_eq!(info.name, "Textured");
     let surface = info.surface.expect("Textured is a UsdPreviewSurface");
@@ -132,7 +120,7 @@ fn missing_texture_file_path_is_returned_not_an_error() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "material_scene.usda");
 
-    let info = request_material_data(&state.sender, "/World/Looks/Missing")
+    let info = request_material_data(&state.sender(), "/World/Looks/Missing")
         .expect("a missing texture file is never an Err");
     let surface = info.surface.expect("Missing is a UsdPreviewSurface");
     assert_eq!(surface.textures.len(), 1);
@@ -155,7 +143,7 @@ fn unbound_mesh_answers_prim_name_with_no_surface() {
     open_via_owner(&state, "material_scene.usda");
 
     let info =
-        request_material_data(&state.sender, "/World/Unbound").expect("unbound is not an error");
+        request_material_data(&state.sender(), "/World/Unbound").expect("unbound is not an error");
     assert_eq!(
         info,
         MaterialInfo {
@@ -171,7 +159,7 @@ fn unknown_shader_id_fails_soft_to_no_surface() {
     open_via_owner(&state, "material_scene.usda");
 
     let info =
-        request_material_data(&state.sender, "/World/FancyBall").expect("bound mesh resolves");
+        request_material_data(&state.sender(), "/World/FancyBall").expect("bound mesh resolves");
     assert_eq!(info.name, "CustomShader");
     assert_eq!(info.surface, None, "non-UsdPreviewSurface ids are skipped");
 }
@@ -181,7 +169,7 @@ fn missing_prim_is_a_readable_error() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "material_scene.usda");
 
-    let error = request_material_data(&state.sender, "/World/Nope").unwrap_err();
+    let error = request_material_data(&state.sender(), "/World/Nope").unwrap_err();
     assert!(error.contains("prim not found"), "got: {}", error);
 }
 
@@ -280,9 +268,8 @@ def Material "Material" {
 
 #[test]
 fn material_request_without_open_stage_fails() {
+    // No stage open means id 0 — the id lookup is the readable guard every
+    // command shape (including get_material_data) routes through.
     let state = spawn_stage_owner();
-    assert_eq!(
-        request_material_data(&state.sender, "/World").unwrap_err(),
-        "no stage open"
-    );
+    assert_eq!(state.state.sender(0).unwrap_err(), "no stage 0");
 }

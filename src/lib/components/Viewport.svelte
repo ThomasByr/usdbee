@@ -138,7 +138,9 @@
         loadScene: () => loadRustScene(viewer),
       }),
       listen("usd-stage-changed", (event) => {
-        const paths = ((event.payload as { paths?: string[] } | null)?.paths ?? []) as string[];
+        const payload = event.payload as { stage_id?: number; paths?: string[] } | null;
+        if (payload?.stage_id !== stageState.activeStageId) return;
+        const paths = (payload?.paths ?? []) as string[];
         void refreshSceneAfterEdit(viewer, paths);
       }),
     ];

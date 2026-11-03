@@ -12,6 +12,7 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import * as THREE from "three";
 import type { MaterialInfo, RenderNode } from "../stage/types";
+import { stageState } from "../stage/stageState.svelte";
 import { decodeGeometryBatch } from "./geometryDecoder";
 import {
   applyTransform,
@@ -49,12 +50,26 @@ const textureLoader = new THREE.TextureLoader();
 
 const fetchers: SceneFetchers = {
   getGeometry: (path: string, time = renderState.time) =>
-    invoke<ArrayBuffer>("get_geometry_data", { path, time }),
+    invoke<ArrayBuffer>("get_geometry_data", {
+      stageId: stageState.activeStageId,
+      path,
+      time,
+    }),
   // Load-time batch prefill: one invoke per slice of GEOMETRY_BATCH_SIZE
   // paths, slots decoded here so sceneBuilder only sees per-path results.
   getGeometryBatch: async (paths: string[], time = renderState.time) =>
-    decodeGeometryBatch(await invoke<ArrayBuffer>("get_geometry_batch", { paths, time })),
-  getMaterial: (path: string) => invoke<MaterialInfo>("get_material_data", { path }).catch(() => null),
+    decodeGeometryBatch(
+      await invoke<ArrayBuffer>("get_geometry_batch", {
+        stageId: stageState.activeStageId,
+        paths,
+        time,
+      }),
+    ),
+  getMaterial: (path: string) =>
+    invoke<MaterialInfo>("get_material_data", {
+      stageId: stageState.activeStageId,
+      path,
+    }).catch(() => null),
   loadTexture: (filePath: string, onError: () => void) => {
     try {
       return textureLoader.load(convertFileSrc(filePath), undefined, undefined, onError);
@@ -382,6 +397,7 @@ export const renderState = $state({
     this.error = null;
     try {
       const manifest = await invoke<RenderNode[]>("get_scene_manifest", {
+        stageId: stageState.activeStageId,
         time: startTime,
       });
       if (generation !== loadGeneration) return null;
@@ -441,7 +457,10 @@ export const renderState = $state({
     timeStepInFlight = true;
     activeTimeStep = (async () => {
       try {
-        const manifest = await invoke<RenderNode[]>("get_scene_manifest", { time });
+        const manifest = await invoke<RenderNode[]>("get_scene_manifest", {
+          stageId: stageState.activeStageId,
+          time,
+        });
         if (generation !== loadGeneration || currentGroup !== group) return;
         await updateScene(manifest, time, () => generation !== loadGeneration || currentGroup !== group);
       } catch (e) {
@@ -494,7 +513,10 @@ export const renderState = $state({
     activeTimeStep = (async (): Promise<boolean> => {
       try {
         const time = this.time ?? 0;
-        const manifest = await invoke<RenderNode[]>("get_scene_manifest", { time });
+        const manifest = await invoke<RenderNode[]>("get_scene_manifest", {
+          stageId: stageState.activeStageId,
+          time,
+        });
         if (generation !== loadGeneration || currentGroup !== group) return true;
         const refreshPaths = new Set(paths);
         const prefetched = await prefetchEditGeometry(manifest, refreshPaths, time);

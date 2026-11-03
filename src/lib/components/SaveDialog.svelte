@@ -3,6 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import Modal from "$lib/components/Modal.svelte";
   import { editState } from "$lib/state/editState.svelte";
+  import { stageState } from "$lib/stage/stageState.svelte";
   import type { LayerSaveRequest, LayerInfo } from "$lib/stage/types";
   import { layerDisplayName } from "$lib/stage/layerText";
 
@@ -18,7 +19,9 @@
 
   async function refreshTargetLayers(): Promise<void> {
     try {
-      targetLayers = await invoke<LayerInfo[]>("list_stage_layers");
+      targetLayers = await invoke<LayerInfo[]>("list_stage_layers", {
+        stageId: stageState.activeStageId,
+      });
     } catch {
       targetLayers = [];
     }

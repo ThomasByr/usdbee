@@ -248,7 +248,9 @@
       }),
       // The scene-side of usd-stage-changed moves with the Viewport; the
       // page keeps the selected-prim details refresh for the inspector.
-      listen("usd-stage-changed", () => {
+      listen("usd-stage-changed", (event) => {
+        const payload = event.payload as { stage_id?: number } | null;
+        if (payload?.stage_id !== stageState.activeStageId) return;
         void stageState.refreshAfterEdit();
       }),
     ];

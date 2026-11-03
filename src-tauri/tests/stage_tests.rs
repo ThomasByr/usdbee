@@ -1,11 +1,12 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::mpsc;
 
+mod common;
+
+use common::spawn_stage_owner;
 use usdbee_lib::parser::{resolve_remote_dependencies, scan_dependencies};
 use usdbee_lib::stage::{
-    open_stage, request_stage_details, request_stage_tree, serialize_tree, spawn_stage_owner,
-    PrimNode, StageRequest, StageState,
+    open_stage, request_stage_details, request_stage_tree, serialize_tree, PrimNode,
 };
 use usdbee_lib::values::PrimDetails;
 
@@ -210,29 +211,20 @@ fn search_path_reference_resolves_only_via_resolver_roots() {
     );
 }
 
-fn open_via_owner(state: &StageState, name: &str) {
-    let (reply_tx, reply_rx) = mpsc::channel();
-    state
-        .sender
-        .send(StageRequest::Open {
-            path: fixture(name),
-            is_usdz: false,
-            source_usdz: None,
-            reply: reply_tx,
-        })
-        .expect("stage owner should accept an open request");
-    reply_rx
-        .recv()
-        .expect("stage owner should reply")
-        .expect("stage should open");
+fn open_via_owner(state: &common::TestOwner, name: &str) {
+    state.open(&fixture(name));
 }
 
-fn tree_via_owner(state: &StageState) -> Vec<PrimNode> {
-    request_stage_tree(&state.sender).expect("tree should serialize")
+fn tree_via_owner(state: &common::TestOwner) -> Vec<PrimNode> {
+    request_stage_tree(&state.sender()).expect("tree should serialize")
 }
 
-fn details_via_owner(state: &StageState, path: &str, time: Option<f64>) -> PrimDetails {
-    request_stage_details(&state.sender, path, time).expect("details should serialize")
+fn details_via_owner(
+    state: &common::TestOwner,
+    path: &str,
+    time: Option<f64>,
+) -> PrimDetails {
+    request_stage_details(&state.sender(), path, time).expect("details should serialize")
 }
 
 fn attribute<'a>(details: &'a PrimDetails, name: &str) -> &'a usdbee_lib::values::AttributeInfo {
@@ -332,64 +324,62 @@ fn referenced_children_appear_under_referencing_prim() {
 }
 
 #[test]
-fn reopening_a_stage_replaces_the_tree_completely() {
+fn reopening_opens_a_fresh_stage_with_its_own_tree() {
+    // The keyed map: every open is a NEW stage, so the second fixture's
+    // tree has no stale nodes, and the first stage keeps its own tree.
     let state = spawn_stage_owner();
-    open_via_owner(&state, "basic.usda");
-    let first = tree_via_owner(&state);
+    let id_first = state.open(&fixture("basic.usda")).stage_id;
+    let first_sender = state.state.sender(id_first).expect("the first stage lives");
+    let first = request_stage_tree(&first_sender).expect("first tree serializes");
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].path, "/World");
 
-    open_via_owner(&state, "variants.usda");
-    let second = tree_via_owner(&state);
+    let id_second = state.open(&fixture("variants.usda")).stage_id;
+    assert_ne!(id_first, id_second);
+    let second_sender = state
+        .state
+        .sender(id_second)
+        .expect("the second stage lives");
+    let second = request_stage_tree(&second_sender).expect("second tree serializes");
     assert_eq!(second.len(), 1, "no stale nodes from the previous stage");
     assert_eq!(second[0].path, "/Prop");
+
+    // The first stage is untouched by the second open.
+    let first_again = request_stage_tree(&first_sender).expect("first tree again");
+    assert_eq!(first_again[0].path, "/World");
 }
 
 #[test]
 fn tree_request_without_open_stage_fails() {
+    // Every stage-scoped command routes through the id lookup: with no
+    // stage open the tracked id is 0, and the lookup is the readable guard.
     let state = spawn_stage_owner();
-    let error = request_stage_tree(&state.sender).expect_err("no stage is open");
-    assert!(error.contains("no stage open"), "got: {}", error);
+    let error = state.state.sender(0).expect_err("no stage is open");
+    assert!(error.contains("no stage 0"), "got: {}", error);
 }
 
 #[test]
 fn stage_owner_opens_stages_and_survives_open_errors() {
     let state = spawn_stage_owner();
-    let (reply_tx, reply_rx) = mpsc::channel();
-    state
-        .sender
-        .send(StageRequest::Open {
-            path: fixture("basic.usda"),
-            is_usdz: false,
-            source_usdz: None,
-            reply: reply_tx,
-        })
-        .expect("stage owner should accept an open request");
-
-    let info = reply_rx
-        .recv()
-        .expect("stage owner should reply")
-        .expect("stage owner should open the basic stage");
+    let info = state.open(&fixture("basic.usda"));
+    assert!(info.stage_id >= 1);
     assert!(!info.root_layer.is_empty());
     assert_eq!(info.time_codes_per_second, 24.0);
     assert!(info.composition_errors.is_empty());
 
-    let (reply_tx, reply_rx) = mpsc::channel();
-    state
-        .sender
-        .send(StageRequest::Open {
-            path: fixture("does-not-exist.usda"),
-            is_usdz: false,
-            source_usdz: None,
-            reply: reply_tx,
-        })
-        .expect("stage owner should still accept requests");
-
-    let error = reply_rx
-        .recv()
-        .expect("stage owner should reply to the failed open")
+    // The failed open is a readable error; the map keeps only the stage
+    // that opened, and its owner still answers requests.
+    let error = state
+        .try_open(&fixture("does-not-exist.usda"))
         .expect_err("opening a nonexistent stage should fail");
     assert!(error.contains("does-not-exist.usda"));
+    assert_eq!(
+        state.state.list_stages().expect("stage list").len(),
+        1,
+        "the failed open left no entry"
+    );
+    let tree = tree_via_owner(&state);
+    assert_eq!(tree[0].path, "/World");
 }
 
 #[test]
@@ -750,8 +740,8 @@ fn details_reference_prim_lists_composition_arc() {
 #[test]
 fn details_request_without_open_stage_fails() {
     let state = spawn_stage_owner();
-    let error = request_stage_details(&state.sender, "/World", None).expect_err("no stage is open");
-    assert!(error.contains("no stage open"), "got: {}", error);
+    let error = state.state.sender(0).expect_err("no stage is open");
+    assert!(error.contains("no stage 0"), "got: {}", error);
 }
 
 #[test]
@@ -759,7 +749,7 @@ fn details_for_missing_prim_is_a_readable_error() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "basic.usda");
     let error =
-        request_stage_details(&state.sender, "/World/Nope", None).expect_err("prim does not exist");
+        request_stage_details(&state.sender(), "/World/Nope", None).expect_err("prim does not exist");
     assert!(error.contains("prim not found"), "got: {}", error);
     // The owner survives the failed lookup.
     let details = details_via_owner(&state, "/World/Ball", None);
@@ -798,20 +788,7 @@ fn stage_tree_serializes_50k_prims_within_bound() {
     fs::write(&path, &text).expect("probe scene should be written");
 
     let state = spawn_stage_owner();
-    let (reply_tx, reply_rx) = mpsc::channel();
-    state
-        .sender
-        .send(StageRequest::Open {
-            path: path.clone(),
-            is_usdz: false,
-            source_usdz: None,
-            reply: reply_tx,
-        })
-        .expect("stage owner should accept the probe open");
-    reply_rx
-        .recv()
-        .expect("stage owner should reply")
-        .expect("probe stage should open");
+    state.open(&path);
 
     let start = std::time::Instant::now();
     let tree = tree_via_owner(&state);

@@ -6,13 +6,15 @@
 // manifest cache must serve repeated calls without freezing per-time data.
 
 use std::path::PathBuf;
-use std::sync::mpsc;
 
+mod common;
+
+use common::spawn_stage_owner;
 use openusd::gf;
 
 use usdbee_lib::stage::{
     open_stage, request_geometry_data, request_material_data, request_scene_manifest,
-    serialize_render_manifest, spawn_stage_owner, RenderNode, StageRequest, StageState,
+    serialize_render_manifest, RenderNode,
 };
 
 fn open_fixture_manifest(name: &str, time: Option<f64>) -> Vec<RenderNode> {
@@ -69,21 +71,8 @@ fn assert_matrix_close(expected: &[f64; 16], actual: &[f64; 16]) {
     }
 }
 
-fn open_via_owner(state: &StageState, name: &str) {
-    let (reply_tx, reply_rx) = mpsc::channel();
-    state
-        .sender
-        .send(StageRequest::Open {
-            path: fixture(name),
-            is_usdz: false,
-            source_usdz: None,
-            reply: reply_tx,
-        })
-        .expect("stage owner should accept an open request");
-    reply_rx
-        .recv()
-        .expect("stage owner should reply")
-        .expect("stage should open");
+fn open_via_owner(state: &common::TestOwner, name: &str) {
+    state.open(&fixture(name));
 }
 
 #[test]
@@ -253,13 +242,13 @@ fn geometry_and_material_arms_resolve_synthetic_prototype_paths() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "purpose_scene.usda");
 
-    let synthetic = request_geometry_data(&state.sender, "/World/Instancer/__proto_0", None)
+    let synthetic = request_geometry_data(&state.sender(), "/World/Instancer/__proto_0", None)
         .expect("synthetic prototype path should resolve");
-    let direct = request_geometry_data(&state.sender, "/World/Instancer/CubeProto", None)
+    let direct = request_geometry_data(&state.sender(), "/World/Instancer/CubeProto", None)
         .expect("prototype prim should tessellate");
     assert_eq!(synthetic, direct);
 
-    let material = request_material_data(&state.sender, "/World/Instancer/__proto_0")
+    let material = request_material_data(&state.sender(), "/World/Instancer/__proto_0")
         .expect("prototype material should resolve");
     assert_eq!(material.name, "Blue");
 }
@@ -270,10 +259,10 @@ fn nested_prototype_geometry_uses_the_real_prim() {
     open_via_owner(&state, "purpose_scene.usda");
 
     let synthetic =
-        request_geometry_data(&state.sender, "/World/GroupInstancer/__proto_0/Shape", None)
+        request_geometry_data(&state.sender(), "/World/GroupInstancer/__proto_0/Shape", None)
             .expect("nested synthetic prototype path should resolve");
     let direct = request_geometry_data(
-        &state.sender,
+        &state.sender(),
         "/World/GroupInstancer/GroupProto/Shape",
         None,
     )
@@ -292,9 +281,9 @@ fn native_instance_geometry_uses_the_shared_prototype_prim() {
         .expect("prototype mesh path")
         .to_string();
 
-    let instance = request_geometry_data(&state.sender, "/Scene/WheelA/WheelMesh", None)
+    let instance = request_geometry_data(&state.sender(), "/Scene/WheelA/WheelMesh", None)
         .expect("instance proxy path should resolve");
-    let direct = request_geometry_data(&state.sender, &direct_path, None)
+    let direct = request_geometry_data(&state.sender(), &direct_path, None)
         .expect("shared prototype mesh should tessellate");
     assert_eq!(instance, direct);
 }
@@ -304,12 +293,12 @@ fn out_of_range_prototype_index_is_a_readable_error() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "purpose_scene.usda");
 
-    let error = request_geometry_data(&state.sender, "/World/Instancer/__proto_5", None)
+    let error = request_geometry_data(&state.sender(), "/World/Instancer/__proto_5", None)
         .expect_err("only 2 prototypes are authored");
     assert!(error.contains("prototype"), "got: {}", error);
 
     // A synthetic path under a non-instancer prim never resolves.
-    let error = request_geometry_data(&state.sender, "/World/DefaultCube/__proto_0", None)
+    let error = request_geometry_data(&state.sender(), "/World/DefaultCube/__proto_0", None)
         .expect_err("a Mesh is not an instancer");
     assert!(
         error.contains("PointInstancer") || error.contains("prototype"),
@@ -454,11 +443,11 @@ fn cached_manifest_calls_stay_structure_equal_and_resample_the_queried_time() {
     open_via_owner(&state, "animated.usda");
 
     // Cold (cache build), warm at another time, warm back at the first time.
-    let at_zero = request_scene_manifest(&state.sender, Some(0.0))
+    let at_zero = request_scene_manifest(&state.sender(), Some(0.0))
         .expect("manifest at t=0 should serialize");
-    let at_ten = request_scene_manifest(&state.sender, Some(10.0))
+    let at_ten = request_scene_manifest(&state.sender(), Some(10.0))
         .expect("manifest at t=10 should serialize");
-    let back_to_zero = request_scene_manifest(&state.sender, Some(0.0))
+    let back_to_zero = request_scene_manifest(&state.sender(), Some(0.0))
         .expect("manifest back at t=0 should serialize");
 
     // The time-independent fields are the same on every call: a frozen or
@@ -488,15 +477,15 @@ fn cached_manifest_calls_do_not_freeze_time_dependent_structure() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "purpose_scene.usda");
 
-    let at_one = request_scene_manifest(&state.sender, Some(1.0))
+    let at_one = request_scene_manifest(&state.sender(), Some(1.0))
         .expect("manifest at t=1 should serialize");
     expect(&at_one, "/World/VisibilityInstancer/__proto_0");
 
-    let at_two = request_scene_manifest(&state.sender, Some(2.0))
+    let at_two = request_scene_manifest(&state.sender(), Some(2.0))
         .expect("manifest at t=2 should serialize");
     assert_absent(&at_two, "/World/VisibilityInstancer/__proto_0");
 
-    let back_to_one = request_scene_manifest(&state.sender, Some(1.0))
+    let back_to_one = request_scene_manifest(&state.sender(), Some(1.0))
         .expect("manifest back at t=1 should serialize");
     assert_manifest_json_equal(&at_one, &back_to_one);
 }
@@ -511,15 +500,15 @@ fn warm_manifest_resamples_sampled_visibility_per_time() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "sampled_visibility.usda");
 
-    let at_one = request_scene_manifest(&state.sender, Some(1.0))
+    let at_one = request_scene_manifest(&state.sender(), Some(1.0))
         .expect("manifest at t=1 should serialize");
     assert!(!expect(&at_one, "/Scene/Toggle").visible, "invisible at t=1");
 
-    let at_two = request_scene_manifest(&state.sender, Some(2.0))
+    let at_two = request_scene_manifest(&state.sender(), Some(2.0))
         .expect("manifest at t=2 should serialize");
     assert!(expect(&at_two, "/Scene/Toggle").visible, "visible at t=2");
 
-    let back_to_one = request_scene_manifest(&state.sender, Some(1.0))
+    let back_to_one = request_scene_manifest(&state.sender(), Some(1.0))
         .expect("manifest back at t=1 should serialize");
     assert!(!expect(&back_to_one, "/Scene/Toggle").visible, "re-samples at t=1");
 }

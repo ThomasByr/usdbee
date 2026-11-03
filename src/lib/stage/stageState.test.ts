@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { stageState } from "./stageState.svelte";
 import { renderState } from "../render/renderState.svelte";
 
-const info = { path: "/a.usda" };
+const info = { path: "/a.usda", stage_id: 7 };
 const details = { path: "/A" } as never;
 
 const mockedInvoke = vi.mocked(invoke);
@@ -50,7 +50,7 @@ describe("stageState", () => {
 
     await stageState.selectPrim("/A");
 
-    expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { path: "/A", time: 12.5 });
+    expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { stageId: 7, path: "/A", time: 12.5 });
   });
 
   it("refreshes the current selection at a newer render time", async () => {
@@ -66,7 +66,7 @@ describe("stageState", () => {
     expect(refresh).toBeTypeOf("function");
     await refresh.call(stageState);
 
-    expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { path: "/A", time: 2 });
+    expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { stageId: 7, path: "/A", time: 2 });
   });
 
   it("adopts a backend-opened stage without composing it again", async () => {
@@ -101,7 +101,7 @@ describe("stageState", () => {
     mockedInvoke.mockReturnValueOnce(staleInfo.promise);
     const staleLoad = stageState.loadStage("/old.usda");
 
-    const currentInfo = { path: "/new.usda" };
+    const currentInfo = { path: "/new.usda", stage_id: 8 };
     mockedInvoke.mockResolvedValueOnce(currentInfo).mockResolvedValueOnce([]);
     await stageState.loadStage("/new.usda");
 
@@ -123,6 +123,7 @@ describe("stageState", () => {
 
     expect(error).toBeNull();
     expect(mockedInvoke).toHaveBeenCalledWith("set_variant_selection", {
+      stageId: 7,
       path: "/A",
       variantSet: "color",
       selection: "blue",
@@ -130,6 +131,7 @@ describe("stageState", () => {
 
     await stageState.setVariantSelection("color", null);
     expect(mockedInvoke).toHaveBeenLastCalledWith("set_variant_selection", {
+      stageId: 7,
       path: "/A",
       variantSet: "color",
       selection: null,
@@ -156,12 +158,14 @@ describe("stageState", () => {
 
     expect(error).toBeNull();
     expect(mockedInvoke).toHaveBeenCalledWith("set_prim_texture", {
+      stageId: 7,
       path: "/A",
       texturePath: "/tex/checker.png",
     });
 
     await stageState.setPrimTexture("/A", null);
     expect(mockedInvoke).toHaveBeenLastCalledWith("set_prim_texture", {
+      stageId: 7,
       path: "/A",
       texturePath: null,
     });
@@ -188,6 +192,7 @@ describe("stageState", () => {
     renderState.time = 7;
     await stageState.setAttributeValue("xformOp:translate", value as never);
     expect(mockedInvoke).toHaveBeenLastCalledWith("set_attribute_value", {
+      stageId: 7,
       path: "/A",
       name: "xformOp:translate",
       value,
@@ -197,6 +202,7 @@ describe("stageState", () => {
     // Explicit time codes reach the backend unchanged.
     await stageState.setAttributeValue("xformOp:translate", value as never, 42);
     expect(mockedInvoke).toHaveBeenLastCalledWith("set_attribute_value", {
+      stageId: 7,
       path: "/A",
       name: "xformOp:translate",
       value,
@@ -208,6 +214,7 @@ describe("stageState", () => {
     const order = { type: "token_array", data: ["xformOp:translate"] };
     await stageState.setAttributeValue("xformOpOrder", order as never, null);
     expect(mockedInvoke).toHaveBeenLastCalledWith("set_attribute_value", {
+      stageId: 7,
       path: "/A",
       name: "xformOpOrder",
       value: order,
@@ -226,6 +233,7 @@ describe("stageState", () => {
 
     expect(error).toBeNull();
     expect(mockedInvoke).toHaveBeenLastCalledWith("set_attribute_value", {
+      stageId: 7,
       path: "/B",
       name: "primvars:displayColor",
       value,
@@ -243,6 +251,7 @@ describe("stageState", () => {
 
     expect(error).toBeNull();
     expect(mockedInvoke).toHaveBeenCalledWith("set_prim_metadata", {
+      stageId: 7,
       path: "/B",
       key: "visibility",
       value: { type: "token", data: "invisible" },
@@ -265,7 +274,7 @@ describe("stageState", () => {
     const details = await stageState.fetchPrimDetails("/B");
 
     expect(details).toEqual(remote);
-    expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { path: "/B", time: 5 });
+    expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { stageId: 7, path: "/B", time: 5 });
     expect(stageState.selectedPath).toBe("/A");
     expect(stageState.details).not.toEqual(remote);
   });
@@ -285,7 +294,7 @@ describe("stageState", () => {
 
     mockedInvoke.mockResolvedValueOnce(bound);
     expect(await stageState.getMaterialInfo("/B")).toEqual(bound);
-    expect(mockedInvoke).toHaveBeenLastCalledWith("get_material_data", { path: "/B" });
+    expect(mockedInvoke).toHaveBeenLastCalledWith("get_material_data", { stageId: 7, path: "/B" });
 
     mockedInvoke.mockRejectedValueOnce("prim not found: /B");
     expect(await stageState.getMaterialInfo("/B")).toBeNull();
@@ -301,7 +310,7 @@ describe("stageState", () => {
     mockedInvoke.mockResolvedValueOnce([]).mockResolvedValueOnce(details);
     await stageState.refreshAfterEdit();
 
-    expect(mockedInvoke).toHaveBeenCalledWith("get_stage_tree");
-    expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { path: "/A", time: 3 });
+    expect(mockedInvoke).toHaveBeenCalledWith("get_stage_tree", { stageId: 7 });
+    expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { stageId: 7, path: "/A", time: 3 });
   });
 });

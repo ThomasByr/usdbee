@@ -4,6 +4,7 @@
   import type { LayerInfo } from "$lib/stage/types";
   import { layerDisplayName, layerTextStageChangedAction } from "$lib/stage/layerText";
   import { layerTextState } from "$lib/state/layerTextState.svelte";
+  import { stageState } from "$lib/stage/stageState.svelte";
 
   // The Task 6 text layer editor: pick a stage layer, edit its usda text in
   // a plain textarea, save it back into the stage's in-memory layer. The
@@ -29,7 +30,9 @@
 
   async function refreshLayers(): Promise<void> {
     try {
-      const listed = await invoke<LayerInfo[]>("list_stage_layers");
+      const listed = await invoke<LayerInfo[]>("list_stage_layers", {
+        stageId: stageState.activeStageId,
+      });
       layers = listed;
       // Selection changes load their layer; same-selection revision handling
       // decides whether a clean draft reloads or a dirty one conflicts.
@@ -60,7 +63,10 @@
     loading = true;
     error = null;
     try {
-      const exported = await invoke<string>("export_layer_text", { identifier: selectedId });
+      const exported = await invoke<string>("export_layer_text", {
+        stageId: stageState.activeStageId,
+        identifier: selectedId,
+      });
       text = exported;
       loadedText = exported;
       loadedRevision = stageRevision;
@@ -92,7 +98,11 @@
     const savedRevision = stageRevision + 1;
     selfSaveRevision = savedRevision;
     try {
-      await invoke("import_layer_text", { identifier: selectedId, text });
+      await invoke("import_layer_text", {
+        stageId: stageState.activeStageId,
+        identifier: selectedId,
+        text,
+      });
       loadedText = text;
       loadedRevision = Math.max(savedRevision, stageRevision);
       // The backend emits usd-stage-changed, so the tree/manifest/edit
@@ -125,7 +135,9 @@
 
   $effect(() => {
     void refreshLayers();
-    const unlisten = listen("usd-stage-changed", () => {
+    const unlisten = listen("usd-stage-changed", (event) => {
+      const payload = event.payload as { stage_id?: number } | null;
+      if (payload?.stage_id !== stageState.activeStageId) return;
       void onStageChanged();
     });
     return () => {

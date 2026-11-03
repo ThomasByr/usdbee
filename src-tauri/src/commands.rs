@@ -214,6 +214,10 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
     let (scan, stage_info) = match tauri::async_runtime::spawn_blocking({
         let p_str = path.clone();
         let stage_app = app.clone();
+        // The open's cleanup-owned extraction dir: the owner thread
+        // records it and deletes it on close_stage (the session layer file
+        // it knows on its own).
+        let open_extraction_dir = extracted_dir.clone();
         move || -> Result<(DependencyScan, crate::stage::StageInfo), String> {
             let handle = std::thread::Builder::new()
                 .stack_size(32 * 1024 * 1024)
@@ -223,11 +227,12 @@ async fn process_usd_file(app: tauri::AppHandle, mut path: String) -> Result<(),
                     // Remote fetches stay off the async runtime; a failure
                     // here aborts the load (Phase 0 ruling).
                     resolve_remote_dependencies(&mut scan, &server_url)?;
-                    let stage_info = crate::stage::request_stage_open_with_origin(
+                    let stage_state = stage_app.state::<crate::stage::StageState>();
+                    let stage_info = stage_state.open(
                         Path::new(&p_str),
                         is_usdz,
                         is_usdz.then_some(file_path.as_path()),
-                        &stage_app.state::<crate::stage::StageState>().sender,
+                        open_extraction_dir.as_deref(),
                     )?;
                     Ok((scan, stage_info))
                 })

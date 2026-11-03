@@ -4,11 +4,12 @@
 // equal counts, and linear interpolation at a non-integer time.
 
 use std::path::PathBuf;
-use std::sync::mpsc;
 
+mod common;
+
+use common::spawn_stage_owner;
 use usdbee_lib::stage::{
-    open_stage, request_geometry_data, serialize_render_manifest, spawn_stage_owner, RenderNode,
-    StageState,
+    open_stage, request_geometry_data, serialize_render_manifest, RenderNode,
 };
 
 fn fixture(name: &str) -> PathBuf {
@@ -42,21 +43,8 @@ fn expect<'a>(nodes: &'a [RenderNode], path: &str) -> &'a RenderNode {
     find(nodes, path).unwrap_or_else(|| panic!("expected prim {} in manifest", path))
 }
 
-fn open_via_owner(state: &StageState, name: &str) {
-    let (reply_tx, reply_rx) = mpsc::channel();
-    state
-        .sender
-        .send(usdbee_lib::stage::StageRequest::Open {
-            path: fixture(name),
-            is_usdz: false,
-            source_usdz: None,
-            reply: reply_tx,
-        })
-        .expect("stage owner should accept an open request");
-    reply_rx
-        .recv()
-        .expect("stage owner should reply")
-        .expect("stage should open");
+fn open_via_owner(state: &common::TestOwner, name: &str) {
+    state.open(&fixture(name));
 }
 
 fn u32_le(bytes: &[u8], index: usize) -> u32 {
@@ -176,9 +164,9 @@ fn geometry_positions_differ_by_time_with_equal_counts() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "animated.usda");
 
-    let at_start = request_geometry_data(&state.sender, "/Scene/Wobble", Some(0.0))
+    let at_start = request_geometry_data(&state.sender(), "/Scene/Wobble", Some(0.0))
         .expect("geometry at t=0 should pack");
-    let at_end = request_geometry_data(&state.sender, "/Scene/Wobble", Some(10.0))
+    let at_end = request_geometry_data(&state.sender(), "/Scene/Wobble", Some(10.0))
         .expect("geometry at t=10 should pack");
 
     assert_eq!(vertex_count(&at_start), 3);
@@ -205,7 +193,7 @@ fn geometry_interpolates_linearly_at_non_integer_time() {
 
     // points sampled at t=0 (x=1) and t=10 (x=2): reading at t=2.5 must
     // resolve to the linear interpolation, one quarter of the way.
-    let bytes = request_geometry_data(&state.sender, "/Scene/Wobble", Some(2.5))
+    let bytes = request_geometry_data(&state.sender(), "/Scene/Wobble", Some(2.5))
         .expect("geometry at t=2.5 should pack");
     assert_eq!(vertex_count(&bytes), 3, "interpolation keeps the counts");
     assert!(

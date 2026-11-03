@@ -7,6 +7,10 @@ let selectionGeneration = 0;
 
 export const stageState = $state({
   stageInfo: null as StageInfo | null,
+  // The keyed stage map's id of the stage the UI works with (Task 11 adds
+  // the tab bar that switches it); 0 = no stage. Every stage-scoped
+  // command invoke carries it.
+  activeStageId: 0,
   tree: [] as PrimNode[],
   selectedPath: null as string | null,
   details: null as PrimDetails | null,
@@ -23,8 +27,11 @@ export const stageState = $state({
     try {
       const stageInfo = await invoke<StageInfo>("open_usd_path", { path });
       if (generation !== loadGeneration) return;
+      this.activeStageId = stageInfo.stage_id;
       this.stageInfo = stageInfo;
-      const tree = await invoke<PrimNode[]>("get_stage_tree");
+      const tree = await invoke<PrimNode[]>("get_stage_tree", {
+        stageId: this.activeStageId,
+      });
       if (generation !== loadGeneration) return;
       this.tree = tree;
       this.status = "ready";
@@ -40,6 +47,7 @@ export const stageState = $state({
   async adoptOpenedStage(stageInfo: StageInfo): Promise<void> {
     const generation = ++loadGeneration;
     selectionGeneration += 1;
+    this.activeStageId = stageInfo.stage_id;
     this.stageInfo = stageInfo;
     this.tree = [];
     this.selectedPath = null;
@@ -47,7 +55,9 @@ export const stageState = $state({
     this.status = "loading";
     this.error = null;
     try {
-      const tree = await invoke<PrimNode[]>("get_stage_tree");
+      const tree = await invoke<PrimNode[]>("get_stage_tree", {
+        stageId: this.activeStageId,
+      });
       if (generation !== loadGeneration) return;
       this.tree = tree;
       this.status = "ready";
@@ -65,7 +75,11 @@ export const stageState = $state({
     this.details = null;
     if (this.status !== "ready") return;
     try {
-      const details = await invoke<PrimDetails>("get_prim_details", { path, time: renderState.time });
+      const details = await invoke<PrimDetails>("get_prim_details", {
+        stageId: this.activeStageId,
+        path,
+        time: renderState.time,
+      });
       if (generation === selectionGeneration) this.details = details;
     } catch (e) {
       if (generation !== selectionGeneration) return;
@@ -85,7 +99,9 @@ export const stageState = $state({
   async refreshAfterEdit(): Promise<void> {
     if (this.status !== "ready") return;
     try {
-      const tree = await invoke<PrimNode[]>("get_stage_tree");
+      const tree = await invoke<PrimNode[]>("get_stage_tree", {
+        stageId: this.activeStageId,
+      });
       if (this.status !== "ready") return;
       this.tree = tree;
     } catch {
@@ -98,7 +114,11 @@ export const stageState = $state({
   // the appearance popover reads non-selected rows through this.
   async fetchPrimDetails(path: string): Promise<PrimDetails | null> {
     try {
-      return await invoke<PrimDetails>("get_prim_details", { path, time: renderState.time });
+      return await invoke<PrimDetails>("get_prim_details", {
+        stageId: this.activeStageId,
+        path,
+        time: renderState.time,
+      });
     } catch {
       return null;
     }
@@ -108,7 +128,10 @@ export const stageState = $state({
   // command fails. Unbound answers the prim's own name with a null surface.
   async getMaterialInfo(path: string): Promise<MaterialInfo | null> {
     try {
-      return await invoke<MaterialInfo>("get_material_data", { path });
+      return await invoke<MaterialInfo>("get_material_data", {
+        stageId: this.activeStageId,
+        path,
+      });
     } catch {
       return null;
     }
@@ -130,6 +153,7 @@ export const stageState = $state({
     if (!target) return "no prim selected";
     try {
       await invoke("set_attribute_value", {
+        stageId: this.activeStageId,
         path: target,
         name,
         value,
@@ -152,7 +176,12 @@ export const stageState = $state({
     const target = path ?? this.selectedPath;
     if (!target) return "no prim selected";
     try {
-      await invoke("set_prim_metadata", { path: target, key, value });
+      await invoke("set_prim_metadata", {
+        stageId: this.activeStageId,
+        path: target,
+        key,
+        value,
+      });
       return null;
     } catch (e) {
       return typeof e === "string" ? e : String(e);
@@ -166,6 +195,7 @@ export const stageState = $state({
     if (!this.selectedPath) return "no prim selected";
     try {
       await invoke("set_variant_selection", {
+        stageId: this.activeStageId,
         path: this.selectedPath,
         variantSet,
         selection,
@@ -182,7 +212,11 @@ export const stageState = $state({
   // branch application, which loops over many gprims.
   async setPrimTexture(path: string, texture: string | null): Promise<string | null> {
     try {
-      await invoke("set_prim_texture", { path, texturePath: texture });
+      await invoke("set_prim_texture", {
+        stageId: this.activeStageId,
+        path,
+        texturePath: texture,
+      });
       return null;
     } catch (e) {
       return typeof e === "string" ? e : String(e);

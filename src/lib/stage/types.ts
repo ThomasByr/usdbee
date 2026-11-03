@@ -33,6 +33,9 @@ export interface UndoState {
 }
 
 export interface StageInfo {
+  // The keyed stage map's id (first id is 1); 0 means "no stage" on the
+  // frontend. Every stage-scoped command takes it as its stage_id param.
+  stage_id: number;
   root_layer: string;
   time_codes_per_second: number;
   start_time_code: number;
@@ -40,6 +43,21 @@ export interface StageInfo {
   composition_errors: string[];
   // "Y" or "Z"; the backend defaults anything unreadable to "Y".
   up_axis: string;
+}
+
+// Rust stage.rs::StageSummary — one open stage as list_stages reports it.
+// dirty_count is the number of layers with unsaved edits.
+export interface StageSummary {
+  stage_id: number;
+  root_identifier: string;
+  dirty_count: number;
+}
+
+// The payload of the usd-stage-changed event: which stage changed and
+// which prim paths were touched.
+export interface StageChangedEvent {
+  stage_id: number;
+  paths: string[];
 }
 
 export interface PrimNode {

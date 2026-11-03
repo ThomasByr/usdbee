@@ -13,6 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import * as THREE from "three";
 import { advanceStageTime, renderState, toAbsoluteTime, toPlayheadOffset } from "./renderState.svelte";
 import type { RenderNode } from "../stage/types";
+import { stageState } from "../stage/stageState.svelte";
 
 const mockedInvoke = vi.mocked(invoke);
 
@@ -35,7 +36,7 @@ describe("renderState", () => {
 
     const group = await renderState.loadRenderScene();
 
-    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { time: 0 });
+    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { stageId: stageState.activeStageId, time: 0 });
     expect(group).toBeTruthy();
     expect(group!.children).toHaveLength(0);
     expect(renderState.status).toBe("ready");
@@ -49,7 +50,7 @@ describe("renderState", () => {
     await renderState.loadRenderScene(10);
 
     expect(renderState.time).toBe(10);
-    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { time: 10 });
+    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { stageId: stageState.activeStageId, time: 10 });
   });
 
   it("discards a stale manifest response after a newer load", async () => {
@@ -259,10 +260,10 @@ describe("renderState.setStageTime", () => {
 
     await renderState.setStageTime(5);
 
-    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { time: 5 });
+    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { stageId: stageState.activeStageId, time: 5 });
     const geometryCalls = mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_geometry_data");
     expect(geometryCalls).toHaveLength(1);
-    expect(geometryCalls[0][1]).toEqual({ path: "/Scene/Wobble", time: 5 });
+    expect(geometryCalls[0][1]).toEqual({ stageId: stageState.activeStageId, path: "/Scene/Wobble", time: 5 });
     expect(renderState.time).toBe(5);
 
     // The time-step updates the ALREADY-integrated group: the same
@@ -290,7 +291,7 @@ describe("renderState.setStageTime", () => {
     mockIpc(() => [node({ ...mover, transform: translate(5) })]);
     await renderState.setStageTime(5);
 
-    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { time: 5 });
+    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { stageId: stageState.activeStageId, time: 5 });
     expect(mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_geometry_data")).toHaveLength(0);
     const wrapper = group.children.find((child) => child.name === "/Scene/Mover");
     expect(wrapper!.matrix.elements[12]).toBe(5);
@@ -614,7 +615,7 @@ describe("renderState.setStageTime", () => {
     mockIpc(() => [shape]);
     const group = await renderState.refreshAnimated();
 
-    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { time: 5 });
+    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { stageId: stageState.activeStageId, time: 5 });
     const material = findMesh(group!).material as THREE.MeshPhysicalMaterial;
     expect(material.color.getHex()).toBe(new THREE.Color("#00ff00").getHex());
   });
@@ -627,7 +628,7 @@ describe("renderState.setStageTime", () => {
     mockIpc(() => []);
     const group = await renderState.refreshAnimated();
 
-    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { time: 5 });
+    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", { stageId: stageState.activeStageId, time: 5 });
     expect(group).toBeTruthy();
     expect(renderState.time).toBe(5);
   });
@@ -696,6 +697,7 @@ describe("renderState.refreshAfterEdit", () => {
     // from the BATCH command (a 1-element batch for a single path).
     expect(rebuild).toBe(false);
     expect(mockedInvoke).toHaveBeenCalledWith("get_geometry_batch", {
+      stageId: stageState.activeStageId,
       paths: ["/Scene/Shape"],
       time: 0,
     });

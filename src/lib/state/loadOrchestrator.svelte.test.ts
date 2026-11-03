@@ -18,6 +18,7 @@ const mockedInvoke = vi.mocked(invoke);
 const mockedListen = vi.mocked(listen);
 
 const stageInfo: StageInfo = {
+  stage_id: 3,
   root_layer: "/scene/bike.usda",
   time_codes_per_second: 24,
   start_time_code: 0,
@@ -167,7 +168,9 @@ describe("init event subscriptions", () => {
     mockedInvoke.mockResolvedValueOnce([]);
 
     handlerFor["usd-stage-opened"]({ payload: stageInfo });
-    await vi.waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith("get_stage_tree"));
+    await vi.waitFor(() =>
+      expect(mockedInvoke).toHaveBeenCalledWith("get_stage_tree", { stageId: 3 }),
+    );
 
     expect(stageState.stageInfo).toEqual(stageInfo);
     expect(stageState.status).toBe("ready");

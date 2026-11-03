@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod common;
+
+use common::spawn_stage_owner;
 use usdbee_lib::stage::{
-    request_geometry_batch, request_geometry_data, request_scene_manifest, spawn_stage_owner,
-    MeshCache, RenderNode, StageState,
+    request_geometry_batch, request_geometry_data, request_scene_manifest, MeshCache, RenderNode,
 };
 use usdbee_lib::tessellation::{pack_geometry, MeshData};
 
@@ -13,21 +15,8 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn open_via_owner(state: &StageState, name: &str) {
-    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-    state
-        .sender
-        .send(usdbee_lib::stage::StageRequest::Open {
-            path: fixture(name),
-            is_usdz: false,
-            source_usdz: None,
-            reply: reply_tx,
-        })
-        .expect("stage owner should accept an open request");
-    reply_rx
-        .recv()
-        .expect("stage owner should reply")
-        .expect("stage should open");
+fn open_via_owner(state: &common::TestOwner, name: &str) {
+    state.open(&fixture(name));
 }
 
 fn find_node<'a>(nodes: &'a [RenderNode], path: &str) -> Option<&'a RenderNode> {
@@ -99,7 +88,7 @@ fn geometry_round_trip_via_owner_matches_task1_golden_values() {
     open_via_owner(&state, "basic.usda");
 
     let bytes =
-        request_geometry_data(&state.sender, "/World/Ball", None).expect("geometry should pack");
+        request_geometry_data(&state.sender(), "/World/Ball", None).expect("geometry should pack");
 
     assert_eq!(u32_le(&bytes, 0), 0x5553_4442);
     assert_eq!(u32_le(&bytes, 4), 1);
@@ -118,12 +107,12 @@ fn geometry_round_trip_via_owner_matches_task1_golden_values() {
 fn variants_sphere_is_renderable_end_to_end_with_red_vertex_colors() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "variants.usda");
-    let manifest = request_scene_manifest(&state.sender, None).expect("variant manifest");
+    let manifest = request_scene_manifest(&state.sender(), None).expect("variant manifest");
     let shape = node(&manifest, "/Prop/Shape");
     assert_eq!(shape.type_name, "Sphere");
     assert!(shape.has_geometry);
 
-    let bytes = request_geometry_data(&state.sender, "/Prop/Shape", None)
+    let bytes = request_geometry_data(&state.sender(), "/Prop/Shape", None)
         .expect("sphere geometry should pack");
     let vertices = u32_le(&bytes, 8) as usize;
     assert!(vertices > 0);
@@ -139,12 +128,12 @@ fn variants_sphere_is_renderable_end_to_end_with_red_vertex_colors() {
 fn native_instance_sphere_is_renderable_end_to_end() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "instanced.usda");
-    let manifest = request_scene_manifest(&state.sender, None).expect("instance manifest");
+    let manifest = request_scene_manifest(&state.sender(), None).expect("instance manifest");
     let shape = node(&manifest, "/Scene/WheelA/Wheel");
     assert_eq!(shape.type_name, "Sphere");
     assert!(shape.has_geometry);
 
-    let bytes = request_geometry_data(&state.sender, "/Scene/WheelA/Wheel", None)
+    let bytes = request_geometry_data(&state.sender(), "/Scene/WheelA/Wheel", None)
         .expect("instanced sphere geometry should pack");
     assert!(u32_le(&bytes, 8) > 0);
     assert!(u32_le(&bytes, 12) > 0);
@@ -155,7 +144,7 @@ fn geometry_for_nonexistent_prim_is_a_readable_error() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "basic.usda");
 
-    let error = request_geometry_data(&state.sender, "/World/Nope", None)
+    let error = request_geometry_data(&state.sender(), "/World/Nope", None)
         .expect_err("missing prim must not succeed");
     assert!(
         error.contains("/World/Nope"),
@@ -169,7 +158,7 @@ fn geometry_for_non_mesh_prim_is_a_readable_error() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "basic.usda");
 
-    let error = request_geometry_data(&state.sender, "/World", None)
+    let error = request_geometry_data(&state.sender(), "/World", None)
         .expect_err("an Xform must not produce geometry");
     assert!(
         error.contains("no geometry at /World"),
@@ -180,10 +169,10 @@ fn geometry_for_non_mesh_prim_is_a_readable_error() {
 
 #[test]
 fn geometry_without_open_stage_fails() {
+    // No stage open means id 0 — the lookup guards every command shape.
     let state = spawn_stage_owner();
-    let error = request_geometry_data(&state.sender, "/World/Ball", None)
-        .expect_err("no stage open must fail");
-    assert_eq!(error, "no stage open");
+    let error = state.state.sender(0).expect_err("no stage open must fail");
+    assert_eq!(error, "no stage 0");
 }
 
 #[test]
@@ -194,7 +183,7 @@ fn batch_round_trip_frames_slots_fail_soft_per_path() {
     open_via_owner(&state, "basic.usda");
 
     let bytes = request_geometry_batch(
-        &state.sender,
+        &state.sender(),
         &[
             "/World/Ball".to_string(),
             "/World/Nope".to_string(),
@@ -250,7 +239,7 @@ fn ok_slot_after_an_unaligned_error_slot_stays_aligned_and_decodes() {
     open_via_owner(&state, "basic.usda");
 
     let bytes = request_geometry_batch(
-        &state.sender,
+        &state.sender(),
         &["/World/Nope".to_string(), "/World/Ball".to_string()],
         None,
     )
@@ -297,7 +286,7 @@ fn empty_batch_frames_zero_slots() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "basic.usda");
 
-    let bytes = request_geometry_batch(&state.sender, &[], None).expect("empty batch");
+    let bytes = request_geometry_batch(&state.sender(), &[], None).expect("empty batch");
 
     assert_eq!(u32_le(&bytes, 0), 0x5553_4247);
     assert_eq!(u32_le(&bytes, 8), 0, "no slots");
@@ -306,10 +295,10 @@ fn empty_batch_frames_zero_slots() {
 
 #[test]
 fn batch_without_open_stage_fails() {
+    // No stage open means id 0 — the lookup guards every command shape.
     let state = spawn_stage_owner();
-    let error = request_geometry_batch(&state.sender, &["/World/Ball".to_string()], None)
-        .expect_err("no stage open must fail");
-    assert_eq!(error, "no stage open");
+    let error = state.state.sender(0).expect_err("no stage open must fail");
+    assert_eq!(error, "no stage 0");
 }
 
 #[test]
@@ -327,7 +316,7 @@ fn two_instance_copies_of_one_prototype_tessellate_once_and_serve_warm() {
         "/Scene/WheelB/WheelMesh".to_string(),
     ];
     let bytes =
-        request_geometry_batch(&state.sender, &batch_paths, None).expect("batch should frame");
+        request_geometry_batch(&state.sender(), &batch_paths, None).expect("batch should frame");
 
     let slot_bytes = |bytes: &[u8], offset: &mut usize| -> (u32, Vec<u8>) {
         let status = u32_le(bytes, *offset);
@@ -352,7 +341,7 @@ fn two_instance_copies_of_one_prototype_tessellate_once_and_serve_warm() {
     );
 
     let repeat =
-        request_geometry_batch(&state.sender, &batch_paths, None).expect("repeat batch");
+        request_geometry_batch(&state.sender(), &batch_paths, None).expect("repeat batch");
     assert_eq!(repeat, bytes, "repeat batch serves warm from the MeshCache");
     assert_eq!(
         state.mesh_tessellations(),
@@ -361,7 +350,7 @@ fn two_instance_copies_of_one_prototype_tessellate_once_and_serve_warm() {
     );
 
     // A single-path request of the same copy also hits the warm cache.
-    let warm = request_geometry_data(&state.sender, "/Scene/WheelA/WheelMesh", None)
+    let warm = request_geometry_data(&state.sender(), "/Scene/WheelA/WheelMesh", None)
         .expect("per-path refetch stays warm");
     assert_eq!(u32_le(&warm, 0), 0x5553_4442);
     assert_eq!(state.mesh_tessellations(), 1);
@@ -372,7 +361,7 @@ fn manifest_matches_authored_hierarchy_transforms_and_flags() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "basic.usda");
 
-    let manifest = request_scene_manifest(&state.sender, None).expect("manifest should serialize");
+    let manifest = request_scene_manifest(&state.sender(), None).expect("manifest should serialize");
     assert_eq!(manifest.len(), 1);
 
     let world = &manifest[0];

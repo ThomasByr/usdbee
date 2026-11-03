@@ -6,6 +6,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { editState } from "./editState.svelte";
+import { stageState } from "../stage/stageState.svelte";
 import type { EditTargetInfo, LayerInfo, UndoState } from "../stage/types";
 
 const mockedInvoke = vi.mocked(invoke);
@@ -42,6 +43,7 @@ beforeEach(() => {
   editState.saving = false;
   editState.canUndo = false;
   editState.canRedo = false;
+  stageState.activeStageId = 0;
 });
 
 describe("editState", () => {
@@ -53,9 +55,9 @@ describe("editState", () => {
 
     await editState.refresh();
 
-    expect(mockedInvoke).toHaveBeenCalledWith("get_edit_target");
-    expect(mockedInvoke).toHaveBeenCalledWith("list_dirty_layers");
-    expect(mockedInvoke).toHaveBeenCalledWith("get_undo_state");
+    expect(mockedInvoke).toHaveBeenCalledWith("get_edit_target", { stageId: 0 });
+    expect(mockedInvoke).toHaveBeenCalledWith("list_dirty_layers", { stageId: 0 });
+    expect(mockedInvoke).toHaveBeenCalledWith("get_undo_state", { stageId: 0 });
     expect(editState.editTarget).toEqual(target);
     expect(editState.dirtyLayers).toEqual([sessionLayer, rootLayer]);
     expect(editState.canUndo).toBe(true);
@@ -87,6 +89,7 @@ describe("editState", () => {
 
     expect(error).toBeNull();
     expect(mockedInvoke).toHaveBeenCalledWith("set_edit_target", {
+      stageId: 0,
       identifier: "/scene/basic.usda",
     });
     expect(editState.editTarget).toEqual(target);
@@ -98,7 +101,7 @@ describe("editState", () => {
     const error = await editState.setEditTarget(null);
 
     expect(error).toBeNull();
-    expect(mockedInvoke).toHaveBeenCalledWith("set_edit_target", { identifier: null });
+    expect(mockedInvoke).toHaveBeenCalledWith("set_edit_target", { stageId: 0, identifier: null });
   });
 
   it("setEditTarget surfaces backend errors", async () => {
@@ -123,6 +126,7 @@ describe("editState", () => {
 
     expect(error).toBeNull();
     expect(mockedInvoke).toHaveBeenCalledWith("save_layers", {
+      stageId: 0,
       requests: [{ identifier: sessionLayer.identifier, path: "/tmp/snapshot.usda" }],
     });
     expect(editState.dirtyLayers).toEqual([]);
@@ -146,7 +150,7 @@ describe("editState", () => {
     const error = await editState.saveAsUsdz("/tmp/repacked.usdz");
 
     expect(error).toBeNull();
-    expect(mockedInvoke).toHaveBeenCalledWith("save_stage_as_usdz", { path: "/tmp/repacked.usdz" });
+    expect(mockedInvoke).toHaveBeenCalledWith("save_stage_as_usdz", { stageId: 0, path: "/tmp/repacked.usdz" });
     expect(mockedInvoke).toHaveBeenCalledTimes(1);
     // Not a layer save: the dirty layers stay dirty (no refresh happened).
     expect(editState.dirtyLayers).toEqual([sessionLayer]);
@@ -175,7 +179,7 @@ describe("editState", () => {
     const error = await editState.undo();
 
     expect(error).toBeNull();
-    expect(mockedInvoke).toHaveBeenCalledWith("undo_stage_edit");
+    expect(mockedInvoke).toHaveBeenCalledWith("undo_stage_edit", { stageId: 0 });
     expect(editState.canUndo).toBe(false);
     expect(editState.canRedo).toBe(false);
   });
@@ -190,7 +194,7 @@ describe("editState", () => {
     const error = await editState.redo();
 
     expect(error).toBeNull();
-    expect(mockedInvoke).toHaveBeenCalledWith("redo_stage_edit");
+    expect(mockedInvoke).toHaveBeenCalledWith("redo_stage_edit", { stageId: 0 });
     expect(editState.canUndo).toBe(true);
     expect(editState.dirtyLayers).toEqual([sessionLayer]);
   });
@@ -219,9 +223,9 @@ describe("editState", () => {
 
     expect(mockedListen).toHaveBeenCalledWith("usd-stage-changed", expect.any(Function));
     mockedInvoke.mockClear();
-    handler({ payload: { paths: ["/World/Ball"] } });
+    handler({ payload: { stage_id: 0, paths: ["/World/Ball"] } });
     await vi.waitFor(() => {
-      expect(mockedInvoke).toHaveBeenCalledWith("get_edit_target");
+      expect(mockedInvoke).toHaveBeenCalledWith("get_edit_target", { stageId: 0 });
     });
   });
 });
