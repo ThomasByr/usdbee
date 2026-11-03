@@ -15,6 +15,7 @@ export const icons = {
   play: `<polygon points="6 3 20 12 6 21 6 3"/>`,
   pause: `<rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/>`,
   camera: `<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>`,
+  palette: `<circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.648 0-.409-.15-.765-.394-1.038-.245-.274-.388-.63-.388-1.038 0-.905.743-1.648 1.648-1.648h2.598c2.75 0 4.988-2.238 4.988-4.988C22 6.5 17.5 2 12 2z"/>`,
 } as const;
 
 export type IconName = keyof typeof icons;

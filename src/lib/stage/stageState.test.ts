@@ -215,6 +215,82 @@ describe("stageState", () => {
     });
   });
 
+  it("setAttributeValue authors an explicit path without touching the selection", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    await stageState.selectPrim("/A");
+    mockedInvoke.mockResolvedValue(undefined);
+    const value = { type: "color3f_array", data: [[1, 0, 0]] };
+
+    const error = await stageState.setAttributeValue("primvars:displayColor", value as never, null, "/B");
+
+    expect(error).toBeNull();
+    expect(mockedInvoke).toHaveBeenLastCalledWith("set_attribute_value", {
+      path: "/B",
+      name: "primvars:displayColor",
+      value,
+      time: null,
+    });
+    expect(stageState.selectedPath).toBe("/A");
+  });
+
+  it("setPrimMetadata authors an explicit path and surfaces backend errors", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    mockedInvoke.mockResolvedValue(undefined);
+
+    const error = await stageState.setPrimMetadata("visibility", { type: "token", data: "invisible" }, "/B");
+
+    expect(error).toBeNull();
+    expect(mockedInvoke).toHaveBeenCalledWith("set_prim_metadata", {
+      path: "/B",
+      key: "visibility",
+      value: { type: "token", data: "invisible" },
+    });
+
+    mockedInvoke.mockRejectedValueOnce("prim not found: /B");
+    expect(await stageState.setPrimMetadata("visibility", { type: "token", data: "inherited" }, "/B")).toBe(
+      "prim not found: /B",
+    );
+  });
+
+  it("fetchPrimDetails reads an arbitrary prim without changing the selection", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    await stageState.selectPrim("/A");
+    renderState.time = 5;
+    const remote = { path: "/B", attributes: [], metadata: [], variant_sets: [], composition_arcs: [] };
+    mockedInvoke.mockResolvedValueOnce(remote);
+
+    const details = await stageState.fetchPrimDetails("/B");
+
+    expect(details).toEqual(remote);
+    expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { path: "/B", time: 5 });
+    expect(stageState.selectedPath).toBe("/A");
+    expect(stageState.details).not.toEqual(remote);
+  });
+
+  it("fetchPrimDetails returns null instead of throwing", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    mockedInvoke.mockRejectedValueOnce("prim not found: /B");
+
+    expect(await stageState.fetchPrimDetails("/B")).toBeNull();
+  });
+
+  it("getMaterialInfo returns the material data and null on error", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    const bound = { name: "Mat", surface: null };
+
+    mockedInvoke.mockResolvedValueOnce(bound);
+    expect(await stageState.getMaterialInfo("/B")).toEqual(bound);
+    expect(mockedInvoke).toHaveBeenLastCalledWith("get_material_data", { path: "/B" });
+
+    mockedInvoke.mockRejectedValueOnce("prim not found: /B");
+    expect(await stageState.getMaterialInfo("/B")).toBeNull();
+  });
+
   it("refreshAfterEdit refetches the tree and re-selects the prim", async () => {
     mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
     await stageState.loadStage("/a.usda");

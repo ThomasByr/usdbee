@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PrimNode } from "./types";
-import { collectPaths, filterTree } from "./treeUtils";
+import { collectPaths, collectSubtreeGprims, filterTree, isGprim } from "./treeUtils";
 
 const leaf = (path: string, name: string, type_name = "Mesh"): PrimNode => ({
   path,
@@ -68,5 +68,74 @@ describe("collectPaths", () => {
 
   it("handles empty input", () => {
     expect(collectPaths([])).toEqual([]);
+  });
+});
+
+describe("isGprim", () => {
+  it("classifies exactly the families the render manifest tessellates", () => {
+    expect(
+      ["Mesh", "BasisCurves", "Points", "Sphere"].map((type) => leaf("/A", type, type)).map(isGprim),
+    ).toEqual([true, true, true, true]);
+    expect(
+      ["Xform", "Scope", "Material", "PointInstancer", ""].map((type) => leaf("/A", type, type)).map(isGprim),
+    ).toEqual([false, false, false, false, false]);
+  });
+});
+
+describe("collectSubtreeGprims", () => {
+  const branch: PrimNode = {
+    ...leaf("/World", "World", "Xform"),
+    children: [
+      leaf("/World/Ball", "Ball"),
+      leaf("/World/Stroke", "Stroke", "BasisCurves"),
+      leaf("/World/Cloud", "Cloud", "Points"),
+      leaf("/World/Bead", "Bead", "Sphere"),
+      {
+        ...leaf("/World/Group", "Group", "Xform"),
+        children: [leaf("/World/Group/Cube", "Cube")],
+      },
+      { ...leaf("/World/InstBall", "InstBall"), is_instance: true },
+      {
+        ...leaf("/World/Looks", "Looks", "Scope"),
+        children: [leaf("/World/Looks/Mat", "Mat", "Material")],
+      },
+    ],
+  };
+  const tree: PrimNode[] = [{ ...root, children: [branch] }];
+
+  it("collects every subtree gprim depth-first, root gprim inclusive", () => {
+    expect(collectSubtreeGprims(tree, "/World").paths).toEqual([
+      "/World/Ball",
+      "/World/Stroke",
+      "/World/Cloud",
+      "/World/Bead",
+      "/World/Group/Cube",
+    ]);
+    expect(collectSubtreeGprims(tree, "/World/Group/Cube").paths).toEqual(["/World/Group/Cube"]);
+  });
+
+  it("excludes xforms, scopes and materials from the paths", () => {
+    const paths = collectSubtreeGprims(tree, "/World").paths;
+    expect(paths).not.toContain("/World/Group");
+    expect(paths).not.toContain("/World/Looks");
+    expect(paths).not.toContain("/World/Looks/Mat");
+  });
+
+  it("skips instance gprims and reports them instead of collecting", () => {
+    const { paths, skippedInstances } = collectSubtreeGprims(tree, "/World");
+    expect(paths).not.toContain("/World/InstBall");
+    expect(skippedInstances).toEqual(["/World/InstBall"]);
+  });
+
+  it("reports an instance subtree root without collecting it", () => {
+    const result = collectSubtreeGprims(tree, "/World/InstBall");
+    expect(result.paths).toEqual([]);
+    expect(result.skippedInstances).toEqual(["/World/InstBall"]);
+  });
+
+  it("collects nothing for a path that is not in the tree", () => {
+    const result = collectSubtreeGprims(tree, "/Nope");
+    expect(result.paths).toEqual([]);
+    expect(result.skippedInstances).toEqual([]);
   });
 });

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { PrimDetails, PrimNode, StageInfo, ValuePayload } from "./types";
+import type { MaterialInfo, PrimDetails, PrimNode, StageInfo, ValuePayload } from "./types";
 import { renderState } from "../render/renderState.svelte";
 
 let loadGeneration = 0;
@@ -94,20 +94,43 @@ export const stageState = $state({
     if (this.selectedPath) await this.selectPrim(this.selectedPath);
   },
 
+  // Composed details for an arbitrary prim, without moving the selection —
+  // the appearance popover reads non-selected rows through this.
+  async fetchPrimDetails(path: string): Promise<PrimDetails | null> {
+    try {
+      return await invoke<PrimDetails>("get_prim_details", { path, time: renderState.time });
+    } catch {
+      return null;
+    }
+  },
+
+  // The prim's bound-material report (get_material_data); null when the
+  // command fails. Unbound answers the prim's own name with a null surface.
+  async getMaterialInfo(path: string): Promise<MaterialInfo | null> {
+    try {
+      return await invoke<MaterialInfo>("get_material_data", { path });
+    } catch {
+      return null;
+    }
+  },
+
   // Author an attribute value on the selected prim (session layer); returns
   // the backend error string, or null on success. Time is the viewer's
   // current USD time code so sampled edits land where the user is looking;
   // uniform attributes (xformOpOrder) pass null to author the default.
-  // The usd-stage-changed event drives the details/tree/manifest refresh.
+  // An explicit `path` (appearance popover, branch application) authors
+  // that prim instead, without moving the selection.
   async setAttributeValue(
     name: string,
     value: ValuePayload,
     time: number | null = renderState.time,
+    path: string | null = null,
   ): Promise<string | null> {
-    if (!this.selectedPath) return "no prim selected";
+    const target = path ?? this.selectedPath;
+    if (!target) return "no prim selected";
     try {
       await invoke("set_attribute_value", {
-        path: this.selectedPath,
+        path: target,
         name,
         value,
         time,
@@ -118,12 +141,18 @@ export const stageState = $state({
     }
   },
 
-  // Author a metadata field on the selected prim; the usd-stage-changed
-  // event drives the tree/details/manifest refresh.
-  async setPrimMetadata(key: string, value: ValuePayload): Promise<string | null> {
-    if (!this.selectedPath) return "no prim selected";
+  // Author a metadata field on the selected prim; an explicit `path`
+  // (appearance popover, branch application) authors that prim instead.
+  // The usd-stage-changed event drives the tree/details/manifest refresh.
+  async setPrimMetadata(
+    key: string,
+    value: ValuePayload,
+    path: string | null = null,
+  ): Promise<string | null> {
+    const target = path ?? this.selectedPath;
+    if (!target) return "no prim selected";
     try {
-      await invoke("set_prim_metadata", { path: this.selectedPath, key, value });
+      await invoke("set_prim_metadata", { path: target, key, value });
       return null;
     } catch (e) {
       return typeof e === "string" ? e : String(e);

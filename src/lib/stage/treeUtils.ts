@@ -24,3 +24,51 @@ export function filterTree(nodes: PrimNode[], query: string): PrimNode[] {
 export function collectPaths(nodes: PrimNode[]): string[] {
   return nodes.flatMap((n) => [n.path, ...collectPaths(n.children)]);
 }
+
+// Exact type names the render manifest treats as renderable geometry —
+// the frontend mirror of stage.rs `renders_geometry`, not a second
+// classification.
+const GPRIM_TYPES = new Set(["Mesh", "BasisCurves", "Points", "Sphere"]);
+
+export function isGprim(node: PrimNode): boolean {
+  return GPRIM_TYPES.has(node.type_name);
+}
+
+export interface SubtreeGprims {
+  paths: string[];
+  // Instance gprims the backend edit arms reject ("edit the prototype"):
+  // reported so the branch summary can mention them, never attempted.
+  skippedInstances: string[];
+}
+
+// The gprim paths under `path` (inclusive) in the stage tree, for branch
+// appearance application. Instance prims are skipped and reported — the
+// backend refuses edits on them — and non-gprims (xforms, scopes,
+// materials) are not appearance targets.
+export function collectSubtreeGprims(nodes: PrimNode[], path: string): SubtreeGprims {
+  const out: SubtreeGprims = { paths: [], skippedInstances: [] };
+  const walk = (node: PrimNode): void => {
+    if (!isGprim(node)) {
+      node.children.forEach(walk);
+      return;
+    }
+    if (node.is_instance) {
+      out.skippedInstances.push(node.path);
+      return;
+    }
+    out.paths.push(node.path);
+    node.children.forEach(walk);
+  };
+  const find = (entries: PrimNode[]): boolean => {
+    for (const node of entries) {
+      if (node.path === path) {
+        walk(node);
+        return true;
+      }
+      if (find(node.children)) return true;
+    }
+    return false;
+  };
+  find(nodes);
+  return out;
+}
