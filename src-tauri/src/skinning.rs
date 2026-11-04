@@ -113,14 +113,12 @@ pub fn skin_mesh(
     // the bound animation's, remapped by name (pxr RemapTransforms gives
     // unmapped joints identity); or the skeleton's restTransforms when no
     // animation source is bound (the spec's fallback pose). The animation
-    // source is inherited from the prim's ancestors or — the standard
-    // authoring pattern, and what our fixture uses — authored on the
-    // skeleton prim itself.
-    let anim_source = inherited_rel(prim, "skel:animationSource")?.or_else(|| {
-        inherited_rel(skeleton.prim(), "skel:animationSource")
-            .ok()
-            .flatten()
-    });
+    // source authored on the SKELETON's chain wins over the one inherited
+    // from the mesh's ancestors (pxr precedence, OpenUSD#3532); both reads
+    // are readable errors — a broken source relationship never silently
+    // degrades to a rest-pose render.
+    let anim_source = inherited_rel(skeleton.prim(), "skel:animationSource")?
+        .or(inherited_rel(prim, "skel:animationSource")?);
     let local_xforms = match anim_source {
         Some(anim_path) => {
             let Some(animation) =

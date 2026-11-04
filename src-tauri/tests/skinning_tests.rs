@@ -64,6 +64,15 @@ const EXPECTED_OFFSET_T10: [[f32; 3]; 3] =
 // along; time-invariant.
 const EXPECTED_REST: [[f32; 3]; 3] = [[2.0, 0.0, 0.0], [4.0, 0.0, 0.0], [3.0, 0.0, 0.0]];
 
+// Hose_dual authors a mesh-side animation source (Other) that differs
+// from the one authored on its Skeleton (Swing): the skeleton-side source
+// wins (pxr precedence, OpenUSD#3532). BakeSkinning over the dual-authored
+// fixture gives exactly Swing's motion — same constants as Hose_direct.
+const EXPECTED_DUAL_SKELETON_SIDE_T0: [[f32; 3]; 3] =
+    [[2.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 0.0, 0.0]];
+const EXPECTED_DUAL_SKELETON_SIDE_T10: [[f32; 3]; 3] =
+    [[2.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 0.0, 1.0]];
+
 #[test]
 fn skinning_mesh_points_follow_animated_skeleton() {
     let (stage, _info) = open_stage(&fixture("skinned.usda")).expect("skinned stage should open");
@@ -106,6 +115,21 @@ fn binding_without_animation_source_uses_rest_pose() {
         let mesh = tessellate(&stage, "/Rig2/Hose_rest", time);
         assert_points_close(&mesh.positions, &EXPECTED_REST);
     }
+}
+
+#[test]
+fn skeleton_authored_animation_source_wins_over_mesh_inherited() {
+    let (stage, _info) = open_stage(&fixture("skinned.usda")).expect("skinned stage should open");
+
+    // Hose_dual authors BOTH sources: its own rel points at Other (which
+    // at t=10 swings joint B to (0,5,0), dragging vertices to y=5), while
+    // its skeleton /Rig/Skel points at Swing. The skeleton-side source
+    // must win, so the baked points equal Swing's motion — not Other's.
+    let mesh = tessellate(&stage, "/Rig/Hose_dual", 0.0);
+    assert_points_close(&mesh.positions, &EXPECTED_DUAL_SKELETON_SIDE_T0);
+
+    let mesh = tessellate(&stage, "/Rig/Hose_dual", 10.0);
+    assert_points_close(&mesh.positions, &EXPECTED_DUAL_SKELETON_SIDE_T10);
 }
 
 #[test]
