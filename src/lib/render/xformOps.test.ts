@@ -291,6 +291,7 @@ describe("composeOpUpdate", () => {
 describe("evaluateGizmoGate", () => {
   function details(overrides: Record<string, unknown>): PrimDetails {
     return {
+      path: "/A",
       is_active: true,
       is_instance: false,
       instance_of: null,
@@ -303,7 +304,7 @@ describe("evaluateGizmoGate", () => {
   it("enables a plain prim with no authored xformOpOrder", () => {
     // The ruling: a prim with NO order reports identity transforms and the
     // gate must ENABLE it (the create-op path authors the order too).
-    expect(evaluateGizmoGate("/World/Ball", details({ local_transform: IDENTITY }))).toEqual({
+    expect(evaluateGizmoGate("/World/Ball", details({ path: "/World/Ball", local_transform: IDENTITY }))).toEqual({
       attachable: true,
       message: null,
     });
@@ -329,6 +330,13 @@ describe("evaluateGizmoGate", () => {
       details({ is_instance: true, instance_of: "/Proto", local_transform: null }),
     );
     expect(instance.message).toContain("/Proto");
+  });
+
+  it("detaches while the shown details belong to another prim", () => {
+    // Selection fetch in flight: the previous prim's details stay on screen.
+    const stale = details({ path: "/World/Ball" });
+    expect(evaluateGizmoGate("/World/Other", stale)).toEqual({ attachable: false, message: null });
+    expect(evaluateGizmoGate("/World/Ball", stale)).toEqual({ attachable: true, message: null });
   });
 });
 

@@ -151,6 +151,10 @@ export function evaluateGizmoGate(
   details: PrimDetails | null,
 ): { attachable: boolean; message: string | null } {
   if (!selectedPath || !details) return { attachable: false, message: null };
+  // Details lag a selection change (the fetch keeps the old payload on
+  // screen), so a mismatched path must not attach the gizmo at the old
+  // prim's pose.
+  if (details.path !== selectedPath) return { attachable: false, message: null };
   if (!details.is_active) {
     return {
       attachable: false,

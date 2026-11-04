@@ -89,10 +89,14 @@ export const stageState = $state({
     }
   },
 
+  // The previous prim's details stay visible (no `details = null`) until the
+  // fresh payload lands: nulling them unmounts the inspector body, the panel
+  // collapses and the tree's scroll position is lost. Stale details are safe
+  // because every consumer keys off `details.path`, and the generation guard
+  // below drops out-of-order responses.
   async selectPrim(path: string): Promise<void> {
     const generation = ++selectionGeneration;
     this.selectedPath = path;
-    this.details = null;
     if (this.status !== "ready") return;
     try {
       const details = await invoke<PrimDetails>("get_prim_details", {
