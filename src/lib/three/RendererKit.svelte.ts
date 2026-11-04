@@ -253,6 +253,7 @@ export class RendererKit {
     }
     if (this.selectedNode && this.selectionHelper) {
       this.selectionHelper.box.setFromObject(this.selectedNode, true);
+      this.selectionHelper.visible = !this.selectionHelper.box.isEmpty();
     }
 
     const renderCam =

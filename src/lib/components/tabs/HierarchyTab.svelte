@@ -47,6 +47,7 @@
       const box = new THREE.Box3();
       box.setFromObject(node, true);
       viewer.selectionHelper = new THREE.Box3Helper(box, new THREE.Color(0xffaa00)); // Orange highlight
+      viewer.selectionHelper.visible = !box.isEmpty();
       viewer.scene.add(viewer.selectionHelper);
     }
   }

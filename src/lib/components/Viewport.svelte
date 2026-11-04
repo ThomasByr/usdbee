@@ -222,6 +222,7 @@
           if (viewer.selectedNode && viewer.selectionHelper) {
             // @ts-ignore
             viewer.selectionHelper.box.setFromObject(viewer.selectedNode, true);
+            viewer.selectionHelper.visible = !viewer.selectionHelper.box.isEmpty();
           }
         }}
         onmousedown={() => (viewer.isDraggingAnim = true)}
