@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 mod common;
 
 use common::spawn_stage_owner;
-use usdbee_lib::materials::{material_info, MaterialInfo};
+use usdbee_lib::materials::{material_info, MaterialInfo, UvTransform};
 use usdbee_lib::stage::{open_stage, request_material_data};
 
 fn fixture(name: &str) -> PathBuf {
@@ -272,4 +272,64 @@ fn material_request_without_open_stage_fails() {
     // command shape (including get_material_data) routes through.
     let state = spawn_stage_owner();
     assert_eq!(state.state.sender(0).unwrap_err(), "no stage 0");
+}
+
+#[test]
+fn transform2d_chain_wrap_tokens_and_value_scale_reach_the_payload() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "material_tiling.usda");
+
+    let info = request_material_data(&state.sender(), "/World/TiledBall").expect("tiled material data");
+    assert_eq!(info.name, "Tiled");
+    let surface = info.surface.expect("Tiled is a UsdPreviewSurface");
+
+    let albedo = surface
+        .textures
+        .iter()
+        .find(|t| t.input == "diffuseColor")
+        .expect("diffuseColor texture input");
+    assert_eq!(albedo.st_primvar, "uv", "the reader sits behind the Transform2d");
+    assert_eq!(albedo.wrap_s.as_deref(), Some("mirror"));
+    assert_eq!(albedo.wrap_t.as_deref(), Some("clamp"));
+    assert_eq!(albedo.value_scale, Some([2.0, 2.0, 2.0, 1.0]));
+    assert_eq!(albedo.value_bias, Some([-1.0, -1.0, -1.0, 0.0]));
+    assert_eq!(
+        albedo.uv_transform,
+        Some(UvTransform {
+            scale: [6.0, 10.0],
+            translation: [0.25, -0.5],
+            rotation: 90.0,
+        })
+    );
+
+    let normal = surface
+        .textures
+        .iter()
+        .find(|t| t.input == "normal")
+        .expect("normal texture input");
+    assert_eq!(normal.wrap_s.as_deref(), Some("repeat"));
+    assert_eq!(normal.wrap_t.as_deref(), Some("repeat"));
+    assert_eq!(normal.uv_transform, None, "st connects straight to the reader");
+    assert_eq!(normal.value_scale, None);
+    assert_eq!(normal.value_bias, None);
+    let normal_info = surface.normal.expect("normal TextureInfo");
+    assert_eq!(normal_info.wrap_s.as_deref(), Some("repeat"));
+    assert_eq!(normal_info.uv_transform, None);
+}
+
+#[test]
+fn unauthored_wrap_transform_and_scale_default_to_identity() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "material_tiling.usda");
+
+    let info = request_material_data(&state.sender(), "/World/PlainBall").expect("plain material data");
+    let surface = info.surface.expect("Plain is a UsdPreviewSurface");
+    assert_eq!(surface.textures.len(), 1);
+    let texture = &surface.textures[0];
+    assert_eq!(texture.wrap_s, None, "unauthored wrapS stays None");
+    assert_eq!(texture.wrap_t, None);
+    assert_eq!(texture.uv_transform, None, "no st connection means no transform");
+    assert_eq!(texture.value_scale, None);
+    assert_eq!(texture.value_bias, None);
+    assert_eq!(texture.st_primvar, "st", "no st connection defaults to st");
 }

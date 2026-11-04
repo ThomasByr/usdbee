@@ -111,11 +111,25 @@ export interface ValuePayload {
   count?: number;
 }
 
+// Rust materials.rs::UvTransform — the UsdTransform2d feeding a texture's
+// `st`, composed as `result = in * scale * rotate + translation` (rotation
+// counter-clockwise in degrees around the origin).
+export interface UvTransform {
+  scale: number[];
+  translation: number[];
+  rotation: number;
+}
+
 // Rust materials.rs::TextureInfo — a texture outside the per-input list
 // (the normal map): its file path and the primvar its UVs come from.
 export interface TextureInfo {
   file_path: string;
   st_primvar: string;
+  wrap_s?: string | null;
+  wrap_t?: string | null;
+  uv_transform?: UvTransform | null;
+  value_scale?: number[] | null;
+  value_bias?: number[] | null;
 }
 
 // Rust materials.rs::TextureInput — one PreviewSurface input fed by a
@@ -125,6 +139,11 @@ export interface TextureInput {
   input: string;
   file_path: string;
   st_primvar: string;
+  wrap_s?: string | null;
+  wrap_t?: string | null;
+  uv_transform?: UvTransform | null;
+  value_scale?: number[] | null;
+  value_bias?: number[] | null;
 }
 
 // Rust materials.rs::PreviewSurface — serialized UsdPreviewSurface channels.

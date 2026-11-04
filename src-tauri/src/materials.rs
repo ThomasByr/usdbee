@@ -7,9 +7,12 @@
 //! texture files degrade to absent data, never errors. Only a broken path
 //! or a composition failure is an `Err`.
 
+use openusd::gf;
 use openusd::sdf::{self, Value};
 use openusd::usd::{Prim, SchemaBase, Stage};
-use openusd_schemas::shade::nodes::{PreviewSurface as UsdPreviewSurface, UVTexture};
+use openusd_schemas::shade::nodes::{
+    PreviewSurface as UsdPreviewSurface, Transform2d, UVTexture,
+};
 use openusd_schemas::shade::{Connectable, Input, Material, MaterialBindingAPI, Shader};
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +41,18 @@ pub struct PreviewSurface {
     pub textures: Vec<TextureInput>,
 }
 
+/// The UsdTransform2d a texture's `inputs:st` connects to, serialized as the
+/// crate's node definition composes it: `result = in * scale * rotate +
+/// translation`, rotation counter-clockwise in degrees around the origin
+/// (openusd-schemas shaderDefs.usda, "UsdTransform2d").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct UvTransform {
+    pub scale: [f32; 2],
+    pub translation: [f32; 2],
+    pub rotation: f32,
+}
+
 /// A texture outside the per-input list (the normal map): its file path and
 /// the primvar its UVs come from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,18 +60,31 @@ pub struct PreviewSurface {
 pub struct TextureInfo {
     pub file_path: String,
     pub st_primvar: String,
+    pub wrap_s: Option<String>,
+    pub wrap_t: Option<String>,
+    pub uv_transform: Option<UvTransform>,
+    pub value_scale: Option<[f32; 4]>,
+    pub value_bias: Option<[f32; 4]>,
 }
 
 /// One PreviewSurface input fed by a UsdUVTexture: the input name
 /// ("diffuseColor", "normal", ...), the frontend-fetchable file path (or
 /// the unresolved spelling when the file is missing — never an error), and
-/// the primvar its UVs come from.
+/// the primvar its UVs come from. `wrap_s`/`wrap_t` are the authored
+/// inputs:wrapS/wrapT tokens (None = unauthored, i.e. "useMetadata");
+/// `uv_transform` is the UsdTransform2d in the `st` chain, when any;
+/// `value_scale`/`value_bias` are the authored inputs:scale/inputs:bias.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct TextureInput {
     pub input: String,
     pub file_path: String,
     pub st_primvar: String,
+    pub wrap_s: Option<String>,
+    pub wrap_t: Option<String>,
+    pub uv_transform: Option<UvTransform>,
+    pub value_scale: Option<[f32; 4]>,
+    pub value_bias: Option<[f32; 4]>,
 }
 
 fn err(error: impl std::fmt::Display) -> String {
@@ -156,6 +184,11 @@ fn preview_surface(shader: &Shader) -> Result<PreviewSurface, String> {
             normal = Some(TextureInfo {
                 file_path: entry.file_path.clone(),
                 st_primvar: entry.st_primvar.clone(),
+                wrap_s: entry.wrap_s.clone(),
+                wrap_t: entry.wrap_t.clone(),
+                uv_transform: entry.uv_transform.clone(),
+                value_scale: entry.value_scale,
+                value_bias: entry.value_bias,
             });
         }
         textures.push(entry);
@@ -193,6 +226,11 @@ fn texture_input(input: &Input, texture: &UVTexture) -> Result<Option<TextureInp
         input: input.base_name().to_string(),
         file_path,
         st_primvar: st_primvar(texture)?,
+        wrap_s: wrap_token(&texture.wrap_s_input())?,
+        wrap_t: wrap_token(&texture.wrap_t_input())?,
+        uv_transform: uv_transform(texture)?,
+        value_scale: float4(&texture.scale_input())?,
+        value_bias: float4(&texture.bias_input())?,
     }))
 }
 
@@ -212,8 +250,34 @@ fn texture_file(input: &Input) -> Result<Option<String>, String> {
 }
 
 /// The primvar the texture's `inputs:st` connection reads (the primvar
-/// reader's `inputs:varname`), "st" when absent.
+/// reader's `inputs:varname`), "st" when absent. A UsdTransform2d between
+/// the texture and the reader is hopped via its `inputs:in`.
 fn st_primvar(texture: &UVTexture) -> Result<String, String> {
+    let Some(mut shader) = st_source(texture)? else {
+        return Ok("st".to_string());
+    };
+    if Transform2d::from_shader(shader.clone()).map_err(err)?.is_some() {
+        let Some(source) = shader
+            .input("in")
+            .connected_sources()
+            .map_err(err)?
+            .sources()
+            .first()
+            .cloned()
+        else {
+            return Ok("st".to_string());
+        };
+        shader = Shader::from_prim_unchecked(source.source_prim().clone());
+    }
+    Ok(match authored(&shader.input("varname"))? {
+        Some(Value::Token(name)) => name.as_str().to_string(),
+        Some(Value::String(name)) => name,
+        _ => "st".to_string(),
+    })
+}
+
+/// The shader the texture's `inputs:st` connects to.
+fn st_source(texture: &UVTexture) -> Result<Option<Shader>, String> {
     let Some(source) = texture
         .st_input()
         .connected_sources()
@@ -222,13 +286,50 @@ fn st_primvar(texture: &UVTexture) -> Result<String, String> {
         .first()
         .cloned()
     else {
-        return Ok("st".to_string());
+        return Ok(None);
     };
-    let reader = Shader::from_prim_unchecked(source.source_prim().clone());
-    Ok(match authored(&reader.input("varname"))? {
-        Some(Value::Token(name)) => name.as_str().to_string(),
-        Some(Value::String(name)) => name,
-        _ => "st".to_string(),
+    Ok(Some(Shader::from_prim_unchecked(source.source_prim().clone())))
+}
+
+/// The UsdTransform2d in the texture's `st` chain: its scale/translation/
+/// rotation, falling back to the node definition's identity values
+/// ((1,1), (0,0), 0) when unauthored. None when `st` is not connected to a
+/// UsdTransform2d at all.
+fn uv_transform(texture: &UVTexture) -> Result<Option<UvTransform>, String> {
+    let Some(shader) = st_source(texture)? else {
+        return Ok(None);
+    };
+    let Some(transform) = Transform2d::from_shader(shader).map_err(err)? else {
+        return Ok(None);
+    };
+    let scale = transform.scale().map_err(err)?.unwrap_or_else(|| gf::vec2f(1.0, 1.0));
+    let translation = transform
+        .translation()
+        .map_err(err)?
+        .unwrap_or_else(|| gf::vec2f(0.0, 0.0));
+    Ok(Some(UvTransform {
+        scale: [scale[0], scale[1]],
+        translation: [translation[0], translation[1]],
+        rotation: transform.rotation().map_err(err)?.unwrap_or(0.0),
+    }))
+}
+
+/// An authored wrap token ("repeat", "clamp", "mirror", "black",
+/// "useMetadata"), None when unauthored.
+fn wrap_token(input: &Input) -> Result<Option<String>, String> {
+    Ok(match authored(input)? {
+        Some(Value::Token(token)) => Some(token.as_str().to_string()),
+        Some(Value::String(token)) => Some(token),
+        _ => None,
+    })
+}
+
+/// An authored float4 input's components; absent or other-typed values are
+/// None.
+fn float4(input: &Input) -> Result<Option<[f32; 4]>, String> {
+    Ok(match authored(input)? {
+        Some(Value::Vec4f(v)) => Some([v[0], v[1], v[2], v[3]]),
+        _ => None,
     })
 }
 

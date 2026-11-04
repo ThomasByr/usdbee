@@ -176,4 +176,112 @@ describe("convertMaterial", () => {
     const opaque = convertMaterial({ name: "Glass", surface: surface({ opacity: 1.0 }) }, null, loader);
     expect(opaque.transparent).toBe(false);
   });
+
+  it("maps wrap tokens to three.js wrapping modes", () => {
+    const convert = (over: Partial<TextureInput> = {}) =>
+      convertMaterial(
+        { name: "Wrapped", surface: surface({ textures: [textureInput(over)] }) },
+        null,
+        loader,
+      ).map!;
+
+    expect(convert({ wrap_s: "repeat" }).wrapS).toBe(THREE.RepeatWrapping);
+    expect(convert({ wrap_s: "clamp" }).wrapS).toBe(THREE.ClampToEdgeWrapping);
+    expect(convert({ wrap_s: "mirror" }).wrapS).toBe(THREE.MirroredRepeatWrapping);
+    // "black" and unauthored fall back to repeat (three.js cannot do black borders)
+    expect(convert({ wrap_s: "black" }).wrapS).toBe(THREE.RepeatWrapping);
+    expect(convert().wrapS).toBe(THREE.RepeatWrapping);
+    expect(convert({ wrap_t: "mirror" }).wrapT).toBe(THREE.MirroredRepeatWrapping);
+  });
+
+  it("applies the UsdTransform2d chain to the texture", () => {
+    const material = convertMaterial(
+      {
+        name: "Carbon",
+        surface: surface({
+          textures: [
+            textureInput({
+              uv_transform: { scale: [6, 10], translation: [0.25, -0.5], rotation: 90 },
+            }),
+          ],
+        }),
+      },
+      null,
+      loader,
+    );
+
+    const map = material.map!;
+    expect(map.repeat.x).toBe(6);
+    expect(map.repeat.y).toBe(10);
+    expect(map.offset.x).toBe(0.25);
+    expect(map.offset.y).toBe(-0.5);
+    expect(map.center.x).toBe(0);
+    expect(map.center.y).toBe(0);
+    // USD rotates CCW, three.js clockwise — the sign flips
+    expect(map.rotation).toBeCloseTo(-Math.PI / 2);
+  });
+
+  it("gives shared-file slots with different transforms distinct textures", () => {
+    const material = convertMaterial(
+      {
+        name: "Shared",
+        surface: surface({
+          textures: [
+            textureInput({ uv_transform: { scale: [15, 15], translation: [0, 0], rotation: 0 } }),
+            textureInput({
+              input: "normal",
+              uv_transform: { scale: [4, 4], translation: [0, 0], rotation: 0 },
+            }),
+          ],
+        }),
+      },
+      null,
+      loader,
+    );
+
+    expect(material.map).not.toBe(material.normalMap);
+    expect(material.map!.repeat.x).toBe(15);
+    expect(material.normalMap!.repeat.x).toBe(4);
+  });
+
+  it("treats normal-map value scale/bias as a no-op", () => {
+    const material = convertMaterial(
+      {
+        name: "Tire",
+        surface: surface({
+          textures: [
+            textureInput({
+              input: "normal",
+              value_scale: [2, 2, 2, 1],
+              value_bias: [-1, -1, -1, 0],
+            }),
+          ],
+        }),
+      },
+      null,
+      loader,
+    );
+
+    // three.js already performs the 0..1 -> -1..1 decode in-shader
+    expect(material.normalScale!.x).toBe(1);
+    expect(material.normalScale!.y).toBe(1);
+    expect(material.color.r).toBeCloseTo(1.0, 5);
+  });
+
+  it("folds a diffuseColor value scale into the base color", () => {
+    const material = convertMaterial(
+      {
+        name: "InnerTire",
+        surface: surface({
+          textures: [textureInput({ value_scale: [0.44530618, 0.44530618, 0.44530618, 1] })],
+        }),
+      },
+      null,
+      loader,
+    );
+
+    expect(material.color.r).toBeCloseTo(0.44530618);
+    expect(material.color.g).toBeCloseTo(0.44530618);
+    expect(material.color.b).toBeCloseTo(0.44530618);
+  });
 });
