@@ -85,6 +85,9 @@ pub(crate) type SkelAnimMemo = HashMap<(sdf::Path, Option<sdf::Path>), bool>;
 /// animation source, or with a broken binding — the manifest only flags
 /// prims whose geometry playback must refetch, and tessellation reports
 /// full binding errors.
+///
+/// shortcut: blend-shape-only animations don't set geometry_animated, when
+/// blend shapes move into the supported scope.
 pub(crate) fn skel_joint_transforms_vary(
     prim: &Prim,
     memo: &mut SkelAnimMemo,

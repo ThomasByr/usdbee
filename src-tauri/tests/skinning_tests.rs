@@ -216,6 +216,15 @@ fn skel_animated_mesh_is_geometry_animated() {
         assert!(node.animated, "{path} carries a motion signal");
     }
 
+    // The rigid binding renders authored (unskinned) but is still
+    // flagged: the over-flag is conservative, and a future rigid fix
+    // must flip this assert.
+    let rigid = expect(&nodes, "/Rig/Hose_rigid");
+    assert!(
+        rigid.geometry_animated,
+        "rigid binding is over-flagged until rigid skinning is supported"
+    );
+
     // A plain static mesh in the same rig stays unflagged.
     let plain = expect(&nodes, "/Rig/Plain");
     assert!(!plain.geometry_animated, "static mesh is not skel-animated");
