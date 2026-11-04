@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use usdbee_lib::skinning::skin_mesh;
-use usdbee_lib::stage::open_stage;
+use usdbee_lib::stage::{open_stage, serialize_render_manifest, RenderNode};
 use usdbee_lib::tessellation::{tessellate_prim, MeshData};
 
 use openusd::sdf;
@@ -178,4 +178,55 @@ fn broken_influence_lengths_error() {
     let mesh = tessellate(&stage, "/Rig/Hose_broken", 0.0);
     let expected: Vec<[f32; 3]> = authored.iter().map(|p| [p.x, p.y, p.z]).collect();
     assert_eq!(mesh.positions, expected);
+}
+
+// Task 3: the manifest flags skel-bound geometry whose animation source
+// drives its points as geometry_animated, so playback refetches it.
+
+fn find<'a>(nodes: &'a [RenderNode], path: &str) -> Option<&'a RenderNode> {
+    nodes
+        .iter()
+        .find(|n| n.path == path)
+        .or_else(|| nodes.iter().find_map(|n| find(&n.children, path)))
+}
+
+fn expect<'a>(nodes: &'a [RenderNode], path: &str) -> &'a RenderNode {
+    find(nodes, path).unwrap_or_else(|| panic!("expected prim {} in manifest", path))
+}
+
+#[test]
+fn skel_animated_mesh_is_geometry_animated() {
+    let (stage, info) = open_stage(&fixture("skinned.usda")).expect("skinned stage should open");
+    assert!(
+        info.composition_errors.is_empty(),
+        "composition errors: {:?}",
+        info.composition_errors
+    );
+    let nodes = serialize_render_manifest(&stage, Some(0.0)).expect("manifest should serialize");
+
+    // Skeleton-bound meshes under a time-varying animation source: the
+    // playback step must refetch their geometry every frame.
+    for path in [
+        "/Rig/Hose_direct",
+        "/Rig/Offset/Hose_offset",
+        "/Rig/Hose_dual",
+    ] {
+        let node = expect(&nodes, path);
+        assert!(node.geometry_animated, "{path} is skel-animated");
+        assert!(node.animated, "{path} carries a motion signal");
+    }
+
+    // A plain static mesh in the same rig stays unflagged.
+    let plain = expect(&nodes, "/Rig/Plain");
+    assert!(!plain.geometry_animated, "static mesh is not skel-animated");
+    assert!(!plain.animated, "static mesh carries no motion signal");
+
+    // A binding without an animation source poses at rest: its geometry
+    // is load-time-stable even though it is skel-bound.
+    let rest = expect(&nodes, "/Rig2/Hose_rest");
+    assert!(
+        !rest.geometry_animated,
+        "skel-bound rest pose is not time-varying"
+    );
+    assert!(!rest.animated, "rest pose carries no motion signal");
 }

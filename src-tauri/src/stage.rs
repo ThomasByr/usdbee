@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fetcher::get_usdbee_cache_dir;
 use crate::materials::{material_info, MaterialInfo};
+use crate::skinning::{skel_joint_transforms_vary, SkelAnimMemo};
 use crate::tessellation::{pack_geometry, tessellate_prim, MeshData};
 use crate::values::{
     local_transform, serialize_details, value_payload_to_sdf, PrimDetails, ValuePayload,
@@ -2306,11 +2307,18 @@ impl ManifestSkeleton {
             facts: HashMap::new(),
             root_children: Vec::new(),
         };
+        let mut skel_memo = SkelAnimMemo::new();
         let mut pending: Vec<sdf::Path> = Vec::new();
         let pseudo_root = stage
             .prim(sdf::Path::abs_root())
             .map_err(|e| format!("invalid pseudo-root path: {}", e))?;
-        skeleton.root_children = build_facts(stage, &pseudo_root, &mut skeleton, &mut pending)?;
+        skeleton.root_children = build_facts(
+            stage,
+            &pseudo_root,
+            &mut skeleton,
+            &mut pending,
+            &mut skel_memo,
+        )?;
         // Native prototype roots (and any prototype target outside the
         // walked tree) only exist as prims once their instances composed,
         // which the walk above just did — build their facts now, feeding
@@ -2327,7 +2335,7 @@ impl ManifestSkeleton {
             if !prim.is_valid().map_err(stage_err)? {
                 continue;
             }
-            build_facts(stage, &prim, &mut skeleton, &mut pending)?;
+            build_facts(stage, &prim, &mut skeleton, &mut pending, &mut skel_memo)?;
         }
         Ok(skeleton)
     }
@@ -2342,6 +2350,7 @@ fn build_facts(
     prim: &openusd::usd::Prim,
     skeleton: &mut ManifestSkeleton,
     pending: &mut Vec<sdf::Path>,
+    skel_memo: &mut SkelAnimMemo,
 ) -> Result<Vec<String>, String> {
     let type_name = prim
         .type_name()
@@ -2379,7 +2388,7 @@ fn build_facts(
     if matches!(kind, SkeletonKind::Plain) {
         for child in visible_children(prim)? {
             let child_key = child.path().to_string();
-            build_facts(stage, &child, skeleton, pending)?;
+            build_facts(stage, &child, skeleton, pending, skel_memo)?;
             children.push(child_key);
         }
     }
@@ -2394,7 +2403,7 @@ fn build_facts(
             ),
         ),
     };
-    let (self_moves, self_deforms) = samples_scene_motion(prim, renders)?;
+    let (self_moves, self_deforms) = samples_scene_motion(prim, renders, skel_memo)?;
 
     let path = prim.path().to_string();
     skeleton.facts.insert(
@@ -2475,6 +2484,7 @@ fn renders_geometry(type_name: &str) -> bool {
 fn samples_scene_motion(
     prim: &openusd::usd::Prim,
     renders_geometry: bool,
+    skel_memo: &mut SkelAnimMemo,
 ) -> Result<(bool, bool), String> {
     let is_instancer = prim
         .type_name()
@@ -2482,12 +2492,20 @@ fn samples_scene_motion(
         .is_some_and(|token| token == "PointInstancer");
     let mut transform = false;
     let mut geometry = false;
+    // UsdSkel influence membership: a skel-bound geometry prim's points
+    // can be driven by the bound animation even with no sampled primvar
+    // (the only authored-name check the non-skel budget allows; the
+    // resolution below runs solely on the rare hit).
+    let mut skel_influences = false;
     // authored_property_names (composed authored names, no schema-declared
     // expansion) is the enumeration the manifest walk can afford — measured
     // ~27x cheaper than attributes() on Kitchen_set_instanced, and a
     // schema-declared yet unauthored attribute can never carry time samples.
     for name in prim.authored_property_names().map_err(stage_err)? {
         let name = name.as_str();
+        if renders_geometry && !skel_influences && name == "primvars:skel:jointIndices" {
+            skel_influences = true;
+        }
         let moves_transform = name.starts_with("xformOp:")
             || (is_instancer
                 && matches!(
@@ -2516,6 +2534,19 @@ fn samples_scene_motion(
         }
         if deforms_geometry {
             geometry = true;
+        }
+    }
+    if skel_influences {
+        // A broken skel binding fails soft here (mirrors direct_material):
+        // the flag only controls refetching, and tessellation reports the
+        // binding error when the geometry is actually fetched.
+        match skel_joint_transforms_vary(prim, skel_memo) {
+            Ok(varying) => geometry |= varying,
+            Err(error) => eprintln!(
+                "usdbee: ignoring skel binding at {}: {}",
+                prim.path(),
+                error
+            ),
         }
     }
     Ok((transform, geometry))

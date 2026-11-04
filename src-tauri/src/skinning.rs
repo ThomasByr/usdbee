@@ -19,6 +19,8 @@
 //! failure surfaces as a readable `Err` (the tessellation caller then
 //! logs and renders the prim unskinned).
 
+use std::collections::HashMap;
+
 use openusd::gf::{Matrix4d, Vec3f};
 use openusd::sdf;
 use openusd::usd::{Prim, SchemaBase, TimeCode};
@@ -60,6 +62,64 @@ fn inherited_rel(prim: &Prim, name: &str) -> Result<Option<sdf::Path>, String> {
         };
         current = parent;
     }
+}
+
+/// The animation source bound to `prim`'s skinning binding, with pxr
+/// precedence: a source authored on the SKELETON's chain wins over one
+/// inherited from the mesh's own ancestors (OpenUSD#3532). `None` when
+/// neither chain authors one (rest-pose fallback).
+fn bound_animation_source(prim: &Prim, skeleton: &Skeleton) -> Result<Option<sdf::Path>, String> {
+    Ok(inherited_rel(skeleton.prim(), "skel:animationSource")?
+        .or(inherited_rel(prim, "skel:animationSource")?))
+}
+
+/// Per-walk cache for the manifest's skel motion scan: the
+/// time-varying answer for one (skeleton, animation source) pair, shared
+/// by every mesh bound to the same pair during one skeleton build.
+pub(crate) type SkelAnimMemo = HashMap<(sdf::Path, Option<sdf::Path>), bool>;
+
+/// Whether `prim`'s UsdSkel binding drives its points over time: the
+/// bound animation's joint transforms might be time-varying. Resolution
+/// reuses the skinning path's helpers (including the pxr precedence
+/// above); `Ok(false)` for prims without a skeleton, without an
+/// animation source, or with a broken binding — the manifest only flags
+/// prims whose geometry playback must refetch, and tessellation reports
+/// full binding errors.
+pub(crate) fn skel_joint_transforms_vary(
+    prim: &Prim,
+    memo: &mut SkelAnimMemo,
+) -> Result<bool, String> {
+    let path = prim.path().to_string();
+    let stage = prim.stage();
+    let Some(skeleton_path) = inherited_rel(prim, "skel:skeleton")? else {
+        return Ok(false);
+    };
+    let Some(skeleton) = Skeleton::get(stage, skeleton_path.clone()).map_err(|e| err(&path, e))?
+    else {
+        return Ok(false);
+    };
+    let anim_source = bound_animation_source(prim, &skeleton)?;
+    let key = (skeleton_path, anim_source.clone());
+    if let Some(varying) = memo.get(&key) {
+        return Ok(*varying);
+    }
+    let varying = match anim_source {
+        None => false,
+        Some(anim_path) => {
+            let Some(animation) = Animation::get(stage, anim_path).map_err(|e| err(&path, e))?
+            else {
+                return Ok(false);
+            };
+            let Some(query) = SkelAnimQuery::new(animation).map_err(|e| err(&path, e))? else {
+                return Ok(false);
+            };
+            query
+                .joint_transforms_might_be_time_varying()
+                .map_err(|e| err(&path, e))?
+        }
+    };
+    memo.insert(key, varying);
+    Ok(varying)
 }
 
 /// Skin `points` (and, when passed, per-vertex `normals`) of `prim` at
@@ -117,8 +177,7 @@ pub fn skin_mesh(
     // from the mesh's ancestors (pxr precedence, OpenUSD#3532); both reads
     // are readable errors — a broken source relationship never silently
     // degrades to a rest-pose render.
-    let anim_source = inherited_rel(skeleton.prim(), "skel:animationSource")?
-        .or(inherited_rel(prim, "skel:animationSource")?);
+    let anim_source = bound_animation_source(prim, &skeleton)?;
     let local_xforms = match anim_source {
         Some(anim_path) => {
             let Some(animation) =
