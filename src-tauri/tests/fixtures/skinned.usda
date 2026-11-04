@@ -1,0 +1,96 @@
+#usda 1.0
+(
+    startTimeCode = 0
+    endTimeCode = 10
+    timeCodesPerSecond = 24
+)
+
+def SkelRoot "Rig"
+{
+    def Skeleton "Skel" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        uniform token[] joints = ["A", "A/B", "A/B/C"]
+        uniform matrix4d[] bindTransforms = [
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) ),
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
+        ]
+        uniform matrix4d[] restTransforms = [
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) ),
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+        ]
+        prepend rel skel:animationSource = </Rig/Anims/Swing>
+    }
+
+    def Scope "Anims"
+    {
+        def SkelAnimation "Swing"
+        {
+            uniform token[] joints = ["A", "A/B", "A/B/C"]
+            float3[] translations.timeSamples = {
+                0: [(0, 0, 0), (2, 0, 0), (2, 0, 0)],
+                10: [(0, 0, 0), (2, 0, 0), (2, 0, 1)]
+            }
+            quatf[] rotations.timeSamples = {
+                0: [(1, 0, 0, 0), (1, 0, 0, 0), (1, 0, 0, 0)],
+                10: [(1, 0, 0, 0), (1, 0, 0, 0), (0.7071067811865476, 0, 0, 0.7071067811865476)]
+            }
+            half3[] scales = [(1, 1, 1), (1, 1, 1), (1, 1, 1)]
+        }
+    }
+
+    def Mesh "Hose_direct" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(2, 0, 0), (4, 0, 0), (4, 0, 0)]
+        int[] primvars:skel:jointIndices = [0, 1, 2] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        float[] primvars:skel:jointWeights = [1, 1, 1] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        prepend rel skel:skeleton = </Rig/Skel>
+    }
+
+    def Xform "Offset"
+    {
+        double3 xformOp:translate = (10, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Mesh "Hose_offset" (
+            prepend apiSchemas = ["SkelBindingAPI"]
+        )
+        {
+            double3 xformOp:translate = (0, 1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            matrix4d primvars:skel:geomBindTransform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (10, 1, 0, 1) )
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [(-8, 0, 0), (-6, 0, 0), (-6, 0, 0)]
+            int[] primvars:skel:jointIndices = [0, 1, 2] (
+                elementSize = 1
+                interpolation = "vertex"
+            )
+            float[] primvars:skel:jointWeights = [1, 1, 1] (
+                elementSize = 1
+                interpolation = "vertex"
+            )
+            prepend rel skel:skeleton = </Rig/Skel>
+        }
+    }
+
+    def Mesh "Plain"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    }
+}
