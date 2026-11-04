@@ -5,12 +5,13 @@
 
 import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three";
-import { buildScene, disposeScene, toBufferGeometry } from "./sceneBuilder";
+import { applyPackedGeometryInPlace, buildScene, disposeScene, isLayoutCompatible, toBufferGeometry } from "./sceneBuilder";
 import * as materialConverter from "./materialConverter";
 import type { RenderNode } from "../stage/types";
 
 // A valid packed geometry payload for one triangle (layout: geometryDecoder).
-function packedGeometry(): ArrayBuffer {
+// `y` parameterizes the third vertex's height so tests can tell payloads apart.
+function packedGeometry(y = 1): ArrayBuffer {
   const buffer = new ArrayBuffer(20 + 9 * 4 + 3 * 4);
   const view = new DataView(buffer);
   view.setUint32(0, 0x55534442, true); // magic
@@ -18,7 +19,7 @@ function packedGeometry(): ArrayBuffer {
   view.setUint32(8, 3, true); // vertex_count
   view.setUint32(12, 3, true); // index_count
   view.setUint32(16, 0, true); // flags
-  new Float32Array(buffer, 20, 9).set([-1, 0, 0, 1, 0, 0, 0, 1, 0]);
+  new Float32Array(buffer, 20, 9).set([-1, 0, 0, 1, 0, 0, 0, y, 0]);
   new Uint32Array(buffer, 20 + 36, 3).set([0, 1, 2]);
   return buffer;
 }
@@ -499,5 +500,74 @@ describe("buildScene", () => {
     const material = convertSpy.mock.results[0].value;
     expect(vi.mocked(material.dispose)).toHaveBeenCalledOnce();
     expect(textureDispose).toHaveBeenCalledOnce();
+  });
+});
+
+// One triangle payload with a custom vertex/index count (positions zeroed,
+// indices sequential) — layout differs from packedGeometry's 3/3.
+function packedGeometryCounts(vertexCount: number, indexCount: number, flags = 0): ArrayBuffer {
+  const buffer = new ArrayBuffer(20 + vertexCount * 9 * 4 + indexCount * 4);
+  const view = new DataView(buffer);
+  view.setUint32(0, 0x55534442, true); // magic
+  view.setUint32(4, 1, true); // version
+  view.setUint32(8, vertexCount, true);
+  view.setUint32(12, indexCount, true);
+  view.setUint32(16, flags, true);
+  new Uint32Array(buffer, 20 + vertexCount * 12, indexCount).set(
+    Array.from({ length: indexCount }, (_, i) => i % vertexCount),
+  );
+  return buffer;
+}
+
+describe("applyPackedGeometryInPlace", () => {
+  it("writes a compatible payload into the same geometry and index attribute", () => {
+    const geometry = toBufferGeometry(packedGeometry());
+    const position = geometry.getAttribute("position") as THREE.BufferAttribute;
+    const index = geometry.getIndex()!;
+    const positionVersion = position.version;
+    const indexVersion = index.version;
+
+    expect(applyPackedGeometryInPlace(geometry, packedGeometry(5))).toBe(true);
+
+    expect(geometry.getAttribute("position")).toBe(position);
+    expect(geometry.getIndex()).toBe(index);
+    expect(position.getY(2)).toBe(5);
+    // needsUpdate is setter-only in this three version: setting it bumps
+    // the attribute version, which is what signals the GPU re-upload.
+    expect(position.version).toBe(positionVersion + 1);
+    expect(index.version).toBe(indexVersion + 1);
+    // The sphere reflects the NEW positions: center y is the midpoint of
+    // the y extents [0, 5].
+    expect(geometry.boundingSphere!.center.y).toBe(2.5);
+  });
+
+  it("rejects a changed vertex count", () => {
+    const geometry = toBufferGeometry(packedGeometry());
+    const positionVersion = (geometry.getAttribute("position") as THREE.BufferAttribute).version;
+
+    expect(applyPackedGeometryInPlace(geometry, packedGeometryCounts(4, 3))).toBe(false);
+    expect((geometry.getAttribute("position") as THREE.BufferAttribute).version).toBe(positionVersion);
+  });
+
+  it("rejects a changed index count", () => {
+    const geometry = toBufferGeometry(packedGeometry());
+    expect(applyPackedGeometryInPlace(geometry, packedGeometryCounts(3, 6))).toBe(false);
+  });
+
+  it("rejects an appearing attribute", () => {
+    const geometry = toBufferGeometry(packedGeometry());
+    expect(applyPackedGeometryInPlace(geometry, packedColoredGeometry())).toBe(false);
+  });
+
+  it("rejects a disappearing attribute", () => {
+    const geometry = toBufferGeometry(packedColoredGeometry());
+    expect(applyPackedGeometryInPlace(geometry, packedGeometry())).toBe(false);
+  });
+
+  it("isLayoutCompatible is pure: no mutation on rejection", () => {
+    const geometry = toBufferGeometry(packedGeometry());
+    const decoded = { positions: new Float32Array(12), indices: new Uint32Array(3), normals: null, uvs: null, colors: null };
+    expect(isLayoutCompatible(geometry, decoded)).toBe(false);
+    expect(geometry.getAttribute("position").count).toBe(3);
   });
 });

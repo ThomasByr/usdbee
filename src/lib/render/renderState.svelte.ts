@@ -15,6 +15,7 @@ import type { MaterialInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
 import { decodeGeometryBatch } from "./geometryDecoder";
 import {
+  applyPackedGeometryInPlace,
   applyTransform,
   buildScene,
   disposeScene,
@@ -222,13 +223,17 @@ async function updateNodes(
             const frame = pre !== undefined ? pre : await fetchers.getGeometry(node.path, time);
             if (isStale()) return;
             if (frame) {
-              const geometry = toBufferGeometry(frame);
-              if (isStale()) {
-                geometry.dispose();
-                return;
+              // Layout-compatible frames update the live geometry in
+              // place (same GPU buffers); anything else recreates.
+              if (!applyPackedGeometryInPlace(drawable.geometry, frame)) {
+                const geometry = toBufferGeometry(frame);
+                if (isStale()) {
+                  geometry.dispose();
+                  return;
+                }
+                drawable.geometry.dispose();
+                drawable.geometry = geometry;
               }
-              drawable.geometry.dispose();
-              drawable.geometry = geometry;
             }
           } catch (e) {
             console.warn(`usdbee: keeping last geometry at ${node.path}:`, e);

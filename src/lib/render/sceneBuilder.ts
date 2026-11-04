@@ -9,7 +9,7 @@
 // Object3D so selection and branch toggles still find it.
 import * as THREE from "three";
 import type { MaterialInfo, RenderNode } from "../stage/types";
-import { decodeGeometry } from "./geometryDecoder";
+import { decodeGeometry, type DecodedGeometry } from "./geometryDecoder";
 import { convertMaterial, type MaterialTextureLoader } from "./materialConverter";
 
 export interface FallbackDependency {
@@ -60,6 +60,68 @@ export function toBufferGeometry(buffer: ArrayBuffer): THREE.BufferGeometry {
   if (decoded.colors) geometry.setAttribute("color", new THREE.BufferAttribute(decoded.colors, 3));
   geometry.setIndex(new THREE.BufferAttribute(decoded.indices, 1));
   return geometry;
+}
+
+// In-place update (steady-state playback): when a fetched frame's layout
+// matches the live geometry, write the payload INTO the existing
+// BufferAttributes (array mutation + needsUpdate) — no reallocation, no
+// GPU buffer churn. Returns false when incompatible; the caller falls
+// back to full recreation.
+export function applyPackedGeometryInPlace(
+  geometry: THREE.BufferGeometry,
+  buffer: ArrayBuffer | Uint8Array,
+): boolean {
+  const decoded = decodeGeometry(buffer);
+  if (!isLayoutCompatible(geometry, decoded)) return false;
+  // Attributes are never interleaved here (toBufferGeometry builds plain
+  // BufferAttributes); getAttribute's union type needs the cast.
+  const attr = (name: string) => geometry.getAttribute(name) as THREE.BufferAttribute;
+  const write = (attribute: THREE.BufferAttribute, array: Float32Array | Uint32Array) => {
+    (attribute.array as typeof array).set(array);
+    attribute.needsUpdate = true;
+  };
+  write(attr("position"), decoded.positions);
+  if (decoded.normals) write(attr("normal"), decoded.normals);
+  if (decoded.uvs) write(attr("uv"), decoded.uvs);
+  if (decoded.colors) write(attr("color"), decoded.colors);
+  write(geometry.getIndex()!, decoded.indices); // same counts, values may differ
+  geometry.boundingBox = null; // stale bounds would mislead raycasts/framing
+  geometry.computeBoundingSphere();
+  return true;
+}
+
+// Compatible when vertex/index counts and the present attribute set match
+// (positions always; normals/uv/colors may come and go). The decoder always
+// yields Uint32 indices and toBufferGeometry always builds Uint32 index
+// attributes, so the index type is constant by construction. Exported for
+// tests.
+export function isLayoutCompatible(geometry: THREE.BufferGeometry, decoded: DecodedGeometry): boolean {
+  const position = geometry.getAttribute("position");
+  if (
+    !position ||
+    position.itemSize !== 3 ||
+    !(position.array instanceof Float32Array) ||
+    position.count !== decoded.positions.length / 3
+  )
+    return false;
+  const index = geometry.getIndex();
+  if (!index || !(index.array instanceof Uint32Array) || index.count !== decoded.indices.length)
+    return false;
+  const optional: [string, Float32Array | null, number][] = [
+    ["normal", decoded.normals, 3],
+    ["uv", decoded.uvs, 2],
+    ["color", decoded.colors, 3],
+  ];
+  for (const [name, array, itemSize] of optional) {
+    const attribute = geometry.getAttribute(name);
+    if (!array) {
+      if (attribute) return false; // attribute disappeared from the payload
+      continue;
+    }
+    if (!attribute || attribute.itemSize !== itemSize || attribute.count !== array.length / itemSize)
+      return false;
+  }
+  return true;
 }
 
 async function fetchGeometry(

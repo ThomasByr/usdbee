@@ -141,6 +141,22 @@ function packedGeometry(y = 1): ArrayBuffer {
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
+// A payload with a custom vertex/index count (positions zeroed, indices
+// sequential): layout-INcompatible with the default triangle frame.
+function packedGeometryCounts(vertexCount: number, indexCount: number): ArrayBuffer {
+  const buffer = new ArrayBuffer(20 + vertexCount * 9 * 4 + indexCount * 4);
+  const view = new DataView(buffer);
+  view.setUint32(0, 0x55534442, true);
+  view.setUint32(4, 1, true);
+  view.setUint32(8, vertexCount, true);
+  view.setUint32(12, indexCount, true);
+  view.setUint32(16, 0, true);
+  new Uint32Array(buffer, 20 + vertexCount * 12, indexCount).set(
+    Array.from({ length: indexCount }, (_, i) => i % vertexCount),
+  );
+  return buffer;
+}
+
 function translate(x: number): number[] {
   return [...IDENTITY.slice(0, 12), x, 0, 0, 1];
 }
@@ -179,8 +195,8 @@ function mockIpc(manifest: () => RenderNode[] | Promise<RenderNode[]>) {
 
 // One ok slot carrying the default triangle frame (geometryDecoder layout:
 // batch magic, version, count, then status/length/padded bytes per slot).
-function packedBatchGeometry(): ArrayBuffer {
-  const frame = new Uint8Array(packedGeometry());
+function packedBatchGeometry(y = 1): ArrayBuffer {
+  const frame = new Uint8Array(packedGeometry(y));
   const buffer = new ArrayBuffer(12 + 8 + ((frame.byteLength + 3) & ~3));
   const view = new DataView(buffer);
   view.setUint32(0, 0x55534247, true);
@@ -346,6 +362,66 @@ describe("renderState.setStageTime", () => {
 
     const wrapper = group.children.find((child) => child.name === "/Scene/Wobble");
     expect(wrapper!.matrix.elements[12]).toBe(3);
+  });
+
+  it("updates a layout-compatible animated geometry in place, same instance", async () => {
+    const wobble = node({
+      path: "/Scene/Wobble",
+      name: "Wobble",
+      type_name: "Mesh",
+      has_geometry: true,
+      animated: true,
+      geometry_animated: true,
+    });
+    const group = await loadScene(() => [wobble]);
+    const mesh = findMesh(group);
+    const geometry = mesh.geometry;
+    const position = geometry.getAttribute("position");
+    const index = geometry.getIndex()!;
+
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_animated_manifest") return [wobble];
+      if (cmd === "get_geometry_data") return packedGeometry(4);
+      if (cmd === "get_material_data") return { name: "Mat", surface: null };
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    await renderState.setStageTime(5);
+
+    // Steady-state playback keeps the same BufferGeometry (no realloc,
+    // no full re-upload) and writes the new positions into it.
+    expect(mesh.geometry).toBe(geometry);
+    expect(geometry.getAttribute("position")).toBe(position);
+    expect(geometry.getIndex()).toBe(index);
+    expect(position.getY(2)).toBe(4);
+    expect(geometry.boundingSphere!.center.y).toBe(2);
+  });
+
+  it("recreates and disposes the geometry when the payload layout changes", async () => {
+    const wobble = node({
+      path: "/Scene/Wobble",
+      name: "Wobble",
+      type_name: "Mesh",
+      has_geometry: true,
+      animated: true,
+      geometry_animated: true,
+    });
+    const group = await loadScene(() => [wobble]);
+    const mesh = findMesh(group);
+    const oldGeometry = mesh.geometry;
+    const disposeSpy = vi.spyOn(oldGeometry, "dispose");
+
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_animated_manifest") return [wobble];
+      if (cmd === "get_geometry_data") return packedGeometryCounts(4, 6);
+      if (cmd === "get_material_data") return { name: "Mat", surface: null };
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    await renderState.setStageTime(5);
+
+    expect(mesh.geometry).not.toBe(oldGeometry);
+    expect(mesh.geometry.getAttribute("position").count).toBe(4);
+    expect(mesh.geometry.getIndex()!.count).toBe(6);
+    expect(disposeSpy).toHaveBeenCalledOnce();
   });
 
   it("updates animated nodes from the delta and leaves static nodes untouched", async () => {
@@ -949,6 +1025,35 @@ describe("renderState.refreshAfterEdit", () => {
     const wrapper = group.children.find((child) => child.name === "/Scene/Shape");
     expect(wrapper!.matrix.elements[12]).toBe(5);
     expect(mesh.geometry.getAttribute("position").getY(2)).toBe(1);
+  });
+
+  it("patches an edited prim's geometry in place when the layout matches", async () => {
+    const shape = node({
+      path: "/Scene/Shape",
+      name: "Shape",
+      type_name: "Mesh",
+      has_geometry: true,
+    });
+    const group = await loadScene(() => [shape]);
+    const mesh = findMesh(group);
+    const geometry = mesh.geometry;
+    const index = geometry.getIndex()!;
+
+    // Edit-refresh flows through updateNodes too: a layout-compatible
+    // payload rewrites the live geometry instead of recreating it.
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_scene_manifest" || cmd === "get_animated_manifest") return [shape];
+      if (cmd === "get_time_codes") return [];
+      if (cmd === "get_geometry_batch") return packedBatchGeometry(6);
+      if (cmd === "get_material_data") return { name: "Mat", surface: null };
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    const rebuild = await renderState.refreshAfterEdit(["/Scene/Shape"]);
+
+    expect(rebuild).toBe(false);
+    expect(mesh.geometry).toBe(geometry);
+    expect(geometry.getAttribute("position").getY(2)).toBe(6);
+    expect(geometry.getIndex()).toBe(index);
   });
 
   it("requests a rebuild for material and shader edits outside the render manifest", async () => {
