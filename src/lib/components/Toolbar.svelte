@@ -177,10 +177,11 @@
   .top-toolbar {
     position: absolute;
     top: 10px;
-    left: 50%;
-    transform: translateX(-50%);
+    left: 10px;
+    right: 10px;
     display: flex;
     gap: 8px;
+    justify-content: center;
     background: var(--toolbar-bg);
     padding: 6px 12px;
     border-radius: 6px;
@@ -188,6 +189,10 @@
     z-index: 10;
     backdrop-filter: blur(4px);
     align-items: center;
+  }
+
+  .top-toolbar .tool-btn {
+    white-space: nowrap;
   }
 
   .gizmo-status {
