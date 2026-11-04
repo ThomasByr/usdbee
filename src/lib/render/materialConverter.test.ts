@@ -284,4 +284,40 @@ describe("convertMaterial", () => {
     expect(material.color.g).toBeCloseTo(0.44530618);
     expect(material.color.b).toBeCloseTo(0.44530618);
   });
+
+  it("applies the authored colorSpace regardless of slot", () => {
+    const convert = (over: Partial<TextureInput> = {}) =>
+      convertMaterial(
+        { name: "Bike", surface: surface({ textures: [textureInput(over)] }) },
+        null,
+        loader,
+      ).map!;
+
+    // the CarbonFrameBike marks diffuse maps raw — three.js must not decode them as sRGB
+    expect(convert({ color_space: "raw" }).colorSpace).toBe(THREE.NoColorSpace);
+    // an authored sRGB on a data slot also wins over the data-slot default
+    expect(
+      convertMaterial(
+        {
+          name: "Bike",
+          surface: surface({ textures: [textureInput({ input: "normal", color_space: "sRGB" })] }),
+        },
+        null,
+        loader,
+      ).normalMap!.colorSpace,
+    ).toBe(THREE.SRGBColorSpace);
+  });
+
+  it("picks the per-slot colorSpace default for unauthored sourceColorSpace", () => {
+    const convert = (over: Partial<TextureInput> = {}) =>
+      convertMaterial(
+        { name: "Auto", surface: surface({ textures: [textureInput(over)] }) },
+        null,
+        loader,
+      );
+
+    expect(convert({}).map!.colorSpace).toBe(THREE.SRGBColorSpace);
+    expect(convert({ input: "normal" }).normalMap!.colorSpace).toBe(THREE.NoColorSpace);
+    expect(convert({ input: "roughness" }).roughnessMap!.colorSpace).toBe(THREE.NoColorSpace);
+  });
 });

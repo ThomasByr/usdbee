@@ -48,6 +48,7 @@ def Xform "World"
                 asset inputs:file = @./checker.png@
                 float4 inputs:bias = (-1, -1, -1, 0)
                 float4 inputs:scale = (2, 2, 2, 1)
+                token inputs:sourceColorSpace = "raw"
                 float2 inputs:st.connect = </World/Looks/Tiled/UvTransform2d.outputs:result>
                 token inputs:wrapS = "mirror"
                 token inputs:wrapT = "clamp"

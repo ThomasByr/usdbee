@@ -65,6 +65,7 @@ function applyTextures(
     if (loaded) {
       loaded.wrapS = wrapMode(texture.wrap_s);
       loaded.wrapT = wrapMode(texture.wrap_t);
+      loaded.colorSpace = colorSpace(texture.color_space, slot);
       applyUvTransform(loaded, texture.uv_transform);
       applyValueScale(material, slot, texture);
       material[slot] = loaded;
@@ -79,6 +80,16 @@ function wrapMode(token: string | null | undefined): THREE.Wrapping {
   if (token === "clamp") return THREE.ClampToEdgeWrapping;
   if (token === "mirror") return THREE.MirroredRepeatWrapping;
   return THREE.RepeatWrapping; // "repeat", "black", "useMetadata", unauthored
+}
+
+// Authored sourceColorSpace always wins; unauthored "auto" picks by slot:
+// the one narrow conditional below is the whole per-slot default table —
+// color slots carry sRGB-encoded files, data slots (and any future slot
+// until listed here) carry linear data; add e.g. emissiveMap there.
+function colorSpace(token: string | null | undefined, slot: string): THREE.ColorSpace {
+  if (token === "raw") return THREE.NoColorSpace;
+  if (token === "sRGB") return THREE.SRGBColorSpace;
+  return slot === "map" ? THREE.SRGBColorSpace : THREE.NoColorSpace; // unauthored "auto"
 }
 
 // USD's UsdTransform2d composes `result = in * scale * rotate + translation`

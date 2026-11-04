@@ -130,6 +130,7 @@ export interface TextureInfo {
   uv_transform?: UvTransform | null;
   value_scale?: number[] | null;
   value_bias?: number[] | null;
+  color_space?: string | null;
 }
 
 // Rust materials.rs::TextureInput — one PreviewSurface input fed by a
@@ -144,6 +145,7 @@ export interface TextureInput {
   uv_transform?: UvTransform | null;
   value_scale?: number[] | null;
   value_bias?: number[] | null;
+  color_space?: string | null;
 }
 
 // Rust materials.rs::PreviewSurface — serialized UsdPreviewSurface channels.

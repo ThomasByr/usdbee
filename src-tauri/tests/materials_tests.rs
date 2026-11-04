@@ -291,6 +291,7 @@ fn transform2d_chain_wrap_tokens_and_value_scale_reach_the_payload() {
     assert_eq!(albedo.st_primvar, "uv", "the reader sits behind the Transform2d");
     assert_eq!(albedo.wrap_s.as_deref(), Some("mirror"));
     assert_eq!(albedo.wrap_t.as_deref(), Some("clamp"));
+    assert_eq!(albedo.color_space.as_deref(), Some("raw"));
     assert_eq!(albedo.value_scale, Some([2.0, 2.0, 2.0, 1.0]));
     assert_eq!(albedo.value_bias, Some([-1.0, -1.0, -1.0, 0.0]));
     assert_eq!(
@@ -328,6 +329,7 @@ fn unauthored_wrap_transform_and_scale_default_to_identity() {
     let texture = &surface.textures[0];
     assert_eq!(texture.wrap_s, None, "unauthored wrapS stays None");
     assert_eq!(texture.wrap_t, None);
+    assert_eq!(texture.color_space, None, "unauthored sourceColorSpace stays None");
     assert_eq!(texture.uv_transform, None, "no st connection means no transform");
     assert_eq!(texture.value_scale, None);
     assert_eq!(texture.value_bias, None);

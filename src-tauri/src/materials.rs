@@ -65,6 +65,7 @@ pub struct TextureInfo {
     pub uv_transform: Option<UvTransform>,
     pub value_scale: Option<[f32; 4]>,
     pub value_bias: Option<[f32; 4]>,
+    pub color_space: Option<String>,
 }
 
 /// One PreviewSurface input fed by a UsdUVTexture: the input name
@@ -73,7 +74,8 @@ pub struct TextureInfo {
 /// the primvar its UVs come from. `wrap_s`/`wrap_t` are the authored
 /// inputs:wrapS/wrapT tokens (None = unauthored, i.e. "useMetadata");
 /// `uv_transform` is the UsdTransform2d in the `st` chain, when any;
-/// `value_scale`/`value_bias` are the authored inputs:scale/inputs:bias.
+/// `value_scale`/`value_bias` are the authored inputs:scale/inputs:bias;
+/// `color_space` is the authored inputs:sourceColorSpace token.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct TextureInput {
@@ -85,6 +87,7 @@ pub struct TextureInput {
     pub uv_transform: Option<UvTransform>,
     pub value_scale: Option<[f32; 4]>,
     pub value_bias: Option<[f32; 4]>,
+    pub color_space: Option<String>,
 }
 
 fn err(error: impl std::fmt::Display) -> String {
@@ -189,6 +192,7 @@ fn preview_surface(shader: &Shader) -> Result<PreviewSurface, String> {
                 uv_transform: entry.uv_transform.clone(),
                 value_scale: entry.value_scale,
                 value_bias: entry.value_bias,
+                color_space: entry.color_space.clone(),
             });
         }
         textures.push(entry);
@@ -228,6 +232,7 @@ fn texture_input(input: &Input, texture: &UVTexture) -> Result<Option<TextureInp
         st_primvar: st_primvar(texture)?,
         wrap_s: wrap_token(&texture.wrap_s_input())?,
         wrap_t: wrap_token(&texture.wrap_t_input())?,
+        color_space: wrap_token(&texture.source_color_space_input())?,
         uv_transform: uv_transform(texture)?,
         value_scale: float4(&texture.scale_input())?,
         value_bias: float4(&texture.bias_input())?,
