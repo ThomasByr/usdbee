@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LayerInfo } from "./types";
-import {
-  layerDisplayName,
-  layerTextRevisionAction,
-  layerTextStageChangedAction,
-} from "./layerText";
+import { layerDisplayName, layerTextRevisionAction, layerTextStageChangedAction } from "./layerText";
 
 const layer = (identifier: string, is_session = false): LayerInfo => ({
   identifier,

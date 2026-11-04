@@ -66,7 +66,10 @@ describe("isEditableValue", () => {
 
   it("rejects the color-array tags on any other shape", () => {
     for (const data of [
-      [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+      [
+        [0.1, 0.2, 0.3],
+        [0.4, 0.5, 0.6],
+      ],
       [[0.1, 0.2]],
       [[0.1, 0.2, 0.3, 0.4]],
       [["r", "g", "b"]],
@@ -110,9 +113,7 @@ describe("color array hex helpers", () => {
 
   it("recomputes the same hex from the composed read", () => {
     expect(colorArrayHex(redPayload)).toBe("#ff0000");
-    expect(colorArrayHex(payload("vec3f_array", [[64 / 255, 128 / 255, 192 / 255]]))).toBe(
-      "#4080c0",
-    );
+    expect(colorArrayHex(payload("vec3f_array", [[64 / 255, 128 / 255, 192 / 255]]))).toBe("#4080c0");
     expect(colorArrayHex(payload("color3f_array", null))).toBeNull();
   });
 });

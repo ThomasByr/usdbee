@@ -104,9 +104,7 @@ export function decodeGeometryBatch(buffer: ArrayBuffer): (Uint8Array | null)[] 
   }
   const version = view.getUint32(4, true);
   if (version !== GEOMETRY_BATCH_VERSION) {
-    throw new Error(
-      `unsupported geometry batch version: ${version}, expected ${GEOMETRY_BATCH_VERSION}`,
-    );
+    throw new Error(`unsupported geometry batch version: ${version}, expected ${GEOMETRY_BATCH_VERSION}`);
   }
   const slotCount = view.getUint32(8, true);
 

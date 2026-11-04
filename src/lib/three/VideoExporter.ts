@@ -41,7 +41,8 @@ export async function runExport(
   config: ExportConfig,
   callbacks: ExportCallbacks,
 ): Promise<void> {
-  const { renderer, scene, camera, animationDuration, animationProgress, playbackRate, onBeforeFrame } = context;
+  const { renderer, scene, camera, animationDuration, animationProgress, playbackRate, onBeforeFrame } =
+    context;
   const { format, quality, resolution, bgTransparent, loop } = config;
   const { onProgress, onComplete, onError } = callbacks;
 

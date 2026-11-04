@@ -1,10 +1,6 @@
 <script lang="ts">
   import { themeState, setThemePreference, type ThemePreference } from "$lib/state/themeState.svelte";
-  import {
-    playbackState,
-    setTimelineUnits,
-    type TimelineUnits,
-  } from "$lib/state/playbackState.svelte";
+  import { playbackState, setTimelineUnits, type TimelineUnits } from "$lib/state/playbackState.svelte";
   import { recentFiles } from "$lib/state/recentFiles.svelte";
   import { tabsState } from "$lib/state/tabsState.svelte";
   import { openContainingFolder } from "$lib/utils/reveal";

@@ -58,7 +58,8 @@ interface ActiveOpen {
   resolve: () => void;
 }
 
-export const OPEN_IN_FLIGHT_MESSAGE = "A USD file is already opening. Wait for it to finish before opening another.";
+export const OPEN_IN_FLIGHT_MESSAGE =
+  "A USD file is already opening. Wait for it to finish before opening another.";
 let activeOpen: ActiveOpen | null = null;
 // A refused open's stream can outlive the active open (the backend keeps
 // loading it): its identity is pinned here until its own terminal event,

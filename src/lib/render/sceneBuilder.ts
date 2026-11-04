@@ -25,10 +25,7 @@ export interface SceneFetchers {
   // frame bytes, null when that slot failed (fail-soft per path). Throws
   // when the whole batch command fails; the builder then falls back to the
   // per-path fetches, which stay the step-refetch path either way.
-  getGeometryBatch?: (
-    paths: string[],
-    time?: number | null,
-  ) => Promise<(ArrayBuffer | Uint8Array | null)[]>;
+  getGeometryBatch?: (paths: string[], time?: number | null) => Promise<(ArrayBuffer | Uint8Array | null)[]>;
   // null = fetch failed; the builder falls back to a plain material.
   getMaterial: (path: string) => Promise<MaterialInfo | null>;
   loadTexture: MaterialTextureLoader;

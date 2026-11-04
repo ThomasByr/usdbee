@@ -283,7 +283,10 @@ describe("init event subscriptions", () => {
     // The refused stream completes backend-side AFTER the first finished:
     // it must adopt nothing and its stage must be closed, not orphaned.
     handlerFor["usd-scene-loaded"]({
-      payload: { root_file: "/scene/b.usda", dependencies: { "/b.dep": { path: "/b.dep", resolved: true, size_bytes: 1 } } },
+      payload: {
+        root_file: "/scene/b.usda",
+        dependencies: { "/b.dep": { path: "/b.dep", resolved: true, size_bytes: 1 } },
+      },
     });
     handlerFor["usd-stage-opened"]({ payload: { ...stageInfo, stage_id: 9, root_layer: "/scene/b.usda" } });
     await new Promise((resolve) => setTimeout(resolve, 0));

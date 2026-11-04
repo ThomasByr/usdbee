@@ -52,9 +52,7 @@ export function isColorArray(value: ValuePayload): boolean {
   if (!Array.isArray(value.data) || value.data.length !== 1) return false;
   const [single] = value.data;
   if (!Array.isArray(single) || single.length !== 3) return false;
-  return single.every(
-    (component) => typeof component === "number" && Number.isFinite(component),
-  );
+  return single.every((component) => typeof component === "number" && Number.isFinite(component));
 }
 
 // The hex spelling (#rrggbb, 8-bit grid) of the single color an editable

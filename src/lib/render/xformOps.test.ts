@@ -205,8 +205,8 @@ describe("composeOpUpdate", () => {
     // 16 numbers as the three.js column-major array, mirrored by the Rust
     // fixture pin in values.rs on the same angles):
     const local = [
-      0.262003, 0.963592, -0.05333, 0, -0.719846, 0.231937, 0.654237, 0, 0.642788,
-      -0.133022, 0.754407, 0, 0, 0, 0, 1,
+      0.262003, 0.963592, -0.05333, 0, -0.719846, 0.231937, 0.654237, 0, 0.642788, -0.133022, 0.754407, 0, 0,
+      0, 0, 1,
     ];
     // The angles DISCRIMINATE the pairings: with the old coincidental
     // (0, 90, 90) the positional pairing (Z->v0, X->v2) composes the exact
@@ -232,9 +232,7 @@ describe("composeOpUpdate", () => {
       name: "xformOp:translate",
       type: "double3",
     });
-    expect(result.writes[0].data.map((v) => +Number(v).toFixed(6))).toEqual([
-      0.963592, 0.231937, -0.133022,
-    ]);
+    expect(result.writes[0].data.map((v) => +Number(v).toFixed(6))).toEqual([0.963592, 0.231937, -0.133022]);
     expect(result.writes[1]).toEqual({
       name: "xformOpOrder",
       type: "token_array",

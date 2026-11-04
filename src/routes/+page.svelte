@@ -355,9 +355,7 @@
   function resizeByKey(e: KeyboardEvent) {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
     e.preventDefault();
-    sidebarWidth = clampSidebarWidth(
-      sidebarWidth + (e.key === "ArrowLeft" ? -SIDEBAR_STEP : SIDEBAR_STEP),
-    );
+    sidebarWidth = clampSidebarWidth(sidebarWidth + (e.key === "ArrowLeft" ? -SIDEBAR_STEP : SIDEBAR_STEP));
     localStorage.setItem("sidebarWidth", sidebarWidth.toString());
     window.dispatchEvent(new Event("resize"));
   }

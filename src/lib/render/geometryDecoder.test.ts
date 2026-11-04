@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  decodeGeometry,
-  decodeGeometryBatch,
-  GEOMETRY_MAGIC,
-  GEOMETRY_VERSION,
-} from "./geometryDecoder";
+import { decodeGeometry, decodeGeometryBatch, GEOMETRY_MAGIC, GEOMETRY_VERSION } from "./geometryDecoder";
 
 // Hand-build the binary layout the Rust side emits (little-endian):
 // magic u32, version u32, vertex_count u32, index_count u32, flags u32
@@ -157,8 +152,7 @@ describe("decodeGeometryBatch", () => {
       }
       return { status: 1, bytes: new TextEncoder().encode(slot) };
     });
-    const size =
-      12 + body.reduce((sum, slot) => sum + 8 + ((slot.bytes.byteLength + 3) & ~3), 0);
+    const size = 12 + body.reduce((sum, slot) => sum + 8 + ((slot.bytes.byteLength + 3) & ~3), 0);
     const buffer = new ArrayBuffer(size);
     const view = new DataView(buffer);
     view.setUint32(0, 0x55534247, true);

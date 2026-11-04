@@ -372,12 +372,7 @@ describe("buildScene", () => {
       expect(time).toBe(5);
       return slice.map(() => packedGeometry());
     });
-    const group = await buildScene(
-      manifest,
-      { ...fetchers(), getGeometry, getGeometryBatch },
-      {},
-      5,
-    );
+    const group = await buildScene(manifest, { ...fetchers(), getGeometry, getGeometryBatch }, {}, 5);
 
     // ceil(70 / 32) invokes — the batching pin.
     expect(getGeometryBatch).toHaveBeenCalledTimes(3);

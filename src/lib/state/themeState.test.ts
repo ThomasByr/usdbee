@@ -10,7 +10,10 @@ function stubMatchMedia(startsLight: boolean) {
     addEventListener: (_type: string, cb: MediaQueryListener) => listeners.add(cb),
     removeEventListener: (_type: string, cb: MediaQueryListener) => listeners.delete(cb),
   };
-  vi.stubGlobal("matchMedia", vi.fn(() => query));
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn(() => query),
+  );
   return {
     emitSystemPrefersLight(matches: boolean) {
       query.matches = matches;

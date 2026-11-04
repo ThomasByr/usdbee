@@ -134,15 +134,7 @@ Rules:
   --radius-xl: 8px;
 
   /* Type */
-  --font-sans:
-    "Inter",
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    Roboto,
-    Helvetica,
-    Arial,
-    sans-serif;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-mono: monospace;
 
   /* Space */
