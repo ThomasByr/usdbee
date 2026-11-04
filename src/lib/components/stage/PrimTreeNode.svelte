@@ -154,7 +154,7 @@
           }}
           onkeydown={keepRowKeys}
         >
-          <Icon name="palette" size={13} />
+          <Icon name="palette" size={15} />
         </button>
         <button
           class="row-action-btn"
@@ -167,7 +167,7 @@
           disabled={visibilityPending}
           aria-pressed={authoredInvisible}
         >
-          <Icon name={authoredInvisible ? "eye-off" : "eye"} size={13} />
+          <Icon name={authoredInvisible ? "eye-off" : "eye"} size={15} />
         </button>
       </span>
     {/if}

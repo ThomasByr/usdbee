@@ -470,6 +470,7 @@ input[type="color"]::-webkit-color-swatch {
   align-items: center;
   gap: 2px;
   margin-left: auto;
+  padding-right: 8px;
   visibility: hidden;
 }
 
@@ -483,12 +484,14 @@ input[type="color"]::-webkit-color-swatch {
   padding: 2px;
   border: none;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--text-body);
   cursor: pointer;
 }
 
 .row-action-btn:hover {
   color: var(--text-bright);
+  background: var(--row-hover);
+  border-radius: 4px;
 }
 
 /* Appearance Popover */
