@@ -26,6 +26,12 @@
   const worldTransform = $derived(
     details?.world_transform ? formatValue({ type: "matrix4d", data: details.world_transform }) : null,
   );
+
+  // `active` and `kind` have dedicated rows below; once authored they also
+  // appear in the metadata payload, which would render them twice.
+  const extraMetadata = $derived(
+    (details?.metadata ?? []).filter(([field]) => field !== "active" && field !== "kind"),
+  );
 </script>
 
 {#if stageState.status === "ready"}
@@ -143,7 +149,7 @@
                 />
               </span>
             </div>
-            {#each details.metadata as [field, value] (field)}
+            {#each extraMetadata as [field, value] (field)}
               <div class="attr-row">
                 <span class="attr-name">{field}</span>
                 <span class="attr-value">
