@@ -177,11 +177,12 @@
   .top-toolbar {
     position: absolute;
     top: 10px;
-    left: 10px;
-    right: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: calc(100% - 20px);
     display: flex;
     gap: 8px;
-    justify-content: center;
     background: var(--toolbar-bg);
     padding: 6px 12px;
     border-radius: 6px;
@@ -191,8 +192,20 @@
     align-items: center;
   }
 
+  /* Fit on one line when there is room; shrink to ellipsis when there is not. */
   .top-toolbar .tool-btn {
     white-space: nowrap;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  .top-toolbar .tool-btn span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .top-toolbar .tool-btn svg {
+    flex-shrink: 0;
   }
 
   .gizmo-status {
