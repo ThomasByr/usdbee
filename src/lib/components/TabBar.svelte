@@ -15,64 +15,62 @@
   }
 </script>
 
-{#if tabsState.stages.length > 0}
-  <div class="stage-tab-bar" role="tablist" aria-label="Open stages">
-    {#each tabsState.stages as tab (tab.stage_id)}
-      <div class="stage-tab" class:active={tab.stage_id === tabsState.activeId}>
-        <button
-          class="stage-tab-btn"
-          role="tab"
-          aria-selected={tab.stage_id === tabsState.activeId}
-          title={tab.root_file}
-          onclick={() => void tabsState.setActive(tab.stage_id)}
-        >
-          <span class="stage-tab-name">{tabDisplayName(tab)}</span>
-          {#if dirty(tab)}
-            <span class="dirty-dot" title="Unsaved changes" aria-hidden="true"></span>
-          {/if}
-        </button>
-        <button
-          class="stage-tab-close"
-          title="Close {tabDisplayName(tab)}"
-          aria-label="Close {tabDisplayName(tab)}"
-          onclick={() => void tabsState.closeTab(tab.stage_id)}
-        >
-          <Icon name="x" size={11} />
-        </button>
-      </div>
-    {/each}
-    <button
-      class="stage-tab-add"
-      title="Open a USD file in a new tab"
-      aria-label="Open a USD file in a new tab"
-      onclick={() => void loadOrchestrator.openUsdFile()}
-    >
-      +
-    </button>
-  </div>
+<div class="stage-tab-bar" role="tablist" aria-label="Stage tabs">
+  {#each tabsState.stages as tab (tab.stage_id)}
+    <div class="stage-tab" class:active={tab.stage_id === tabsState.activeId}>
+      <button
+        class="stage-tab-btn"
+        role="tab"
+        aria-selected={tab.stage_id === tabsState.activeId}
+        title={tab.root_file}
+        onclick={() => void tabsState.setActive(tab.stage_id)}
+      >
+        <span class="stage-tab-name">{tabDisplayName(tab)}</span>
+        {#if dirty(tab)}
+          <span class="dirty-dot" title="Unsaved changes" aria-hidden="true"></span>
+        {/if}
+      </button>
+      <button
+        class="stage-tab-close"
+        title="Close {tabDisplayName(tab)}"
+        aria-label="Close {tabDisplayName(tab)}"
+        onclick={() => void tabsState.closeTab(tab.stage_id)}
+      >
+        <Icon name="x" size={11} />
+      </button>
+    </div>
+  {/each}
+  <button
+    class="stage-tab-add"
+    title="Open a USD file in a new tab"
+    aria-label="Open a USD file in a new tab"
+    onclick={() => void loadOrchestrator.openUsdFile()}
+  >
+    +
+  </button>
+</div>
 
-  {#if tabsState.pendingCloseId !== null}
-    {@const closeId = tabsState.pendingCloseId}
-    {@const closeName = tabDisplayName(tabsState.find(closeId!) ?? { root_identifier: "stage" })}
-    <Modal
-      title="Unsaved changes"
-      contentClass="close-confirm-box"
-      closeOnBackdrop={false}
-      onClose={() => tabsState.cancelClose()}
-    >
-      <p>
-        {tabsState.pendingCloseDirty} unsaved change(s) in {closeName}. Close the tab anyway and lose them?
-      </p>
-      <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;">
-        <button class="tool-btn" onclick={() => tabsState.cancelClose()}>Cancel</button>
-        <button
-          class="primary-btn"
-          style="background: var(--danger-solid);"
-          onclick={() => void tabsState.closeConfirmed(closeId!)}>Close tab</button
-        >
-      </div>
-    </Modal>
-  {/if}
+{#if tabsState.pendingCloseId !== null}
+  {@const closeId = tabsState.pendingCloseId}
+  {@const closeName = tabDisplayName(tabsState.find(closeId!) ?? { root_identifier: "stage" })}
+  <Modal
+    title="Unsaved changes"
+    contentClass="close-confirm-box"
+    closeOnBackdrop={false}
+    onClose={() => tabsState.cancelClose()}
+  >
+    <p>
+      {tabsState.pendingCloseDirty} unsaved change(s) in {closeName}. Close the tab anyway and lose them?
+    </p>
+    <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;">
+      <button class="tool-btn" onclick={() => tabsState.cancelClose()}>Cancel</button>
+      <button
+        class="primary-btn"
+        style="background: var(--danger-solid);"
+        onclick={() => void tabsState.closeConfirmed(closeId!)}>Close tab</button
+      >
+    </div>
+  </Modal>
 {/if}
 
 <style>

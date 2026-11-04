@@ -11,17 +11,19 @@
     gizmoMode = $bindable(),
     gizmoMessage,
     attachable,
+    disabled = false,
   }: {
     viewer: RendererKit;
     gizmoMode: GizmoMode;
     gizmoMessage: string | null;
     attachable: boolean;
+    disabled?: boolean;
   } = $props();
 
   let showFovSlider = $state<boolean>(false);
 </script>
 
-<div class="top-toolbar">
+<div class="top-toolbar" class:disabled inert={disabled}>
   <button
     class="tool-btn"
     disabled={!editState.canUndo}
@@ -218,6 +220,13 @@
     width: 1px;
     height: 18px;
     background: var(--control-bg);
+  }
+
+  /* No stage open: visible but inert (inert blocks interaction + focus;
+     pointer-events covers older WebKitGTK). */
+  .top-toolbar.disabled {
+    opacity: 0.5;
+    pointer-events: none;
   }
 
   .slider-dropdown {

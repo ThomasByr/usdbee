@@ -185,9 +185,13 @@
 </script>
 
 <section class="viewport">
-  {#if loadOrchestrator.rootFile}
-    <Toolbar {viewer} bind:gizmoMode {gizmoMessage} attachable={gizmoGate.attachable} />
-  {/if}
+  <Toolbar
+    {viewer}
+    bind:gizmoMode
+    {gizmoMessage}
+    attachable={gizmoGate.attachable}
+    disabled={!loadOrchestrator.rootFile}
+  />
 
   <canvas bind:this={canvas} class="webgl-canvas" class:visible={!!loadOrchestrator.rootFile}></canvas>
 
