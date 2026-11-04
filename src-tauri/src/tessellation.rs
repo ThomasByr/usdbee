@@ -21,6 +21,8 @@ use openusd_schemas::geom::{
 use openusd_schemas::geom::{MeshSchema, PointBasedSchema};
 use openusd_schemas::SchemaError;
 
+use crate::skinning;
+
 /// One tessellated mesh: positions keyed per vertex, `indices` spanning
 /// triangles by vertex index, and per-vertex primvar arrays aligned with
 /// `positions` (constant is replicated per vertex; faceVarying maps each
@@ -105,7 +107,7 @@ fn mesh_data(
 ) -> Result<Option<MeshData>, String> {
     let mesh = Mesh::from_prim_unchecked(prim.clone());
 
-    let points: Vec<Vec3f> = expect_value(mesh.points_at(time_code), "points", path)?;
+    let mut points: Vec<Vec3f> = expect_value(mesh.points_at(time_code), "points", path)?;
     let counts: Vec<i32> = expect_value(
         mesh.face_vertex_counts_at(time_code),
         "faceVertexCounts",
@@ -116,6 +118,22 @@ fn mesh_data(
         "faceVertexIndices",
         path,
     )?;
+
+    // UsdSkel: skin the authored points (and vertex-scoped authored
+    // normals) in place before anything else consumes them. A detected-
+    // but-broken binding logs and renders unskinned — the same fail-soft
+    // decision as the lossy normal sets below, never a dropped mesh.
+    let mut authored_normals =
+        normals_attr_values(&mesh, time_code).map_err(|e| context(path, e))?;
+    let skin_normals = match &mut authored_normals {
+        Some((scope, values)) if *scope == Scope::Vertex && values.len() == points.len() => {
+            Some(values)
+        }
+        _ => None,
+    };
+    if let Err(e) = skinning::skin_mesh(prim, time_code.map(f64::from), &mut points, skin_normals) {
+        eprintln!("skinning {}: {}", path, e);
+    }
 
     // Non-finite positions cannot reach a GPU buffer: such vertices are
     // compacted away, surviving indices remap, and any face referencing a
@@ -171,7 +189,7 @@ fn mesh_data(
     // shortcut: an authored normal set that cannot map over the triangle
     // soup is dropped (normals: None) rather than falling back to generated
     // ones; revisit when the renderer cares about either lossy set.
-    let normals = match normals_attr_values(&mesh, time_code).map_err(|e| context(path, e))? {
+    let normals = match authored_normals {
         Some((scope, values)) => meshable(scope, values, &corners, vertex_count, &orig_to_new)
             .map(|per_vertex| per_vertex.into_iter().map(|v| [v.x, v.y, v.z]).collect()),
         None => Some(generated_normals(&positions, &indices)),

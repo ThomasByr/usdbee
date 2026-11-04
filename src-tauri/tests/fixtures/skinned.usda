@@ -1,5 +1,6 @@
 #usda 1.0
 (
+    defaultPrim = "Rig"
     startTimeCode = 0
     endTimeCode = 10
     timeCodesPerSecond = 24
@@ -92,5 +93,79 @@ def SkelRoot "Rig"
         int[] faceVertexCounts = [3]
         int[] faceVertexIndices = [0, 1, 2]
         point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    }
+
+    def Mesh "Hose_rigid" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(1, 0, 0), (2, 0, 0), (1, 1, 0)]
+        int[] primvars:skel:jointIndices = [2] (
+            elementSize = 1
+            interpolation = "constant"
+        )
+        float[] primvars:skel:jointWeights = [1] (
+            elementSize = 1
+            interpolation = "constant"
+        )
+        prepend rel skel:skeleton = </Rig/Skel>
+    }
+
+    def Mesh "Hose_broken" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        int[] primvars:skel:jointIndices = [0, 1] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        float[] primvars:skel:jointWeights = [1, 1] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        prepend rel skel:skeleton = </Rig/Skel>
+    }
+}
+
+def SkelRoot "Rig2"
+{
+    def Skeleton "SkelRest" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        uniform token[] joints = ["A", "A/B", "A/B/C"]
+        uniform matrix4d[] bindTransforms = [
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) ),
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
+        ]
+        uniform matrix4d[] restTransforms = [
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) ),
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 1) )
+        ]
+    }
+
+    def Mesh "Hose_rest" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(2, 0, 0), (4, 0, 0), (4, 0, 0)]
+        int[] primvars:skel:jointIndices = [0, 1, 2] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        float[] primvars:skel:jointWeights = [1, 1, 1] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        prepend rel skel:skeleton = </Rig2/SkelRest>
     }
 }

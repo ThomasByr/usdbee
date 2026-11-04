@@ -836,7 +836,7 @@ fn xform_warning(op: &str, path: &str, outcome: &OpOutcome) -> String {
 }
 
 /// Whether the prim's `xformOpOrder` contains `!resetXformStack!`.
-fn resets_xform_stack(prim: &Prim, time: Option<f64>) -> Result<bool, String> {
+pub(crate) fn resets_xform_stack(prim: &Prim, time: Option<f64>) -> Result<bool, String> {
     Ok(matches!(
         prim.attribute("xformOpOrder")
             .get_at::<Value>(time.map(TimeCode::new))
