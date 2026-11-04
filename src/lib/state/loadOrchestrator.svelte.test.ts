@@ -212,7 +212,7 @@ describe("init event subscriptions", () => {
     expect(loadOrchestrator.modalError).toBe("Failed to extract or load USD: cache miss");
   });
 
-  it("usd-scene-loaded adopts the payload and composes the render scene", async () => {
+  it("usd-scene-loaded adopts the payload without composing the scene (adoption owns the compose)", async () => {
     const loadScene = vi.fn().mockResolvedValue(undefined);
     await loadOrchestrator.init({ resetScene: () => {}, loadScene });
 
@@ -220,8 +220,8 @@ describe("init event subscriptions", () => {
     handlerFor["usd-scene-loaded"]({
       payload: { root_file: "/scene/bike.usda", dependencies: deps },
     });
-    await vi.waitFor(() => expect(loadScene).toHaveBeenCalledTimes(1));
 
+    expect(loadScene).not.toHaveBeenCalled();
     expect(loadOrchestrator.loadingProgress).toBeNull();
     expect(loadOrchestrator.rootFile).toBe("/scene/bike.usda");
     expect(loadOrchestrator.dependencies).toEqual(deps);

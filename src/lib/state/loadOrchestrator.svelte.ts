@@ -288,7 +288,7 @@ export const loadOrchestrator = $state({
           return;
         }
         if (activeOpen) activeOpen.sceneRoot = rootFile;
-        void this.handleSceneLoaded(event.payload, hooks);
+        void this.handleSceneLoaded(event.payload);
       }),
       listen<string>("usd-load-refused", (event) => {
         // The backend refused to start a load while one was running
@@ -303,17 +303,15 @@ export const loadOrchestrator = $state({
     };
   },
 
-  // The viewport scene load: compose the scene from the Rust manifest
-  // (no zip, no Three.js USD parsing).
-  async handleSceneLoaded(
-    payload: { root_file: string; dependencies: DependencyMap },
-    hooks: LoadHooks,
-  ): Promise<void> {
+  // Scene-loaded only records the dependency scan: the viewport compose
+  // happens on usd-stage-opened (tab adoption), which arrives right after
+  // with the adopted stage id — composing here would race it with the
+  // previous (or zero) id and fail with "no stage 0".
+  async handleSceneLoaded(payload: { root_file: string; dependencies: DependencyMap }): Promise<void> {
     this.loadingProgress = null;
     // rootFile stays on the user-facing path from load-start;
     // payload.root_file is the resolved layer (an extracted path for usdz).
     this.dependencies = payload.dependencies;
-    await hooks.loadScene();
   },
 });
 
