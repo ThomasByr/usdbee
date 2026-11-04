@@ -6,26 +6,34 @@
 // in xformOps.ts). The proxy never IS the scene node: USD is the source
 // of truth and the round trip re-anchors it after every refresh.
 //
-// shortcut: shear in a prim's composed world transform is dropped by the
-// position/quaternion/scale decomposition, so gizmo drags on sheared
-// stacks are approximate; upgrade by authoring full matrices.
-
 import * as THREE from "three";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 
 export interface GizmoCommit {
-  // The proxy's world matrices at drag start (the anchor pose) and drag
-  // end. The host derives the desired USD local matrix from their ratio —
+  // The prim's true world matrices at drag start (the anchor pose) and
+  // drag end: the visible proxy pose plus the anchor-offset correction.
+  // The host derives the desired USD local matrix from their ratio —
   // every parent/world transform (up-axis rotation, scene recentering)
   // cancels out.
   startWorld: THREE.Matrix4;
   endWorld: THREE.Matrix4;
 }
 
+// The proxy can sit away from the prim's origin (at the selection's bbox
+// center), so a proxy pose is not the prim's world matrix. This maps one
+// back: C = inv(proxyPose) * world, and true = proxyPose * C.
+// shortcut: shear in a prim's composed world transform is dropped by the
+// position/quaternion/scale decomposition; the correction below absorbs it
+// for the commit math, but the drawn proxy still cannot show shear.
+export function gizmoCorrection(proxyMatrix: THREE.Matrix4, worldMatrix: THREE.Matrix4): THREE.Matrix4 {
+  return proxyMatrix.clone().invert().multiply(worldMatrix);
+}
+
 export class TransformGizmo {
   readonly controls: TransformControls;
   private readonly proxy = new THREE.Object3D();
   private readonly anchor = new THREE.Matrix4();
+  private readonly correction = new THREE.Matrix4();
   onCommit: ((commit: GizmoCommit) => void) | null = null;
 
   constructor(
@@ -47,9 +55,12 @@ export class TransformGizmo {
         this.anchor.copy(this.proxy.matrixWorld);
       } else {
         this.proxy.updateMatrixWorld();
+        // proxy pose * correction = the prim's true world matrix, so
+        // translate drags move by the dragged delta and rotate drags spin
+        // the prim about the visible (bbox) center.
         this.onCommit?.({
-          startWorld: this.anchor.clone(),
-          endWorld: this.proxy.matrixWorld.clone(),
+          startWorld: this.anchor.clone().multiply(this.correction),
+          endWorld: this.proxy.matrixWorld.clone().multiply(this.correction),
         });
       }
     });
@@ -57,9 +68,14 @@ export class TransformGizmo {
 
   // Places the proxy at the prim's world transform (host computes it from
   // details.world_transform composed with the loaded group's matrix) and
-  // shows the gizmo. Also used to re-anchor after commits and refreshes.
-  attach(worldMatrix: THREE.Matrix4): void {
+  // shows the gizmo. An anchor (the selection's bbox center) moves the
+  // knob there while rotation/scale still come from worldMatrix. Also
+  // used to re-anchor after commits and refreshes.
+  attach(worldMatrix: THREE.Matrix4, anchor?: THREE.Vector3 | null): void {
     worldMatrix.decompose(this.proxy.position, this.proxy.quaternion, this.proxy.scale);
+    if (anchor) this.proxy.position.copy(anchor);
+    this.proxy.updateMatrix();
+    this.correction.copy(gizmoCorrection(this.proxy.matrix, worldMatrix));
     this.controls.attach(this.proxy);
   }
 

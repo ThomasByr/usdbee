@@ -46,6 +46,17 @@ export function gizmoWorldMatrix(viewer: RendererKit): THREE.Matrix4 | null {
   return world;
 }
 
+// The gizmo's anchor: the center of the selection's bounding box, i.e.
+// the same box the orange selection helper draws. setFromObject yields
+// scene-space coordinates, the space gizmoWorldMatrix already works in,
+// so the center needs no extra transform.
+export function gizmoAnchorCenter(viewer: { selectedNode: THREE.Object3D | null }): THREE.Vector3 | null {
+  const node = viewer.selectedNode;
+  if (!node) return null;
+  const box = new THREE.Box3().setFromObject(node, true);
+  return box.isEmpty() ? null : box.getCenter(new THREE.Vector3());
+}
+
 // Commit errors clear with the next selection; a fresh anchor snaps the
 // proxy back to stage truth (also the failure path: a refused commit
 // leaves details unchanged, so the re-anchor undoes the drag).
@@ -65,12 +76,18 @@ export function syncGizmoAnchor(viewer: RendererKit, gizmoMode: GizmoMode) {
     return;
   }
   const world = gizmoWorldMatrix(viewer);
-  if (world) kit.attach(world);
+  if (world) kit.attach(world, gizmoAnchorCenter(viewer));
 }
 
 // Plain (non-$state) lock: it is only ever read inside the commit
 // handler and is never rendered, so a rune adds nothing there.
 let gizmoCommitInFlight = false;
+
+// Re-anchor after a drag: stage truth wins, the commit's true end matrix
+// is the fallback when details are gone.
+function reattach(gizmo: TransformGizmo, viewer: RendererKit, fallback: THREE.Matrix4) {
+  gizmo.attach(gizmoWorldMatrix(viewer) ?? fallback, gizmoAnchorCenter(viewer));
+}
 
 export function initGizmo(viewer: RendererKit, getMode: () => GizmoMode) {
   gizmoViewer = viewer;
@@ -118,7 +135,7 @@ async function handleGizmoCommit(commit: GizmoCommit) {
       .multiply(commit.endWorld)
       .toArray() as number[];
     if (matricesClose(target, details.local_transform)) {
-      gizmo?.attach(gizmoWorldMatrix(viewer) ?? commit.endWorld);
+      if (gizmo) reattach(gizmo, viewer, commit.endWorld);
       return;
     }
     const orderAttribute = details.attributes.find((a) => a.name === "xformOpOrder");
@@ -132,7 +149,7 @@ async function handleGizmoCommit(commit: GizmoCommit) {
     });
     if (!result.ok) {
       gizmoPolicy.error = result.error;
-      gizmo?.attach(gizmoWorldMatrix(viewer) ?? commit.endWorld);
+      if (gizmo) reattach(gizmo, viewer, commit.endWorld);
       return;
     }
     let failed = false;
@@ -153,7 +170,7 @@ async function handleGizmoCommit(commit: GizmoCommit) {
     // Keep commits disabled until fresh details land; a second drag must
     // never compute from the pre-commit local transform.
     if (!failed) await stageState.refreshAfterEdit();
-    gizmo?.attach(failed ? (gizmoWorldMatrix(viewer) ?? commit.endWorld) : commit.endWorld);
+    if (gizmo) reattach(gizmo, viewer, commit.endWorld);
   } finally {
     gizmoCommitInFlight = false;
     if (gizmo) gizmo.controls.enabled = true;
