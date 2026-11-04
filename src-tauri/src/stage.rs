@@ -59,6 +59,15 @@ pub enum StageRequest {
         time: Option<f64>,
         reply: mpsc::Sender<Result<Vec<RenderNode>, String>>,
     },
+    // Time-delta manifest (playback/scrub): ONLY the time-dependent nodes
+    // at `time` — sampled xformOps, geometry attrs, visibility or
+    // PointInstancer arrays — plus the connector ancestors an in-place
+    // update needs. Empty for a static stage; loads and edit refreshes
+    // keep the full GetManifest.
+    GetAnimatedManifest {
+        time: Option<f64>,
+        reply: mpsc::Sender<Result<Vec<RenderNode>, String>>,
+    },
     // The stage's authored time-sample times (unioned, ascending): the
     // times playback/scrubbing snap to so the exact-f64-keyed MeshCache
     // hits across loop iterations and scrub revisits.
@@ -618,6 +627,31 @@ fn spawn_stage_owner_for(
                                 time,
                                 false,
                                 &mut prototype_memo,
+                            )
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::GetAnimatedManifest { time, reply } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            if manifest_skeleton.is_none() {
+                                manifest_skeleton = Some(ManifestSkeleton::build(stage)?);
+                            }
+                            let skeleton = manifest_skeleton
+                                .as_ref()
+                                .ok_or_else(|| "manifest skeleton build failed".to_string())?;
+                            let mut prototype_memo = PrototypeMemo::new();
+                            delta_children(
+                                skeleton,
+                                &skeleton.root_children,
+                                time,
+                                false,
+                                &mut prototype_memo,
+                                false,
+                                false,
                             )
                         }))
                         .unwrap_or_else(panic_reply),
@@ -2291,6 +2325,10 @@ struct SkeletonFacts {
     imageable: bool,
     self_moves: bool,
     self_deforms: bool,
+    /// The prim's overall `visibility` attr carries authored time samples:
+    /// the per-call visibility read flips across times, so the delta walk
+    /// must include the prim even when nothing else about it samples.
+    self_visibility_animated: bool,
     /// Direct `material:binding` target, loaded for geometry prims exactly
     /// where the per-call walk used to look it up.
     material: Option<String>,
@@ -2325,6 +2363,11 @@ struct ManifestSkeleton {
     /// attribute the walk found (ascending, deduped) — empty when
     /// nothing is time-sampled.
     time_codes: Vec<f64>,
+    /// Whether a prim's RENDERED subtree (through native-instance
+    /// expansions and PointInstancer prototypes) holds any time-dependent
+    /// signal, own or descendant — the delta walk prunes whole subtrees
+    /// without this reachability answer ever sampling them.
+    signals: HashMap<String, bool>,
 }
 
 impl ManifestSkeleton {
@@ -2333,6 +2376,7 @@ impl ManifestSkeleton {
             facts: HashMap::new(),
             root_children: Vec::new(),
             time_codes: Vec::new(),
+            signals: HashMap::new(),
         };
         let mut skel_memo = SkelAnimMemo::new();
         // Every attribute the walk finds with authored time samples; the
@@ -2377,7 +2421,14 @@ impl ManifestSkeleton {
         }
         skeleton.time_codes =
             Attribute::unioned_time_samples(&sampled_attrs).map_err(stage_err)?;
+        for key in skeleton.facts.keys().cloned().collect::<Vec<String>>() {
+            signal_of(&skeleton.facts, &key, &mut skeleton.signals);
+        }
         Ok(skeleton)
+    }
+
+    fn signal(&self, key: &str) -> bool {
+        self.signals.get(key).copied().unwrap_or(false)
     }
 }
 
@@ -2451,7 +2502,8 @@ fn build_facts(
             ),
         ),
     };
-    let (self_moves, self_deforms) = samples_scene_motion(prim, renders, skel_memo, sampled_attrs)?;
+    let (self_moves, self_deforms, self_visibility_animated) =
+        samples_scene_motion(prim, renders, imageable, skel_memo, sampled_attrs)?;
 
     let path = prim.path().to_string();
     skeleton.facts.insert(
@@ -2464,6 +2516,7 @@ fn build_facts(
             imageable,
             self_moves,
             self_deforms,
+            self_visibility_animated,
             material: if renders {
                 direct_material(stage, prim)
             } else {
@@ -2516,31 +2569,36 @@ fn renders_geometry(type_name: &str) -> bool {
     matches!(type_name, "Mesh" | "BasisCurves" | "Points" | "Sphere")
 }
 
-/// One attribute pass over a prim for both animated signals at once:
-/// `(moves transform, deforms geometry)` — the manifest walk
-/// previously enumerated the composed attribute list twice per prim with
-/// time-sample scans over every attribute, which measured as the kitchen
-/// manifest's hot spot (2745 nodes × 29 attributes).
+/// One attribute pass over a prim for every animated signal at once:
+/// `(moves transform, deforms geometry, visibility samples)` — the
+/// manifest walk previously enumerated the composed attribute list twice
+/// per prim with time-sample scans over every attribute, which measured
+/// as the kitchen manifest's hot spot (2745 nodes × 29 attributes).
 /// `renders_geometry` is the prim's type-gated decision: a non-geometry
 /// prim's primvars can never animate rendered vertices, so its primvar
-/// names skip the (composed, pricey) time-sample query.
+/// names skip the (composed, pricey) time-sample query; `imageable`
+/// likewise gates the visibility check (a non-imageable prim's visibility
+/// is never computed per call).
 /// Geometry deformation covers points/normals/widths and primvars
 /// (Task 6 ruling 1a) plus the topology attrs tessellation reads at the
-/// requested time (faceVertexCounts/faceVertexIndices/curveVertexCounts); transform motion covers xformOps and, for a
-/// PointInstancer, its per-instance arrays. Attributes outside either
+/// requested time (faceVertexCounts/faceVertexIndices/curveVertexCounts); transform motion covers xformOps, the
+/// PointInstancer's per-instance arrays, and — third flag — overall
+/// `visibility` time samples (compute_visibility stays per-call). Attributes outside any
 /// family skip the time-sample query.
 fn samples_scene_motion(
     prim: &openusd::usd::Prim,
     renders_geometry: bool,
+    imageable: bool,
     skel_memo: &mut SkelAnimMemo,
     sampled_attrs: &mut Vec<Attribute>,
-) -> Result<(bool, bool), String> {
+) -> Result<(bool, bool, bool), String> {
     let is_instancer = prim
         .type_name()
         .map_err(stage_err)?
         .is_some_and(|token| token == "PointInstancer");
     let mut transform = false;
     let mut geometry = false;
+    let mut visibility = false;
     // UsdSkel influence membership: a skel-bound geometry prim's points
     // can be driven by the bound animation even with no sampled primvar
     // (the only authored-name check the non-skel budget allows; the
@@ -2572,7 +2630,8 @@ fn samples_scene_motion(
                     | "faceVertexIndices"
                     | "curveVertexCounts"
             ) || name.starts_with("primvars:"));
-        if !moves_transform && !deforms_geometry {
+        let visibility_samples = imageable && name == "visibility";
+        if !moves_transform && !deforms_geometry && !visibility_samples {
             continue;
         }
         let attribute = prim.attribute(name);
@@ -2585,6 +2644,9 @@ fn samples_scene_motion(
         }
         if deforms_geometry {
             geometry = true;
+        }
+        if visibility_samples {
+            visibility = true;
         }
     }
     if skel_influences {
@@ -2600,7 +2662,56 @@ fn samples_scene_motion(
             ),
         }
     }
-    Ok((transform, geometry))
+    Ok((transform, geometry, visibility))
+}
+
+/// Whether the rendered subtree rooted at `key` carries any time-dependent
+/// signal — the prim's own motion/deformation/visibility sampling or any
+/// descendant's, through the two synthetic child sources (native-instance
+/// expansions draw the prototype's CHILDREN, so only they feed the signal;
+/// a PointInstancer's synthetic child draws the prototype ROOT itself, so
+/// its own signal counts). USD composition is acyclic, so the recursion
+/// terminates; the pre-seeded false guards a pathological cycle fail-soft.
+fn signal_of(
+    facts: &HashMap<String, SkeletonFacts>,
+    key: &str,
+    memo: &mut HashMap<String, bool>,
+) -> bool {
+    if let Some(cached) = memo.get(key) {
+        return *cached;
+    }
+    memo.insert(key.to_string(), false);
+    let Some(fact) = facts.get(key) else {
+        return false;
+    };
+    let mut signal = fact.self_moves || fact.self_deforms || fact.self_visibility_animated;
+    let descendants: Vec<String> = match &fact.kind {
+        SkeletonKind::Plain => fact.children.clone(),
+        SkeletonKind::NativeInstance { prototype } => {
+            // The prototype ROOT is consumed like a child: its self_moves
+            // lifts the copies' animated flag, its own sampled visibility
+            // flips every copy's computed visibility (the copies are its
+            // descendants), and its deforms drive the instance node's own
+            // geometry — so its signals must count for the instance even
+            // when the instance prim's composed attrs miss them.
+            let mut descendants = Vec::new();
+            if let Some(path) = prototype {
+                descendants.push(path.to_string());
+                if let Some(proto) = facts.get(&path.to_string()) {
+                    descendants.extend(proto.children.clone());
+                }
+            }
+            descendants
+        }
+        SkeletonKind::PointInstancer { prototypes } => {
+            prototypes.iter().map(|path| path.to_string()).collect()
+        }
+    };
+    for descendant in descendants {
+        signal |= signal_of(facts, &descendant, memo);
+    }
+    memo.insert(key.to_string(), signal);
+    signal
 }
 
 /// One synthetic RenderNode per PointInstancer prototype, in `prototypes`
@@ -2613,6 +2724,31 @@ fn samples_scene_motion(
 /// so in the row-vector convention: proto_xform * S * R * T. The instancer
 /// node's own `transform` carries the instancer's local xform, which the
 /// frontend applies least locally.
+///
+/// `walk` selects the per-prototype SUBTREE builder and the zero-instance
+/// wrapper policy: a full-manifest walk uses full subtrees and skips
+/// zero-instance prototypes; a delta walk always keeps zero-instance
+/// wrappers in the output with `instances: []` and `visible: false`, so
+/// the frontend's in-place update hides a count that dropped to zero —
+/// the pinned invariant that a delta-present instancer carries every
+/// synthetic child wrapper. Within a delta walk, a synthetic child whose
+/// own `animated` flag is set (its descendant InstancedMeshes re-derive
+/// their per-instance matrices from the threaded context every step) or a
+/// visibility-forced walk (whose descendants' baked visible flags may
+/// flip) keeps the FULL subtree, while a connector filters to its
+/// signal-bearing nodes.
+#[derive(Clone, Copy)]
+enum ProtoWalk {
+    /// The full manifest walk: full subtrees, no zero-instance wrappers.
+    Full,
+    /// Delta over an instancer whose context moves: full subtrees, and
+    /// zero-instance wrappers as hide carriers.
+    DeltaFull,
+    /// Delta connector: filtered subtrees (`vis` is the delta walk's
+    /// visibility force), zero-instance wrappers as hide carriers.
+    DeltaFiltered { vis: bool },
+}
+
 fn prototype_children(
     skeleton: &ManifestSkeleton,
     prim: &openusd::usd::Prim,
@@ -2620,6 +2756,7 @@ fn prototype_children(
     time: Option<f64>,
     instancer_moves: bool,
     prototype_memo: &mut PrototypeMemo,
+    walk: ProtoWalk,
 ) -> Result<Vec<RenderNode>, String> {
     let instancer = PointInstancer::from_prim_unchecked(prim.clone());
     let time_code = time.map(TimeCode::new);
@@ -2681,6 +2818,21 @@ fn prototype_children(
         // own sampled geometry attrs count here — its descendants carry
         // their own per-node flags from the walked subtree below.
         let geometry_animated = proto_renders_geometry && proto_deforms;
+        // The delta subtree filter only applies to a connector synthetic
+        // child (nothing of its own animates): an animated one re-derives
+        // every descendant matrix per step, and a visibility-forced walk
+        // carries stale baked visible flags, so both stay full.
+        let mode = match walk {
+            ProtoWalk::Full | ProtoWalk::DeltaFull => SubtreeMode::Full,
+            ProtoWalk::DeltaFiltered { vis } => {
+                if animated || vis {
+                    SubtreeMode::Full
+                } else {
+                    SubtreeMode::DeltaFiltered { vis: false }
+                }
+            }
+        };
+        let emit_empty = !matches!(walk, ProtoWalk::Full);
         let mut instances = Vec::new();
         for (i, &proto_index) in proto_indices.iter().enumerate() {
             if proto_index < 0
@@ -2703,17 +2855,22 @@ fn prototype_children(
                 .unwrap_or(gf::Matrix4d::IDENTITY);
             instances.push((proto_xform * scale * rotation * translation).0);
         }
-        if instances.is_empty() {
+        if instances.is_empty() && !emit_empty {
             continue;
         }
         let synthetic_path = format!("{}/{}{}", prim.path(), PROTO_PREFIX, index);
-        let mut prototype_children = render_children(
-            skeleton,
-            &prototype.children,
-            time,
-            animated,
-            prototype_memo,
-        )?;
+        // A zero-instance wrapper is the hide carrier (visible: false,
+        // no subtree): the frontend sets its wrapper invisible, which
+        // cascades to threaded descendants; the count returns when the
+        // instancer re-emits it with instances.
+        let (visible, mut prototype_children) = if instances.is_empty() {
+            (false, Vec::new())
+        } else {
+            (
+                visible,
+                build_subtree(mode, skeleton, &prototype.children, time, animated, prototype_memo)?,
+            )
+        };
         rebase_render_paths(
             &mut prototype_children,
             prototype_path,
@@ -2757,10 +2914,39 @@ fn rebase_render_paths(
 }
 
 /// Rendered prototype subtrees memoized during one manifest walk, keyed by
-/// (prototype path, ancestor-moves): identical compositions share one
-/// prototype, so the tree is walked once and cloned per instance. The
-/// ancestor-moves variant of the animated flag keeps the two states apart.
-type PrototypeMemo = HashMap<(sdf::Path, bool), Vec<RenderNode>>;
+/// (prototype path, ancestor-moves, walk mode): identical compositions
+/// share one prototype, so the tree is walked once and cloned per
+/// instance. The ancestor-moves variant of the animated flag keeps the
+/// two states apart, and the walk mode keeps a full-walk entry from being
+/// reused by a filtered delta walk (or vice versa) within one request.
+type PrototypeMemo = HashMap<(sdf::Path, bool, SubtreeMode), Vec<RenderNode>>;
+
+/// Which walk builds a prototype subtree: the full walk (every node) or
+/// the delta walk filtered to signal-bearing nodes. `vis` is the delta
+/// walk's visibility force — see `delta_children`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum SubtreeMode {
+    Full,
+    DeltaFiltered { vis: bool },
+}
+
+fn build_subtree(
+    mode: SubtreeMode,
+    skeleton: &ManifestSkeleton,
+    children: &[String],
+    time: Option<f64>,
+    ancestor_moves: bool,
+    prototype_memo: &mut PrototypeMemo,
+) -> Result<Vec<RenderNode>, String> {
+    match mode {
+        SubtreeMode::Full => {
+            render_children(skeleton, children, time, ancestor_moves, prototype_memo)
+        }
+        SubtreeMode::DeltaFiltered { vis } => {
+            delta_children(skeleton, children, time, ancestor_moves, prototype_memo, false, vis)
+        }
+    }
+}
 
 fn native_prototype_children(
     skeleton: &ManifestSkeleton,
@@ -2769,17 +2955,18 @@ fn native_prototype_children(
     time: Option<f64>,
     ancestor_moves: bool,
     prototype_memo: &mut PrototypeMemo,
+    mode: SubtreeMode,
 ) -> Result<Vec<RenderNode>, String> {
     let Some(prototype_path) = prototype else {
         return Ok(Vec::new());
     };
     // The prototype subtree is identical for every instance sharing one
     // prototype (pcp mints the prototype exactly when compositions agree),
-    // so its rendered tree is walked once per (prototype, ancestor-moves)
-    // and cloned per instance — only the path rebase differs. The memo is
-    // per-call state: its entries hold sampled transforms and visibility,
-    // so they must not outlive the manifest call that built them.
-    let memo_key = (prototype_path.clone(), ancestor_moves);
+    // so its rendered tree is walked once per (prototype, ancestor-moves,
+    // walk mode) and cloned per instance — only the path rebase differs.
+    // The memo is per-call state: its entries hold sampled transforms and
+    // visibility, so they must not outlive the manifest call that built them.
+    let memo_key = (prototype_path.clone(), ancestor_moves, mode);
     let mut raw = match prototype_memo.get(&memo_key) {
         Some(children) => children.clone(),
         None => {
@@ -2794,7 +2981,7 @@ fn native_prototype_children(
                 })?;
             let moves = ancestor_moves || prototype.self_moves;
             let children =
-                render_children(skeleton, &prototype.children, time, moves, prototype_memo)?;
+                build_subtree(mode, skeleton, &prototype.children, time, moves, prototype_memo)?;
             prototype_memo.insert(memo_key.clone(), children.clone());
             children
         }
@@ -2818,6 +3005,7 @@ fn render_node_children(
             time,
             ancestor_moves,
             prototype_memo,
+            ProtoWalk::Full,
         ),
         SkeletonKind::NativeInstance { prototype } => native_prototype_children(
             skeleton,
@@ -2826,6 +3014,7 @@ fn render_node_children(
             time,
             ancestor_moves,
             prototype_memo,
+            SubtreeMode::Full,
         ),
         SkeletonKind::Plain => render_children(
             skeleton,
@@ -2887,6 +3076,200 @@ fn render_children(
     Ok(nodes)
 }
 
+/// The time-delta manifest walk (playback/scrub): emits ONLY nodes with a
+/// time-dependent signal — sampled xformOps, sampled geometry attrs,
+/// sampled overall visibility, or (through self_moves) a PointInstancer's
+/// sampled arrays — plus the CONNECTOR ancestors an in-place update needs.
+/// The frontend applies node transforms as LOCAL matrices, so static
+/// descendants of a moving prim follow their parent for free; a subtree
+/// with no signal anywhere is skipped whole, never sampled.
+///
+/// `force` covers the one exception: a purpose-proxy/guide (excluded) prim
+/// emits nothing itself and lifts its descendants with its transform
+/// composed into their LOCAL matrices — when IT moves (or its own
+/// visibility samples, flipping the lifted descendants' computed
+/// visibility), those descendants must ride along. Force applies per
+/// level only: once a node is emitted as a real object, its static
+/// children follow through three.js parenting, so it never propagates
+/// past a plain node (only through excluded chains, which keep composing).
+///
+/// `vis` propagates without bound: the full walk bakes each node's
+/// INHERITED computed visibility into its `visible` flag, so whenever an
+/// ancestor's visibility samples, every descendant's baked flag can flip
+/// with time — they all ride the delta with a freshly computed `visible`,
+/// through instance expansions and prototype subtrees alike.
+fn delta_children(
+    skeleton: &ManifestSkeleton,
+    children: &[String],
+    time: Option<f64>,
+    ancestor_moves: bool,
+    prototype_memo: &mut PrototypeMemo,
+    force: bool,
+    vis: bool,
+) -> Result<Vec<RenderNode>, String> {
+    let mut nodes = Vec::new();
+    for child in children {
+        let facts = skeleton
+            .facts
+            .get(child)
+            .ok_or_else(|| format!("cached manifest facts missing for prim {}", child))?;
+        let deforms = facts.renders_geometry && facts.self_deforms;
+        let self_animated =
+            facts.self_moves || deforms || facts.self_visibility_animated;
+        if !(force || vis || self_animated || skeleton.signal(child)) {
+            continue;
+        }
+        let moves = ancestor_moves || facts.self_moves;
+        let transform = local_transform(&facts.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
+        if facts.excluded {
+            // The lift composes this transform into the descendants' local
+            // matrices, so its own motion forces the whole level along; its
+            // own visibility samples flip the lifted descendants' computed
+            // visibility, so they ride along too.
+            let mut descendants = delta_node_children(
+                skeleton,
+                facts,
+                time,
+                moves,
+                prototype_memo,
+                force || facts.self_moves || facts.self_visibility_animated,
+                vis,
+            )?;
+            for descendant in &mut descendants {
+                descendant.transform = (transform * gf::Matrix4d(descendant.transform)).0;
+            }
+            nodes.extend(descendants);
+            continue;
+        }
+        // Visibility is time-dependent by USD semantics — computed per call,
+        // never cached across manifest calls (Task 1 ruling).
+        let visible = visibility_at(facts, time)?;
+        let node_children = delta_node_children(
+            skeleton,
+            facts,
+            time,
+            moves,
+            prototype_memo,
+            false,
+            vis || facts.self_visibility_animated,
+        )?;
+        let node = RenderNode {
+            material: facts.material.clone(),
+            path: child.clone(),
+            name: facts.prim.path().name().unwrap_or_default().to_string(),
+            has_geometry: facts.renders_geometry,
+            type_name: facts.type_name.clone(),
+            animated: deforms || moves,
+            geometry_animated: deforms,
+            instances: Vec::new(),
+            transform: transform.0,
+            visible,
+            children: node_children,
+        };
+        nodes.push(node);
+    }
+    Ok(nodes)
+}
+
+fn delta_node_children(
+    skeleton: &ManifestSkeleton,
+    facts: &SkeletonFacts,
+    time: Option<f64>,
+    ancestor_moves: bool,
+    prototype_memo: &mut PrototypeMemo,
+    force: bool,
+    vis: bool,
+) -> Result<Vec<RenderNode>, String> {
+    match &facts.kind {
+        SkeletonKind::PointInstancer { prototypes } => {
+            // emit_all: the frontend hides a delta instancer's absent
+            // synthetic children, so whenever the instancer node itself is
+            // in the delta every currently-drawn child must come along.
+            let emit_all =
+                force || facts.self_moves || facts.self_visibility_animated || vis;
+            if !emit_all && !prototypes.iter().any(|path| skeleton.signal(path.as_str())) {
+                return Ok(Vec::new());
+            }
+            delta_prototype_children(
+                skeleton,
+                &facts.prim,
+                prototypes,
+                time,
+                ancestor_moves,
+                prototype_memo,
+                vis,
+            )
+        }
+        SkeletonKind::NativeInstance { prototype } => {
+            // `force` must thread: an excluded native instance lifts its
+            // copies with the excluded chain's transform composed in, so
+            // when the chain moves the copies must ride with rebuilt local
+            // matrices. The prototype ROOT's own visibility samples flip
+            // every copy's computed visibility even when the instance
+            // prim's composed attrs miss them.
+            let root_vis = prototype
+                .as_ref()
+                .and_then(|path| skeleton.facts.get(&path.to_string()))
+                .is_some_and(|proto| proto.self_visibility_animated);
+            native_prototype_children(
+                skeleton,
+                &facts.prim,
+                prototype.as_ref(),
+                time,
+                ancestor_moves,
+                prototype_memo,
+                SubtreeMode::DeltaFiltered {
+                    vis: vis || force || root_vis,
+                },
+            )
+        }
+        SkeletonKind::Plain => delta_children(
+            skeleton,
+            &facts.children,
+            time,
+            ancestor_moves,
+            prototype_memo,
+            force,
+            vis,
+        ),
+    }
+}
+
+/// Delta walk over one PointInstancer's synthetic children. When the
+/// instancer's context moves (`instancer_moves` — its own sampled arrays
+/// or any sampled ancestor xform), every synthetic child and its whole
+/// subtree re-derive per step, so the full walk output IS the delta.
+/// Otherwise the instancer sits in the delta as a connector (an
+/// excluded-ancestor lift, its own visibility samples, or a prototype
+/// subtree carrying a signal): then every synthetic child wrapper is
+/// emitted — zero-instance ones included, as `visible: false` hide
+/// carriers, so the frontend's in-place update hides a count that dropped
+/// — with non-animated subtrees filtered to their signal-bearing nodes.
+fn delta_prototype_children(
+    skeleton: &ManifestSkeleton,
+    prim: &openusd::usd::Prim,
+    prototypes: &[sdf::Path],
+    time: Option<f64>,
+    instancer_moves: bool,
+    prototype_memo: &mut PrototypeMemo,
+    vis: bool,
+) -> Result<Vec<RenderNode>, String> {
+    let walk = if instancer_moves {
+        ProtoWalk::DeltaFull
+    } else {
+        ProtoWalk::DeltaFiltered { vis }
+    };
+    prototype_children(
+        skeleton,
+        prim,
+        prototypes,
+        time,
+        instancer_moves,
+        prototype_memo,
+        walk,
+    )
+}
+
 /// Computed visibility at the requested time — the one per-time imageable
 /// query the walk keeps (Task 1: compute_visibility must stay per-time and
 /// is NOT cached; non-imageable prims stay visible, matching the old
@@ -2925,6 +3308,23 @@ pub fn serialize_render_manifest(
         time,
         false,
         &mut prototype_memo,
+    )
+}
+
+pub fn serialize_animated_manifest(
+    stage: &Stage,
+    time: Option<f64>,
+) -> Result<Vec<RenderNode>, String> {
+    let skeleton = ManifestSkeleton::build(stage)?;
+    let mut prototype_memo = PrototypeMemo::new();
+    delta_children(
+        &skeleton,
+        &skeleton.root_children,
+        time,
+        false,
+        &mut prototype_memo,
+        false,
+        false,
     )
 }
 
@@ -3259,6 +3659,30 @@ pub fn request_scene_manifest(
     let (reply, response) = mpsc::channel();
     sender
         .send(StageRequest::GetManifest { time, reply })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Playback/scrub path: only the time-dependent nodes at `time`. Loads and
+// edit refreshes keep the full manifest above.
+#[tauri::command]
+pub async fn get_animated_manifest(
+    stage_id: u64,
+    time: Option<f64>,
+    state: tauri::State<'_, StageState>,
+) -> Result<Vec<RenderNode>, String> {
+    request_animated_manifest(&state.sender(stage_id)?, time)
+}
+
+pub fn request_animated_manifest(
+    sender: &mpsc::Sender<StageRequest>,
+    time: Option<f64>,
+) -> Result<Vec<RenderNode>, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::GetAnimatedManifest { time, reply })
         .map_err(|_| "stage service unavailable".to_string())?;
     response
         .recv()

@@ -1,0 +1,22 @@
+#usda 1.0
+(
+    defaultPrim = "Model"
+)
+
+# Blocker 3 fixture asset: the prototype ROOT (this model) carries
+# sampled visibility, which flips every instance copy's computed
+# visibility.
+def Xform "Model"
+{
+    token visibility.timeSamples = {
+        1: "invisible",
+        2: "inherited",
+    }
+
+    def Mesh "Shape"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+    }
+}

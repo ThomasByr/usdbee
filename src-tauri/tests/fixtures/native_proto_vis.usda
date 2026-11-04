@@ -1,0 +1,19 @@
+#usda 1.0
+(
+    defaultPrim = "Scene",
+    startTimeCode = 1,
+    endTimeCode = 2
+)
+
+# Blocker 3: a native instance whose prototype ROOT samples visibility —
+# every copy's computed visibility flips with time, so the copies must
+# ride the delta with freshly computed flags.
+def Xform "Scene"
+{
+    def "I" (
+        instanceable = true
+        prepend references = @./proto_vis_asset.usda@
+    )
+    {
+    }
+}

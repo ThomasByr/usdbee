@@ -163,10 +163,11 @@ function node(overrides: Partial<RenderNode>): RenderNode {
 }
 
 // Dispatches the IPC commands sceneBuilder drives; `manifest`
-// supplies the answer for get_scene_manifest.
+// supplies the answer for get_scene_manifest AND get_animated_manifest
+// (the playback step fetches the same scene through the delta command).
 function mockIpc(manifest: () => RenderNode[] | Promise<RenderNode[]>) {
   const dispatcher = async (cmd: string) => {
-    if (cmd === "get_scene_manifest") return manifest();
+    if (cmd === "get_scene_manifest" || cmd === "get_animated_manifest") return manifest();
     if (cmd === "get_time_codes") return [];
     if (cmd === "get_geometry_data") return packedGeometry();
     if (cmd === "get_geometry_batch") return packedBatchGeometry();
@@ -282,7 +283,7 @@ describe("renderState.setStageTime", () => {
 
     await renderState.setStageTime(5);
 
-    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", {
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_manifest", {
       stageId: stageState.activeStageId,
       time: 5,
     });
@@ -320,7 +321,7 @@ describe("renderState.setStageTime", () => {
     mockIpc(() => [node({ ...mover, transform: translate(5) })]);
     await renderState.setStageTime(5);
 
-    expect(mockedInvoke).toHaveBeenCalledWith("get_scene_manifest", {
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_manifest", {
       stageId: stageState.activeStageId,
       time: 5,
     });
@@ -347,13 +348,218 @@ describe("renderState.setStageTime", () => {
     expect(wrapper!.matrix.elements[12]).toBe(3);
   });
 
+  it("updates animated nodes from the delta and leaves static nodes untouched", async () => {
+    // The delta manifest carries ONLY the animated node: the static
+    // sibling must keep its transform, visibility and geometry untouched.
+    const wobble = node({
+      path: "/Scene/Wobble",
+      name: "Wobble",
+      type_name: "Mesh",
+      has_geometry: true,
+      animated: true,
+      geometry_animated: true,
+    });
+    const still = node({
+      path: "/Scene/Still",
+      name: "Still",
+      type_name: "Mesh",
+      has_geometry: true,
+      transform: translate(2),
+    });
+    const group = await loadScene(() => [wobble, still]);
+    const stillWrapper = group.children.find((child) => child.name === "/Scene/Still")!;
+    const stillGeometryCalls = () =>
+      mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_geometry_data").length;
+
+    mockIpc(() => [node({ ...wobble, transform: translate(7) })]);
+    await renderState.setStageTime(5);
+
+    const wobbleWrapper = group.children.find((child) => child.name === "/Scene/Wobble");
+    expect(wobbleWrapper!.matrix.elements[12]).toBe(7);
+    expect(stillWrapper.matrix.elements[12]).toBe(2);
+    expect(stillWrapper.visible).toBe(true);
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_manifest", {
+      stageId: stageState.activeStageId,
+      time: 5,
+    });
+    expect(stillGeometryCalls()).toBe(1); // only Wobble's refetch
+  });
+
+  it("does not hide a static instanced mesh absent from the delta", async () => {
+    // Delta pitfall: updateScene hides instanced meshes absent from the
+    // FULL manifest; a delta omits static instancers by design, so the
+    // delta update must leave them drawn.
+    const staticProto = node({
+      path: "/Scene/Instancer/__proto_0",
+      name: "__proto_0",
+      type_name: "Mesh",
+      has_geometry: true,
+      instances: [IDENTITY],
+    });
+    const scene = (delta: RenderNode[]) => [
+      node({
+        path: "/Scene/Instancer",
+        name: "Instancer",
+        type_name: "PointInstancer",
+        children: [staticProto],
+      }),
+      ...delta,
+    ];
+    const wobble = node({ path: "/Scene/Wobble", name: "Wobble", animated: true });
+    const group = await loadScene(() => scene([wobble]));
+    const instanced = findMesh(group) as THREE.InstancedMesh;
+
+    // The delta mentions ONLY the animated node — the instancer is absent.
+    mockIpc(() => [node({ ...wobble, transform: translate(4) })]);
+    await renderState.setStageTime(5);
+
+    expect(instanced.parent!.visible).toBe(true);
+    expect(instanced.count).toBe(1);
+  });
+
+  it("hides a prototype wrapper whose instance count dropped to zero", async () => {
+    // Blocker 1, fail B: the delta's zero-instance wrapper (instances: [],
+    // visible: false) is the hide carrier — the in-place update must hide
+    // the wrapper that was drawn at load, even though the old parent-present
+    // rule could not reach an Xform-rooted wrapper's threaded descendants.
+    const proto = node({
+      path: "/Scene/Inst/__proto_0",
+      name: "__proto_0",
+      type_name: "Mesh",
+      has_geometry: true,
+      instances: [IDENTITY],
+    });
+    const instancer = (protoChild: RenderNode) =>
+      node({
+        path: "/Scene/Inst",
+        name: "Inst",
+        type_name: "PointInstancer",
+        animated: true,
+        children: [protoChild],
+      });
+    const group = await loadScene(() => [instancer(proto)]);
+    const wrapper = group.children[0].children[0]!;
+    expect(wrapper.visible).toBe(true);
+
+    mockIpc(() => [instancer(node({ ...proto, instances: [], visible: false }))]);
+    await renderState.setStageTime(5);
+
+    expect(wrapper.visible).toBe(false);
+  });
+
+  it("hides threaded descendants through a zero-instance Xform wrapper", async () => {
+    // Blocker 1, fail B for an Xform-rooted prototype: the zero-instance
+    // wrapper is present in the delta with visible: false, and three.js
+    // cascades the wrapper's invisibility onto the threaded children.
+    const mesh = node({
+      path: "/Scene/Inst/__proto_0/Mesh",
+      name: "Mesh",
+      type_name: "Mesh",
+      has_geometry: true,
+    });
+    const protoX = node({
+      path: "/Scene/Inst/__proto_0",
+      name: "__proto_0",
+      type_name: "Xform",
+      instances: [IDENTITY],
+      children: [mesh],
+    });
+    const instancer = (child: RenderNode) =>
+      node({
+        path: "/Scene/Inst",
+        name: "Inst",
+        type_name: "PointInstancer",
+        animated: true,
+        children: [child],
+      });
+    const group = await loadScene(() => [instancer(protoX)]);
+    const protoWrapper = group.children[0].children[0]!;
+    const threaded = findMesh(group) as THREE.InstancedMesh;
+    expect(threaded.count).toBe(1);
+
+    mockIpc(() => [instancer(node({ ...protoX, instances: [], visible: false, children: [] }))]);
+    await renderState.setStageTime(5);
+
+    expect(protoWrapper.visible).toBe(false);
+    expect(threaded.count).toBe(1); // untouched; hidden via the cascade
+  });
+
+  it("keeps a connector wrapper's filtered static descendants visible", async () => {
+    // Blocker 1, fail A: a connector synthetic wrapper is present in the
+    // delta while its static threaded descendants are filtered out BY
+    // DESIGN — absent must not mean hidden there (the old parent-present
+    // rule hid them).
+    const mesh = node({
+      path: "/Scene/Inst/__proto_0/Mesh",
+      name: "Mesh",
+      type_name: "Mesh",
+      has_geometry: true,
+    });
+    const protoX = node({
+      path: "/Scene/Inst/__proto_0",
+      name: "__proto_0",
+      type_name: "Xform",
+      instances: [IDENTITY],
+      children: [mesh],
+    });
+    const instancer = (child?: RenderNode) =>
+      node({
+        path: "/Scene/Inst",
+        name: "Inst",
+        type_name: "PointInstancer",
+        children: child ? [child] : [],
+      });
+    const wobble = node({ path: "/Scene/Wobble", name: "Wobble", animated: true });
+    const group = await loadScene(() => [instancer(protoX), wobble]);
+    const threaded = findMesh(group) as THREE.InstancedMesh;
+
+    // The delta holds the connector wrapper (its prototype root samples
+    // visibility) but NOT its static threaded child.
+    mockIpc(() => [
+      instancer(node({ ...protoX, children: [] })),
+      node({ ...wobble, transform: translate(4) }),
+    ]);
+    await renderState.setStageTime(5);
+
+    expect(threaded.parent!.visible).toBe(true);
+    expect(threaded.count).toBe(1);
+  });
+
+  it("hides an absent direct prototype wrapper under a present instancer", async () => {
+    // The safety net behind the backend invariant (a delta-present
+    // instancer carries every wrapper): if a DIRECT `__proto_` wrapper is
+    // still absent, its count dropped and it must hide.
+    const proto = node({
+      path: "/Scene/Inst/__proto_0",
+      name: "__proto_0",
+      type_name: "Mesh",
+      has_geometry: true,
+      instances: [IDENTITY],
+    });
+    const instancer = (children: RenderNode[]) =>
+      node({
+        path: "/Scene/Inst",
+        name: "Inst",
+        type_name: "PointInstancer",
+        animated: true,
+        children,
+      });
+    const group = await loadScene(() => [instancer([proto])]);
+    const instanced = findMesh(group) as THREE.InstancedMesh;
+
+    mockIpc(() => [instancer([])]); // wrapper absent: count dropped to zero
+    await renderState.setStageTime(5);
+
+    expect(instanced.parent!.visible).toBe(false);
+  });
+
   it("coalesces rapid time steps to one active and one latest manifest fetch", async () => {
     const wobble = node({ path: "/Scene/Wobble", name: "Wobble" });
     await loadScene(() => [wobble]);
     const active = deferred<RenderNode[]>();
     const requested: number[] = [];
     mockedInvoke.mockImplementation(async (cmd: string, args: any) => {
-      if (cmd === "get_scene_manifest") {
+      if (cmd === "get_animated_manifest") {
         requested.push(args.time);
         return requested.length === 1 ? active.promise : [node({ ...wobble, transform: translate(9) })];
       }
@@ -684,7 +890,7 @@ describe("renderState.setStageTime", () => {
 
     const slow = deferred<ArrayBuffer>();
     mockedInvoke.mockImplementation(async (cmd: string, args: any) => {
-      if (cmd === "get_scene_manifest") return [wobble];
+      if (cmd === "get_animated_manifest") return [wobble];
       if (cmd === "get_geometry_data") return args.time === 5 ? slow.promise : packedGeometry(2);
       if (cmd === "get_material_data") return { name: "Mat", surface: null };
       throw new Error(`unexpected command: ${cmd}`);

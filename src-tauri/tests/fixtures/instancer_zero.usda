@@ -1,0 +1,82 @@
+#usda 1.0
+(
+    defaultPrim = "Scene",
+    startTimeCode = 1,
+    endTimeCode = 5
+)
+
+# Blocker 1: a delta-present instancer must emit EVERY synthetic child
+# wrapper — a count dropping to zero hides through the zero-instance
+# wrapper (instances: [], visible: false), for both geometry-rooted and
+# Xform-rooted prototypes. The connector "Conn" (present only because
+# its prototype root samples visibility) keeps its currently-drawn
+# wrapper with a FILTERED subtree: the static threaded child stays absent
+# by design and must not be hidden by the frontend.
+
+def Xform "Scene"
+{
+    def PointInstancer "Geom"
+    {
+        point3f[] positions.timeSamples = {
+            1: [(0, 0, 0)],
+            5: [],
+        }
+        int[] protoIndices.timeSamples = {
+            1: [0],
+            5: [],
+        }
+        rel prototypes = [</Scene/Geom/Proto>]
+
+        def Mesh "Proto"
+        {
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        }
+    }
+
+    def PointInstancer "Nest"
+    {
+        point3f[] positions.timeSamples = {
+            1: [(0, 0, 0)],
+            5: [],
+        }
+        int[] protoIndices.timeSamples = {
+            1: [0],
+            5: [],
+        }
+        rel prototypes = [</Scene/Nest/ProtoX>]
+
+        def Xform "ProtoX"
+        {
+            def Mesh "Child"
+            {
+                int[] faceVertexCounts = [3]
+                int[] faceVertexIndices = [0, 1, 2]
+                point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+            }
+        }
+    }
+
+    def PointInstancer "Conn"
+    {
+        point3f[] positions = [(0, 0, 0)]
+        int[] protoIndices = [0]
+        rel prototypes = [</Scene/Conn/VisProto>]
+
+        def Xform "VisProto"
+        {
+            token visibility.timeSamples = {
+                1: "invisible",
+                2: "inherited",
+            }
+
+            def Mesh "Child"
+            {
+                int[] faceVertexCounts = [3]
+                int[] faceVertexIndices = [0, 1, 2]
+                point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+            }
+        }
+    }
+}

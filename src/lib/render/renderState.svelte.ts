@@ -293,6 +293,47 @@ async function updateScene(
   }
 }
 
+// Time-delta update (playback/scrub): the delta manifest carries ONLY
+// the time-dependent nodes plus connector ancestors, so static nodes —
+// including whole static InstancedMeshes — are absent BY DESIGN and must
+// stay untouched.
+//
+// Backend invariant (pinned by animation_tests): whenever a delta
+// manifest contains a PointInstancer node, it also contains a synthetic
+// child wrapper for EVERY prototype — zero-instance ones included,
+// emitted with `instances: []` and `visible: false`, so the normal
+// per-node update hides a count that dropped to zero (three.js cascades
+// the wrapper's invisibility to threaded descendants). The hide rule
+// below is the safety net for the one shape the invariant rules out:
+// an absent DIRECT synthetic-root wrapper (path ending in `__proto_N`)
+// under a present instancer. Anything else absent — a static threaded
+// descendant of a present connector wrapper — is filtered by design and
+// must NOT be hidden. Every await is generation-guarded like updateScene.
+async function updateSceneDelta(
+  nodes: RenderNode[],
+  time: number,
+  isStale: () => boolean,
+): Promise<void> {
+  const present = new Set<string>();
+  const collect = (entries: RenderNode[]) => {
+    for (const node of entries) {
+      present.add(node.path);
+      collect(node.children);
+    }
+  };
+  collect(nodes);
+  await updateNodes(nodes, currentPaths, time, isStale, null, null, null);
+  if (isStale()) return;
+  for (const [path, object] of currentPaths) {
+    if ((object as THREE.InstancedMesh).isInstancedMesh && !present.has(path)) {
+      const slash = path.lastIndexOf("/");
+      const isDirectWrapper = path.slice(slash + 1).startsWith("__proto_");
+      if (isDirectWrapper && present.has(path.slice(0, slash)))
+        object.parent!.visible = false;
+    }
+  }
+}
+
 // Geometry for the edit-refreshed prims, fetched through the BATCH
 // command (ruling: a single-path refresh is a 1-element batch) in
 // bounded sequential slices. A failed batch command leaves the map
@@ -472,9 +513,10 @@ export const renderState = $state({
   },
 
   // Steps the stage time (USD time codes) and updates the integrated
-  // scene in place: one manifest fetch, then per-animated-node geometry
-  // fetches. One step runs at a time; rapid requests coalesce to the
-  // latest queued time. Loads still supersede active work via loadGeneration.
+  // scene in place: ONE time-delta manifest fetch (only the animated
+  // nodes), then per-animated-node geometry fetches. One step runs at a
+  // time; rapid requests coalesce to the latest queued time. Loads still
+  // supersede active work via loadGeneration.
   setStageTime(time: number): Promise<void> {
     this.time = time;
     this.onTimeChange?.(time);
@@ -493,12 +535,12 @@ export const renderState = $state({
     timeStepInFlight = true;
     activeTimeStep = (async () => {
       try {
-        const manifest = await invoke<RenderNode[]>("get_scene_manifest", {
+        const manifest = await invoke<RenderNode[]>("get_animated_manifest", {
           stageId: stageState.activeStageId,
           time,
         });
         if (generation !== loadGeneration || currentGroup !== group) return;
-        await updateScene(manifest, time, () => generation !== loadGeneration || currentGroup !== group);
+        await updateSceneDelta(manifest, time, () => generation !== loadGeneration || currentGroup !== group);
       } catch (e) {
         if (generation === loadGeneration) {
           // Keep the last good scene on screen; surface why.

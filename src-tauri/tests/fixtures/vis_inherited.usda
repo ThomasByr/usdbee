@@ -1,0 +1,52 @@
+#usda 1.0
+(
+    defaultPrim = "Scene",
+    startTimeCode = 1,
+    endTimeCode = 2
+)
+
+# Blocker 2: inherited visibility. The full walk bakes each node's
+# computed (inherited) visibility into its visible flag, so a
+# visibility-sampled ancestor's static descendants must ride the delta
+# with a freshly computed flag — both under a plain ancestor (Group)
+# and lifted under an excluded (guide) ancestor whose own visibility
+# samples.
+
+def Xform "Scene"
+{
+    def Xform "Group"
+    {
+        token visibility.timeSamples = {
+            1: "invisible",
+            2: "inherited",
+        }
+
+        def Xform "Sub"
+        {
+            def Mesh "Leaf"
+            {
+                int[] faceVertexCounts = [3]
+                int[] faceVertexIndices = [0, 1, 2]
+                point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+            }
+        }
+    }
+
+    def Xform "Guide"
+    {
+        uniform token purpose = "guide"
+
+        token visibility.timeSamples = {
+            1: "invisible",
+            2: "inherited",
+        }
+
+        def Mesh "GLeaf"
+        {
+            uniform token purpose = "default"
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        }
+    }
+}

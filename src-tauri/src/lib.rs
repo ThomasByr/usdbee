@@ -101,6 +101,7 @@ pub fn run() {
             stage::get_stage_tree,
             stage::get_prim_details,
             stage::get_scene_manifest,
+            stage::get_animated_manifest,
             stage::get_time_codes,
             stage::get_geometry_data,
             stage::get_geometry_batch,

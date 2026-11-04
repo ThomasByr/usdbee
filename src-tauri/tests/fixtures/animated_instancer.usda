@@ -1,0 +1,26 @@
+#usda 1.0
+(
+    defaultPrim = "Scene",
+    startTimeCode = 1,
+    endTimeCode = 5
+)
+
+def Xform "Scene"
+{
+    def PointInstancer "Swarm"
+    {
+        point3f[] positions.timeSamples = {
+            1: [(0, 0, 0)],
+            5: [(4, 0, 0)],
+        }
+        int[] protoIndices = [0]
+        rel prototypes = [</Scene/Swarm/Proto>]
+
+        def Mesh "Proto"
+        {
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        }
+    }
+}
