@@ -135,7 +135,7 @@ fn non_coplanar_uv_seam_keeps_one_smooth_normal_across_split_copies() {
     // Face 0 lies in the XY plane (normal (0, 0, 1)); face 1 tilts in Z
     // (unnormalized cross (-0.5, -0.5, 1)). The merged area-weighted normal
     // is (-0.5, -0.5, 2) normalized.
-    let merged = [-0.235_702_26, -0.235_702_26, 0.942_809_0];
+    let merged = [-0.235_702_26, -0.235_702_26, 0.942_809];
     for &copy in &[2, 3] {
         assert!(
             normals[copy]
