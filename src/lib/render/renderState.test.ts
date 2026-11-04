@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { invoke } from "@tauri-apps/api/core";
 import * as THREE from "three";
-import { advanceStageTime, renderState, toAbsoluteTime, toPlayheadOffset } from "./renderState.svelte";
+import { advanceStageTime, renderState, snapToTimeCodes, toAbsoluteTime, toPlayheadOffset } from "./renderState.svelte";
 import type { RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
 
@@ -28,6 +28,7 @@ function deferred<T>() {
 beforeEach(() => {
   mockedInvoke.mockReset();
   renderState.time = null;
+  renderState.timeCodes = [];
 });
 
 describe("renderState", () => {
@@ -57,6 +58,20 @@ describe("renderState", () => {
       stageId: stageState.activeStageId,
       time: 10,
     });
+  });
+
+  it("caches the stage's authored time codes on load", async () => {
+    mockedInvoke
+      .mockResolvedValueOnce([]) // manifest
+      .mockResolvedValueOnce([0, 12, 24]); // get_time_codes
+
+    await renderState.loadRenderScene();
+    await Promise.resolve();
+
+    expect(mockedInvoke).toHaveBeenCalledWith("get_time_codes", {
+      stageId: stageState.activeStageId,
+    });
+    expect(renderState.timeCodes).toEqual([0, 12, 24]);
   });
 
   it("discards a stale manifest response after a newer load", async () => {
@@ -152,6 +167,7 @@ function node(overrides: Partial<RenderNode>): RenderNode {
 function mockIpc(manifest: () => RenderNode[] | Promise<RenderNode[]>) {
   const dispatcher = async (cmd: string) => {
     if (cmd === "get_scene_manifest") return manifest();
+    if (cmd === "get_time_codes") return [];
     if (cmd === "get_geometry_data") return packedGeometry();
     if (cmd === "get_geometry_batch") return packedBatchGeometry();
     if (cmd === "get_material_data") return { name: "Mat", surface: null };
@@ -784,13 +800,42 @@ describe("advanceStageTime", () => {
     expect(advanceStageTime(0, 1, 30, 0, 100)).toBe(30);
   });
 
-  it("wraps around the stage range and tolerates a non-zero start", () => {
-    expect(advanceStageTime(23.5, 0.5, 24, 0, 24)).toBe(11.5);
+  it("keeps continuous times when no authored codes exist", () => {
+    // Mesh-cache fix: a stage without time samples (or whose codes have
+    // not arrived yet) plays continuous fractional times as before.
+    expect(advanceStageTime(23.5, 0.5, 24, 0, 24, [])).toBe(11.5);
     expect(advanceStageTime(2, 0.1, 24, 2, 6)).toBeCloseTo(4.4, 10);
+  });
+
+  it("snaps to the nearest authored code and keeps the wrap", () => {
+    // The Rust MeshCache keys by exact f64 bits, so every playback step
+    // snaps to the nearest authored code to hit it.
+    expect(advanceStageTime(0, 0.5, 24, 0, 24, [0, 12, 24])).toBe(12);
+    // 23.5 + 12 wraps to 11.5, which snaps FORWARD to 12.
+    expect(advanceStageTime(23.5, 0.5, 24, 0, 24, [0, 12, 24])).toBe(12);
+    // 2 + 2.4 = 4.4 snaps to 5 on a non-zero-start stage.
+    expect(advanceStageTime(2, 0.1, 24, 2, 6, [2, 5])).toBe(5);
+  });
+
+  it("clamps a snapped code outside the stage range back into it", () => {
+    // Codes authored beyond end_time_code must not drag the playhead out:
+    // 18 + 4.8 = 22.8 is nearest to the out-of-range 36, clamped to 24.
+    expect(advanceStageTime(18, 0.2, 24, 0, 24, [0, 36])).toBe(24);
   });
 
   it("holds a degenerate range at the start time", () => {
     expect(advanceStageTime(3, 1, 24, 5, 5)).toBe(5);
+  });
+});
+
+describe("snapToTimeCodes", () => {
+  it("snaps a scrub time to the nearest authored code", () => {
+    expect(snapToTimeCodes(4.4, [2, 5, 9])).toBe(5);
+    expect(snapToTimeCodes(8.9, [2, 5, 9])).toBe(9);
+  });
+
+  it("passes the time through unchanged without codes", () => {
+    expect(snapToTimeCodes(4.4, [])).toBe(4.4);
   });
 });
 

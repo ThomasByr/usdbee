@@ -149,7 +149,14 @@ export function installPlaybackDriver(viewer: RendererKit) {
     const end = info?.end_time_code ?? 0;
     if (end <= start) return;
     const tcps = info?.time_codes_per_second ?? 24;
-    const next = advanceStageTime(renderState.time ?? start, deltaSeconds, tcps, start, end);
+    const next = advanceStageTime(
+      renderState.time ?? start,
+      deltaSeconds,
+      tcps,
+      start,
+      end,
+      renderState.timeCodes,
+    );
     viewer.animationProgress = toPlayheadOffset(next, start);
     void renderState.setStageTime(next);
   };

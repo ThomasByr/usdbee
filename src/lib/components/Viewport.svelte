@@ -4,7 +4,7 @@
   import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
   import { tabsState } from "$lib/state/tabsState.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
-  import { renderState, toAbsoluteTime } from "$lib/render/renderState.svelte";
+  import { renderState, snapToTimeCodes, toAbsoluteTime } from "$lib/render/renderState.svelte";
   import {
     integrateScene,
     loadRustScene,
@@ -210,7 +210,9 @@
         value={viewer.animationProgress}
         oninput={(e) => {
           viewer.animationProgress = parseFloat(e.currentTarget.value);
-          void renderState.setStageTime(toAbsoluteTime(viewer.animationProgress, startTimeCode()));
+          void renderState.setStageTime(
+            snapToTimeCodes(toAbsoluteTime(viewer.animationProgress, startTimeCode()), renderState.timeCodes),
+          );
           if (viewer.showBoundingBox && viewer.loadedGroup)
             viewer.sceneBox.setFromObject(viewer.loadedGroup, true);
           if (viewer.selectedNode && viewer.selectionHelper) {

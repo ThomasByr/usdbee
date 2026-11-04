@@ -48,6 +48,13 @@ let currentFallbacks: FallbackDependencies = {};
 // One shared loader; convertMaterial clears failed maps through onError.
 const textureLoader = new THREE.TextureLoader();
 
+// The open stage's authored time-sample times (unioned, ascending) —
+// empty when nothing is time-sampled. Playback/scrubbing snaps to these
+// so repeated visits hit the Rust MeshCache.
+export function getTimeCodes(stageId: number): Promise<number[]> {
+  return invoke<number[]>("get_time_codes", { stageId });
+}
+
 const fetchers: SceneFetchers = {
   getGeometry: (path: string, time = renderState.time) =>
     invoke<ArrayBuffer>("get_geometry_data", {
@@ -81,18 +88,32 @@ const fetchers: SceneFetchers = {
 
 // Spec §8 pin: the seconds -> time-code conversion lives ONLY in this
 // helper (and the exporter's per-frame stepping) — everywhere else works
-// in USD time codes. Wraps past `end` back into [start, end].
+// in USD time codes. Wraps past `end` back into [start, end], then snaps
+// to the nearest authored time code from `codes` (empty list → the
+// continuous time unchanged; the Rust MeshCache keys by exact f64 bits,
+// so fractional times never hit it).
+export function snapToTimeCodes(time: number, codes: number[]): number {
+  if (codes.length === 0) return time;
+  let best = codes[0]!;
+  for (const code of codes) {
+    if (Math.abs(code - time) < Math.abs(best - time)) best = code;
+  }
+  return best;
+}
+
 export function advanceStageTime(
   current: number,
   deltaSeconds: number,
   timeCodesPerSecond: number,
   start: number,
   end: number,
+  codes: number[] = [],
 ): number {
   const span = end - start;
   if (span <= 0) return start;
   const next = current + deltaSeconds * timeCodesPerSecond;
-  return next > end ? start + ((next - start) % span) : next;
+  const wrapped = next > end ? start + ((next - start) % span) : next;
+  return Math.min(Math.max(snapToTimeCodes(wrapped, codes), start), end);
 }
 
 // Playhead-unit convention (review fix): the UI layer — timeline slider,
@@ -367,6 +388,9 @@ export const renderState = $state({
   // Whether the loaded manifest contains any animated node (drives the
   // timeline's visibility).
   hasAnimated: false,
+  // Authored time-sample times of the open stage, refetched per load;
+  // empty until the fetch lands (times stay continuous until then).
+  timeCodes: [] as number[],
   status: "idle" as "idle" | "loading" | "ready" | "error",
   error: null as string | null,
 
@@ -392,6 +416,7 @@ export const renderState = $state({
     // everything anyway) — drop it like a queued time step.
     queuedRefresh = null;
     this.time = startTime;
+    this.timeCodes = [];
     this.onTimeChange?.(startTime);
     this.status = "loading";
     this.error = null;
@@ -411,6 +436,17 @@ export const renderState = $state({
       currentGroup = group;
       currentPaths = indexByPath(group);
       this.status = "ready";
+      // Non-blocking: playback stays continuous if it starts before the
+      // codes arrive; a superseding load discards the stale reply, and a
+      // failed fetch leaves the list empty (continuous times).
+      void (async () => {
+        try {
+          const codes = await getTimeCodes(stageState.activeStageId);
+          if (generation === loadGeneration && Array.isArray(codes)) this.timeCodes = codes;
+        } catch {
+          // Codes unavailable: times stay continuous.
+        }
+      })();
       sceneLoading = false;
       const pendingTime = queuedTime;
       queuedTime = null;

@@ -12,8 +12,8 @@ use openusd::ar::DefaultResolver;
 use openusd::gf;
 use openusd::sdf::{self, ValueTypeName};
 use openusd::usd::{
-    ApplyMode, Diff, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, ReplayStage,
-    SchemaBase, Stage, StageAuthoringError, TimeCode, UndoStage,
+    ApplyMode, Attribute, Diff, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate,
+    ReplayStage, SchemaBase, Stage, StageAuthoringError, TimeCode, UndoStage,
 };
 use openusd_schemas::geom::{
     Imageable, ImageableExt, PointInstancer, PointInstancerSchema, Purpose, Visibility,
@@ -58,6 +58,12 @@ pub enum StageRequest {
     GetManifest {
         time: Option<f64>,
         reply: mpsc::Sender<Result<Vec<RenderNode>, String>>,
+    },
+    // The stage's authored time-sample times (unioned, ascending): the
+    // times playback/scrubbing snap to so the exact-f64-keyed MeshCache
+    // hits across loop iterations and scrub revisits.
+    GetTimeCodes {
+        reply: mpsc::Sender<Result<Vec<f64>, String>>,
     },
     GetGeometry {
         path: String,
@@ -613,6 +619,22 @@ fn spawn_stage_owner_for(
                                 false,
                                 &mut prototype_memo,
                             )
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::GetTimeCodes { reply } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            if manifest_skeleton.is_none() {
+                                manifest_skeleton = Some(ManifestSkeleton::build(stage)?);
+                            }
+                            Ok(manifest_skeleton
+                                .as_ref()
+                                .map(|skeleton| skeleton.time_codes.clone())
+                                .unwrap_or_default())
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -2299,6 +2321,10 @@ struct ManifestSkeleton {
     /// reaches both). Values are keyed by their composed path spelling.
     facts: HashMap<String, SkeletonFacts>,
     root_children: Vec<String>,
+    /// The unioned authored time-sample times of every animated
+    /// attribute the walk found (ascending, deduped) — empty when
+    /// nothing is time-sampled.
+    time_codes: Vec<f64>,
 }
 
 impl ManifestSkeleton {
@@ -2306,8 +2332,12 @@ impl ManifestSkeleton {
         let mut skeleton = ManifestSkeleton {
             facts: HashMap::new(),
             root_children: Vec::new(),
+            time_codes: Vec::new(),
         };
         let mut skel_memo = SkelAnimMemo::new();
+        // Every attribute the walk finds with authored time samples; the
+        // post-walk union below derives `time_codes` from them.
+        let mut sampled_attrs: Vec<Attribute> = Vec::new();
         let mut pending: Vec<sdf::Path> = Vec::new();
         let pseudo_root = stage
             .prim(sdf::Path::abs_root())
@@ -2318,6 +2348,7 @@ impl ManifestSkeleton {
             &mut skeleton,
             &mut pending,
             &mut skel_memo,
+            &mut sampled_attrs,
         )?;
         // Native prototype roots (and any prototype target outside the
         // walked tree) only exist as prims once their instances composed,
@@ -2335,8 +2366,17 @@ impl ManifestSkeleton {
             if !prim.is_valid().map_err(stage_err)? {
                 continue;
             }
-            build_facts(stage, &prim, &mut skeleton, &mut pending, &mut skel_memo)?;
+            build_facts(
+                stage,
+                &prim,
+                &mut skeleton,
+                &mut pending,
+                &mut skel_memo,
+                &mut sampled_attrs,
+            )?;
         }
+        skeleton.time_codes =
+            Attribute::unioned_time_samples(&sampled_attrs).map_err(stage_err)?;
         Ok(skeleton)
     }
 }
@@ -2351,6 +2391,7 @@ fn build_facts(
     skeleton: &mut ManifestSkeleton,
     pending: &mut Vec<sdf::Path>,
     skel_memo: &mut SkelAnimMemo,
+    sampled_attrs: &mut Vec<Attribute>,
 ) -> Result<Vec<String>, String> {
     let type_name = prim
         .type_name()
@@ -2388,7 +2429,14 @@ fn build_facts(
     if matches!(kind, SkeletonKind::Plain) {
         for child in visible_children(prim)? {
             let child_key = child.path().to_string();
-            build_facts(stage, &child, skeleton, pending, skel_memo)?;
+            build_facts(
+                stage,
+                &child,
+                skeleton,
+                pending,
+                skel_memo,
+                sampled_attrs,
+            )?;
             children.push(child_key);
         }
     }
@@ -2403,7 +2451,7 @@ fn build_facts(
             ),
         ),
     };
-    let (self_moves, self_deforms) = samples_scene_motion(prim, renders, skel_memo)?;
+    let (self_moves, self_deforms) = samples_scene_motion(prim, renders, skel_memo, sampled_attrs)?;
 
     let path = prim.path().to_string();
     skeleton.facts.insert(
@@ -2485,6 +2533,7 @@ fn samples_scene_motion(
     prim: &openusd::usd::Prim,
     renders_geometry: bool,
     skel_memo: &mut SkelAnimMemo,
+    sampled_attrs: &mut Vec<Attribute>,
 ) -> Result<(bool, bool), String> {
     let is_instancer = prim
         .type_name()
@@ -2526,9 +2575,11 @@ fn samples_scene_motion(
         if !moves_transform && !deforms_geometry {
             continue;
         }
-        if prim.attribute(name).num_time_samples().map_err(stage_err)? == 0 {
+        let attribute = prim.attribute(name);
+        if attribute.num_time_samples().map_err(stage_err)? == 0 {
             continue;
         }
+        sampled_attrs.push(attribute);
         if moves_transform {
             transform = true;
         }
@@ -3208,6 +3259,26 @@ pub fn request_scene_manifest(
     let (reply, response) = mpsc::channel();
     sender
         .send(StageRequest::GetManifest { time, reply })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn get_time_codes(
+    stage_id: u64,
+    state: tauri::State<'_, StageState>,
+) -> Result<Vec<f64>, String> {
+    request_time_codes(&state.sender(stage_id)?)
+}
+
+pub fn request_time_codes(sender: &mpsc::Sender<StageRequest>) -> Result<Vec<f64>, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::GetTimeCodes { reply })
         .map_err(|_| "stage service unavailable".to_string())?;
     response
         .recv()

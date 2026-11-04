@@ -8,7 +8,9 @@ use std::path::PathBuf;
 mod common;
 
 use common::spawn_stage_owner;
-use usdbee_lib::stage::{open_stage, request_geometry_data, serialize_render_manifest, RenderNode};
+use usdbee_lib::stage::{
+    open_stage, request_geometry_data, request_time_codes, serialize_render_manifest, RenderNode,
+};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -204,4 +206,24 @@ fn geometry_interpolates_linearly_at_non_integer_time() {
         "linear interpolation on the second axis, got {}",
         position(&bytes, 2, 1)
     );
+}
+
+#[test]
+fn time_codes_union_every_animated_attribute() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+
+    // Pulse's translate samples at 1 and 24; Wobble's points and Mover's
+    // translate at 0 and 10 — one ascending union, no repeats.
+    let codes = request_time_codes(&state.sender()).expect("time codes should serialize");
+    assert_eq!(codes, vec![0.0, 1.0, 10.0, 24.0]);
+}
+
+#[test]
+fn time_codes_empty_for_a_static_stage() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "basic.usda");
+
+    let codes = request_time_codes(&state.sender()).expect("time codes should serialize");
+    assert!(codes.is_empty(), "expected no time codes, got {:?}", codes);
 }
