@@ -5,7 +5,7 @@ use openusd::gf;
 use openusd::sdf::{self, Value};
 use openusd::usd::TimeCode;
 use usdbee_lib::stage::{
-    open_stage, serialize_render_manifest, serialize_tree, PrimNode, RenderNode,
+    PrimNode, RenderNode, open_stage, serialize_render_manifest, serialize_tree,
 };
 use usdbee_lib::tessellation::{pack_geometry, tessellate_prim};
 use usdbee_lib::values::local_transform;
@@ -114,8 +114,16 @@ fn print_bounds(label: &str, bounds: &Option<([f64; 3], [f64; 3])>) {
 }
 
 fn main() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../assets/full_assets/CarbonFrameBike/CarbonFrameBike.usdz");
+    let path = std::env::var_os("USD_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../assets/full_assets/CarbonFrameBike/CarbonFrameBike.usdz")
+        });
+    let dump_dir = std::env::var_os("DUMP_DIR").map(PathBuf::from);
+    if let Some(dir) = &dump_dir {
+        std::fs::create_dir_all(dir).unwrap();
+    }
     let (stage, info) = open_stage(&path).unwrap();
     let query_time = std::env::var("BIKE_TIME")
         .ok()
@@ -149,6 +157,13 @@ fn main() {
     }
 
     let manifest = serialize_render_manifest(&stage, time).unwrap();
+    if let Some(dir) = &dump_dir {
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
     let mut nodes = Vec::new();
     manifest_nodes(&manifest, &mut nodes);
     nodes.sort_by(|a, b| a.path.cmp(&b.path));
@@ -173,10 +188,15 @@ fn main() {
 
     let mut raw_bounds = None;
     let mut upright_bounds = None;
-    for path in geometry_paths {
+    for (geometry_index, path) in geometry_paths.into_iter().enumerate() {
         let prim = stage.prim(sdf::try_into_path(&path).unwrap()).unwrap();
         let mesh = tessellate_prim(&prim, time).unwrap().unwrap();
         let bytes = pack_geometry(&mesh);
+        if let Some(dir) = &dump_dir {
+            let file = dir.join(format!("geometry_{geometry_index}.bin"));
+            std::fs::write(&file, &bytes).unwrap();
+            println!("GEOMETRY_FILE {path} {}", file.display());
+        }
         let vertices = positions(&bytes);
         let index_count = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
         let flags = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
