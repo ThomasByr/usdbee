@@ -125,6 +125,86 @@ def SkelRoot "Rig"
         point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
     }
 
+    def Mesh "Hose_weighty" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(2, 0, 0), (4, 0, 0), (4, 0, 0)]
+        int[] primvars:skel:jointIndices = [0, 1, 2] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        float[] primvars:skel:jointWeights = [1, 1, 2] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        prepend rel skel:skeleton = </Rig/Skel>
+    }
+
+    def Mesh "Hose_norm" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(2, 0, 0), (4, 0, 0), (4, 1, 0)]
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        int[] primvars:skel:jointIndices = [0, 1, 2] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        float[] primvars:skel:jointWeights = [1, 1, 1] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        prepend rel skel:skeleton = </Rig/Skel>
+    }
+
+    def Mesh "Hose_fvn" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(2, 0, 0), (4, 0, 0), (4, 1, 0)]
+        normal3f[] normals = [(0, 1, 0), (0, 1, 0), (0, 1, 0)] (
+            elementSize = 1
+            interpolation = "faceVarying"
+        )
+        int[] primvars:skel:jointIndices = [0, 1, 2] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        float[] primvars:skel:jointWeights = [1, 1, 1] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        prepend rel skel:skeleton = </Rig/Skel>
+    }
+
+    def Mesh "Hose_fvn_twin" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(2, 0, 0), (4, 0, 0), (4, 1, 0)]
+        int[] primvars:skel:jointIndices = [0, 1, 2] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        float[] primvars:skel:jointWeights = [1, 1, 1] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        prepend rel skel:skeleton = </Rig/Skel>
+    }
+
     def Mesh "Hose_rigid" (
         prepend apiSchemas = ["SkelBindingAPI"]
     )

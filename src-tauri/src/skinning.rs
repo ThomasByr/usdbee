@@ -247,22 +247,24 @@ pub fn skin_mesh(
         .map_err(|e| err(&path, e))?
         .unwrap_or_default();
     let influences = skinning_resolver.num_influences_per_component();
-    let weights_len = match binding
+    let weights: Vec<f32> = match binding
         .joint_weights_attr()
         .get::<sdf::Value>()
         .map_err(|e| err(&path, e))?
     {
-        // The resolver widens double-authored weights, so measure the raw
+        // The resolver widens double-authored weights, so decode the raw
         // value either way (mirrors the crate's own decode).
-        Some(sdf::Value::FloatVec(values)) => values.len(),
-        Some(sdf::Value::DoubleVec(values)) => values.len(),
-        _ => 0,
+        Some(sdf::Value::FloatVec(values)) => values,
+        Some(sdf::Value::DoubleVec(values)) => {
+            values.into_iter().map(|weight| weight as f32).collect()
+        }
+        _ => Vec::new(),
     };
-    if indices.len() != weights_len {
+    if indices.len() != weights.len() {
         return Err(format!(
             "skel jointIndices/jointWeights length mismatch on {path}: {} != {}",
             indices.len(),
-            weights_len
+            weights.len()
         ));
     }
     if indices.len() != points.len() * influences {
@@ -277,6 +279,21 @@ pub fn skin_mesh(
         .any(|&index| index < 0 || index as usize >= skinning_resolver.joint_order_len())
     {
         return Err(format!("skel jointIndices out of range on {path}"));
+    }
+    // Malformed weights distort geometry silently instead of failing
+    // loudly: one influence of weight 2 doubles the animated displacement,
+    // and NaN would poison the normals too. Each per-point chunk (stride =
+    // elementSize, the same layout the length guards checked) must be
+    // finite and normalized; 1e-3 is the tolerance pxr's own tooling
+    // accepts for slightly unnormalized weights.
+    for chunk in weights.chunks_exact(influences) {
+        if !chunk.iter().all(|weight| weight.is_finite())
+            || (chunk.iter().sum::<f32>() - 1.0).abs() > 1e-3
+        {
+            return Err(format!(
+                "skel jointWeights on {path} are not finite unit-weight chunks (stride {influences})"
+            ));
+        }
     }
     if let Some(normals) = &normals {
         if normals.len() != points.len() {

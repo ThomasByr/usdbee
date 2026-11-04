@@ -131,8 +131,21 @@ fn mesh_data(
         }
         _ => None,
     };
-    if let Err(e) = skinning::skin_mesh(prim, time_code.map(f64::from), &mut points, skin_normals) {
-        eprintln!("skinning {}: {}", path, e);
+    let normals_were_skinned = skin_normals.is_some();
+    let points_were_skinned =
+        match skinning::skin_mesh(prim, time_code.map(f64::from), &mut points, skin_normals) {
+            Ok(skinned) => skinned,
+            Err(e) => {
+                eprintln!("skinning {}: {}", path, e);
+                false
+            }
+        };
+    // Bind-pose normals must never ship alongside skinned points: an
+    // authored normal set this pass could not skin (non-vertex scope, or a
+    // length that does not match the points) is discarded so the
+    // generation below recomputes it from the deformed positions.
+    if points_were_skinned && !normals_were_skinned {
+        authored_normals = None;
     }
 
     // Non-finite positions cannot reach a GPU buffer: such vertices are

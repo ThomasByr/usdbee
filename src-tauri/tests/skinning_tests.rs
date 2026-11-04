@@ -73,6 +73,13 @@ const EXPECTED_DUAL_SKELETON_SIDE_T0: [[f32; 3]; 3] =
 const EXPECTED_DUAL_SKELETON_SIDE_T10: [[f32; 3]; 3] =
     [[2.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 0.0, 1.0]];
 
+// Hose_norm (vertex-scoped authored normals) from BakeSkinning: the
+// joints' rotation moves vertex 2 but the authored +Z normals stay +Z
+// (Rz90 leaves the Z axis alone), so both time codes read the same.
+const EXPECTED_NORM_T0_POINTS: [[f32; 3]; 3] = [[2.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 1.0, 0.0]];
+const EXPECTED_NORM_T10_POINTS: [[f32; 3]; 3] = [[2.0, 0.0, 0.0], [4.0, 0.0, 0.0], [3.0, 0.0, 1.0]];
+const EXPECTED_NORM_SKINNED: [[f32; 3]; 3] = [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]];
+
 #[test]
 fn skinning_mesh_points_follow_animated_skeleton() {
     let (stage, _info) = open_stage(&fixture("skinned.usda")).expect("skinned stage should open");
@@ -130,6 +137,74 @@ fn skeleton_authored_animation_source_wins_over_mesh_inherited() {
 
     let mesh = tessellate(&stage, "/Rig/Hose_dual", 10.0);
     assert_points_close(&mesh.positions, &EXPECTED_DUAL_SKELETON_SIDE_T10);
+}
+
+#[test]
+fn corrupt_weights_error_before_geometry_distorts() {
+    let (stage, _info) = open_stage(&fixture("skinned.usda")).expect("skinned stage should open");
+
+    // Hose_weighty authors [1, 1, 2]: lengths all line up, but vertex 2's
+    // weight chunk is not normalized — silently it would double the
+    // animated displacement. skin_mesh must refuse with a path-naming
+    // error before either crate compute call.
+    let weighty = prim(&stage, "/Rig/Hose_weighty").expect("test prim should resolve");
+    let mut points = vec![
+        openusd::gf::vec3f(2.0, 0.0, 0.0),
+        openusd::gf::vec3f(4.0, 0.0, 0.0),
+        openusd::gf::vec3f(4.0, 0.0, 0.0),
+    ];
+    let error = skin_mesh(&weighty, Some(10.0), &mut points, None)
+        .expect_err("non-normalized weights must error, not distort");
+    assert!(
+        error.contains("Hose_weighty"),
+        "error names the prim: {error}"
+    );
+    assert!(
+        error.contains("jointWeights"),
+        "error names the weights: {error}"
+    );
+    // Through tessellation the same corruption is fail-soft: unskinned.
+    let mesh = tessellate(&stage, "/Rig/Hose_weighty", 10.0);
+    assert_points_close(
+        &mesh.positions,
+        &[[2.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+    );
+}
+
+#[test]
+fn vertex_scoped_authored_normals_are_skinned() {
+    let (stage, _info) = open_stage(&fixture("skinned.usda")).expect("skinned stage should open");
+
+    // Hose_norm authors vertex-scoped normals alongside skinned points:
+    // both arrays must be evaluated (pxr-baked constants, above).
+    let mesh = tessellate(&stage, "/Rig/Hose_norm", 0.0);
+    assert_points_close(&mesh.positions, &EXPECTED_NORM_T0_POINTS);
+    let normals = mesh.normals.expect("authored vertex normals survive");
+    assert_points_close(&normals, &EXPECTED_NORM_SKINNED);
+
+    let mesh = tessellate(&stage, "/Rig/Hose_norm", 10.0);
+    assert_points_close(&mesh.positions, &EXPECTED_NORM_T10_POINTS);
+    let normals = mesh.normals.expect("authored vertex normals survive");
+    assert_points_close(&normals, &EXPECTED_NORM_SKINNED);
+}
+
+#[test]
+fn non_vertex_authored_normals_are_replaced_by_generated_on_skinned_prims() {
+    let (stage, _info) = open_stage(&fixture("skinned.usda")).expect("skinned stage should open");
+
+    // Hose_fvn authors faceVarying normals this pass cannot skin; bind-pose
+    // normals must never ship alongside skinned points, so they are dropped
+    // and regenerated from the deformed positions — exactly the normals of
+    // its identical twin with no authored normals at all.
+    for time in [0.0, 10.0] {
+        let mesh = tessellate(&stage, "/Rig/Hose_fvn", time);
+        let twin = tessellate(&stage, "/Rig/Hose_fvn_twin", time);
+        assert_points_close(&mesh.positions, &twin.positions);
+        assert_eq!(
+            mesh.normals, twin.normals,
+            "non-vertex authored normals are regenerated, not shipped unskinned"
+        );
+    }
 }
 
 #[test]
