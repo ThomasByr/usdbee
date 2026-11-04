@@ -144,6 +144,10 @@ export function installPlaybackDriver(viewer: RendererKit) {
   // in USD time codes. The seconds -> time-code rate conversion lives
   // ONLY here and in the exporter (spec §8) — advanceStageTime.
   viewer.onAdvanceTime = (deltaSeconds: number) => {
+    // Main-thread stalls (shader compile, GPU upload) pause the render
+    // loop, so THREE.Clock hands us the whole stall as one delta — clamp
+    // it or the playhead teleports on the first frame after "ready".
+    const delta = Math.min(deltaSeconds, 0.1);
     const info = stageState.stageInfo;
     const start = info?.start_time_code ?? 0;
     const end = info?.end_time_code ?? 0;
@@ -155,7 +159,7 @@ export function installPlaybackDriver(viewer: RendererKit) {
     const tcps = info?.time_codes_per_second ?? 24;
     const next = advanceStageTime(
       renderState.time ?? start,
-      deltaSeconds,
+      delta,
       tcps,
       start,
       end,

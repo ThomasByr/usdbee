@@ -52,9 +52,37 @@ describe("installPlaybackDriver", () => {
     const v = viewer();
     installPlaybackDriver(v);
 
-    v.onAdvanceTime!(0.5);
+    v.onAdvanceTime!(0.05);
 
-    expect(renderState.time).toBe(12);
-    expect(v.animationProgress).toBe(12);
+    expect(renderState.time).toBeCloseTo(1.2, 10);
+    expect(v.animationProgress).toBeCloseTo(1.2, 10);
+  });
+
+  it("caps a single huge delta (main-thread stall) at 0.1 s of advance", () => {
+    stageState.stageInfo = {
+      start_time_code: 0,
+      end_time_code: 240,
+      time_codes_per_second: 24,
+    } as any;
+    renderState.time = 0;
+    renderState.status = "ready";
+    const v = viewer();
+    installPlaybackDriver(v);
+
+    // 5 s stall at 24 tcps would be 120 codes unclamped.
+    v.onAdvanceTime!(5);
+
+    expect(renderState.time).toBeLessThanOrEqual(0.1 * 24);
+  });
+
+  it("still accumulates repeated small deltas normally", () => {
+    renderState.time = 0;
+    renderState.status = "ready";
+    const v = viewer();
+    installPlaybackDriver(v);
+
+    for (let i = 0; i < 10; i++) v.onAdvanceTime!(1 / 60);
+
+    expect(renderState.time).toBeCloseTo(10 / 60 * 24, 5);
   });
 });
