@@ -148,6 +148,10 @@ export function installPlaybackDriver(viewer: RendererKit) {
     const start = info?.start_time_code ?? 0;
     const end = info?.end_time_code ?? 0;
     if (end <= start) return;
+    // Gate autoplay while a load runs: otherwise the frame the scene
+    // centers on depends on how long the load took. User scrubs still
+    // queue via setStageTime directly.
+    if (renderState.status === "loading") return;
     const tcps = info?.time_codes_per_second ?? 24;
     const next = advanceStageTime(
       renderState.time ?? start,
