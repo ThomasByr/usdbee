@@ -52,6 +52,25 @@
   // The backend reports 24 when a stage has no authored rate.
   const timeCodesPerSecond = $derived(stageState.stageInfo?.time_codes_per_second ?? 0);
 
+  // Fixed-width label: padding the current text to the end text's length
+  // (monospace font) keeps the timeline bar from hopping when the frame
+  // count changes digit count mid-playback.
+  const timelineEnd = $derived(
+    formatTimelineEnd(
+      viewer.animationDuration,
+      startTimeCode(),
+      timeCodesPerSecond,
+      playbackState.timelineUnits,
+    ),
+  );
+  const timelineCurrent = $derived(
+    formatTimeline(
+      viewer.animationProgress + startTimeCode(),
+      timeCodesPerSecond,
+      playbackState.timelineUnits,
+    ).padStart(timelineEnd.length),
+  );
+
   $effect(() => {
     if (viewer.scene) viewer.scene.background = new THREE.Color(viewer.backgroundColor);
   });
@@ -203,18 +222,9 @@
         onmouseup={() => (viewer.isDraggingAnim = false)}
       />
       <span class="timeline-time" title={`${timeCodesPerSecond} fps`}
-        >{formatTimeline(
-          viewer.animationProgress + startTimeCode(),
-          timeCodesPerSecond,
-          playbackState.timelineUnits,
-        )}
+        >{timelineCurrent}
         /
-        {formatTimelineEnd(
-          viewer.animationDuration,
-          startTimeCode(),
-          timeCodesPerSecond,
-          playbackState.timelineUnits,
-        )}</span
+        {timelineEnd}</span
       >
     </div>
   {/if}
