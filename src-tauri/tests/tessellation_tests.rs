@@ -86,6 +86,105 @@ fn mesh_primvars_golden_first_and_last_primvar_values() {
 }
 
 #[test]
+fn facevarying_uv_seam_splits_the_shared_vertex_per_face() {
+    use usdbee_lib::tessellation::pack_geometry;
+
+    let (stage, _info) = tessellate_stage("uv_seam.usda");
+
+    let mesh = tessellate(&stage, "/Scene/Seam").expect("seam mesh should tessellate");
+
+    // 4 authored points -> 5 output vertices: only the seam vertex (2)
+    // splits, once per face; the vertex whose corners agree stays shared.
+    assert_eq!(mesh.positions.len(), 5);
+    assert_eq!(mesh.indices, vec![0, 1, 2, 3, 1, 4]);
+    let uvs = mesh.uvs.clone().expect("Seam authors faceVarying st");
+    assert_eq!(uvs[2], [0.25, 0.25], "face 0's own corner value");
+    assert_eq!(uvs[3], [0.75, 0.25], "face 1's own corner value");
+
+    // Packed bytes carry the split too: the header count and the seam
+    // vertex's two copies each keep their face's UV.
+    let packed = pack_geometry(&mesh);
+    assert_eq!(
+        u32::from_le_bytes(packed[8..12].try_into().unwrap()),
+        5,
+        "split vertex count reaches the wire header"
+    );
+    let uv_base = 20 + mesh.positions.len() * 12 + mesh.normals.as_ref().map_or(0, |n| n.len() * 12);
+    let uv_at = |index: usize| {
+        let offset = uv_base + index * 8;
+        [
+            f32::from_le_bytes(packed[offset..offset + 4].try_into().unwrap()),
+            f32::from_le_bytes(packed[offset + 4..offset + 8].try_into().unwrap()),
+        ]
+    };
+    assert_eq!(uv_at(2), [0.25, 0.25]);
+    assert_eq!(uv_at(3), [0.75, 0.25]);
+}
+
+#[test]
+fn non_coplanar_uv_seam_keeps_one_smooth_normal_across_split_copies() {
+    let (stage, _info) = tessellate_stage("uv_seam.usda");
+
+    let mesh = tessellate(&stage, "/Scene/Fold").expect("fold mesh should tessellate");
+
+    // Same split as the coplanar Seam mesh: only the seam vertex doubles.
+    assert_eq!(mesh.positions.len(), 5);
+    assert_eq!(mesh.indices, vec![0, 1, 2, 3, 1, 4]);
+    let normals = mesh.normals.expect("unauthored normals are generated");
+    assert_eq!(normals.len(), 5);
+    // Face 0 lies in the XY plane (normal (0, 0, 1)); face 1 tilts in Z
+    // (unnormalized cross (-0.5, -0.5, 1)). The merged area-weighted normal
+    // is (-0.5, -0.5, 2) normalized.
+    let merged = [-0.235_702_26, -0.235_702_26, 0.942_809_0];
+    for &copy in &[2, 3] {
+        assert!(
+            normals[copy]
+                .iter()
+                .zip(merged)
+                .all(|(a, b)| (a - b).abs() < 1e-5),
+            "split copy {} must carry the merged fold normal, got {:?}",
+            copy,
+            normals[copy]
+        );
+    }
+    // Unsplit vertices of a single face keep that face's own normal.
+    assert_eq!(normals[0], [0.0, 0.0, 1.0]);
+}
+
+#[test]
+fn agreeing_facevarying_corners_keep_vertices_shared() {
+    let (stage, _info) = tessellate_stage("uv_seam.usda");
+
+    let mesh = tessellate(&stage, "/Scene/Control").expect("control mesh should tessellate");
+
+    // No corner disagreement: the seam-free mesh keeps one output vertex
+    // per input vertex (no vertex-count bloat).
+    assert_eq!(mesh.positions.len(), 4);
+    assert_eq!(mesh.indices, vec![0, 1, 2, 2, 1, 3]);
+    let uvs = mesh.uvs.expect("Control authors faceVarying st");
+    assert_eq!(uvs.len(), 4);
+    assert_eq!(uvs[2], [0.25, 0.25]);
+}
+
+#[test]
+fn facevarying_display_color_seam_splits_too() {
+    let (stage, _info) = tessellate_stage("uv_seam.usda");
+
+    let mesh = tessellate(&stage, "/Scene/ColorSeam").expect("color seam should tessellate");
+
+    // The split is driven by ALL faceVarying streams: displayColor alone
+    // induces the same partition st does.
+    assert_eq!(mesh.positions.len(), 5);
+    assert_eq!(mesh.indices, vec![0, 1, 2, 3, 1, 4]);
+    let colors = mesh
+        .colors
+        .expect("ColorSeam authors faceVarying displayColor");
+    assert_eq!(colors[2], [1.0, 0.0, 0.0]);
+    assert_eq!(colors[3], [0.0, 0.0, 1.0]);
+    assert!(mesh.uvs.is_none());
+}
+
+#[test]
 fn uniform_primvar_scatters_by_face_to_surviving_vertices() {
     // Uniform values are one per face: each face's value must scatter to that
     // face's surviving vertices (shared vertices keep the first face's

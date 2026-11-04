@@ -25,9 +25,11 @@ use crate::skinning;
 
 /// One tessellated mesh: positions keyed per vertex, `indices` spanning
 /// triangles by vertex index, and per-vertex primvar arrays aligned with
-/// `positions` (constant is replicated per vertex; faceVarying maps each
-/// original vertex to its first corner's value; uniform maps each vertex to
-/// its first surviving face's value).
+/// `positions` (constant replicates per vertex; vertex values follow the
+/// original vertex, replicated across its split copies; faceVarying values
+/// split an original vertex into one output vertex per distinct corner
+/// value so UV seams keep their authored regions; uniform takes each
+/// output vertex's first corner's face value).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeshData {
     pub positions: Vec<[f32; 3]>,
@@ -152,15 +154,21 @@ fn mesh_data(
     // compacted away, surviving indices remap, and any face referencing a
     // dropped (or out-of-range) vertex contributes nothing at all. Finite
     // but zero-area fan triangles are filtered during triangulation below.
-    let (positions, orig_to_new) = compact_points(&points);
+    let (base_positions, orig_to_new) = compact_points(&points);
     let vertex_count = points.len();
+
+    // Primvars are read before the split below: faceVarying values decide
+    // which corners of one original vertex disagree (atlas UV seams) and
+    // therefore how many output vertices it becomes.
+    let uvs_raw = read_primvar::<Vec2f>(mesh.prim(), "primvars:st", time_code, path)?;
+    let colors_raw = read_primvar::<Vec3f>(mesh.prim(), "primvars:displayColor", time_code, path)?;
 
     // Face walk: (surviving original vertex, flat corner slot, authored face
     // id) triples feed the primvar scatter; the corner slot aligns with
     // flattened faceVarying arrays and the face id with uniform arrays,
     // regardless of drops.
     let mut corners: Vec<(u32, usize, usize)> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
+    let mut face_ranges: Vec<(usize, usize)> = Vec::new();
     let mut cursor = 0usize;
     for (face_id, &count) in counts.iter().enumerate() {
         let count = count.max(0) as usize;
@@ -177,22 +185,39 @@ fn mesh_data(
         if !usable {
             continue;
         }
+        let start = corners.len();
         for (slot, &v) in face.iter().enumerate() {
             corners.push((v as u32, cursor - count + slot, face_id));
         }
+        face_ranges.push((start, count));
+    }
+
+    let (positions, scatter, corner_new) = split_face_varying(
+        &authored_normals,
+        &uvs_raw,
+        &colors_raw,
+        &corners,
+        &base_positions,
+        &orig_to_new,
+    );
+
+    // Triangulation: fan each usable face over its corners' split output
+    // vertices; finite but zero-area fan triangles are filtered.
+    let mut indices: Vec<u32> = Vec::new();
+    for &(start, count) in &face_ranges {
+        let face = &corner_new[start..start + count];
         for i in 1..count - 1 {
-            let triangle = [face[0], face[i], face[i + 1]]
-                .map(|v| orig_to_new[v as usize].expect("face usability checked") as usize);
+            let triangle = [face[0], face[i], face[i + 1]];
             let (a, b, c) = (
-                positions[triangle[0]],
-                positions[triangle[1]],
-                positions[triangle[2]],
+                positions[triangle[0] as usize],
+                positions[triangle[1] as usize],
+                positions[triangle[2] as usize],
             );
             let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
             let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
             let area = cross3(ab, ac);
             if area.iter().map(|value| value * value).sum::<f32>() > 0.0 {
-                indices.extend(triangle.map(|index| index as u32));
+                indices.extend(triangle);
             }
         }
     }
@@ -203,16 +228,17 @@ fn mesh_data(
     // soup is dropped (normals: None) rather than falling back to generated
     // ones; revisit when the renderer cares about either lossy set.
     let normals = match authored_normals {
-        Some((scope, values)) => meshable(scope, values, &corners, vertex_count, &orig_to_new)
+        Some((scope, values)) => scatter
+            .map(scope, values, &corners)
             .map(|per_vertex| per_vertex.into_iter().map(|v| [v.x, v.y, v.z]).collect()),
-        None => Some(generated_normals(&positions, &indices)),
+        None => Some(generated_normals(&positions, &indices, &scatter.orig_copies)),
     };
 
-    let uvs = read_primvar::<Vec2f>(mesh.prim(), "primvars:st", time_code, path)?
-        .and_then(|(scope, values)| meshable(scope, values, &corners, vertex_count, &orig_to_new))
+    let uvs = uvs_raw
+        .and_then(|(scope, values)| scatter.map(scope, values, &corners))
         .map(|per_vertex| per_vertex.into_iter().map(|v| [v.x, v.y]).collect());
-    let colors = read_primvar::<Vec3f>(mesh.prim(), "primvars:displayColor", time_code, path)?
-        .and_then(|(scope, values)| meshable(scope, values, &corners, vertex_count, &orig_to_new))
+    let colors = colors_raw
+        .and_then(|(scope, values)| scatter.map(scope, values, &corners))
         .map(|per_vertex| per_vertex.into_iter().map(|v| [v.x, v.y, v.z]).collect());
 
     Ok(Some(MeshData {
@@ -448,15 +474,27 @@ fn points_data(
     let (positions, orig_to_new) = compact_points(&points);
     let vertex_count = points.len();
 
-    // No faces, so no indices and no face walk: vertex and constant
-    // primvars reuse the mesh scatter through the (empty) corners list,
-    // while uniform/faceVarying values answer None from it.
+    // No faces, so no corners and no splits: every surviving original
+    // vertex is exactly one output vertex, and uniform/faceVarying values
+    // answer None from the scatter (no face-driven slot exists).
+    let mut orig_copies: Vec<Vec<u32>> = vec![Vec::new(); vertex_count];
+    let mut first_corner: Vec<Option<usize>> = Vec::new();
+    for (orig, slot) in orig_to_new.iter().enumerate() {
+        if slot.is_some() {
+            orig_copies[orig].push(first_corner.len() as u32);
+            first_corner.push(None);
+        }
+    }
+    let scatter = Scatter {
+        orig_copies,
+        first_corner,
+    };
     let corners: Vec<(u32, usize, usize)> = Vec::new();
     let uvs = read_primvar::<Vec2f>(prim, "primvars:st", time_code, path)?
-        .and_then(|(scope, values)| meshable(scope, values, &corners, vertex_count, &orig_to_new))
+        .and_then(|(scope, values)| scatter.map(scope, values, &corners))
         .map(|per_vertex| per_vertex.into_iter().map(|v| [v.x, v.y]).collect());
     let colors = read_primvar::<Vec3f>(prim, "primvars:displayColor", time_code, path)?
-        .and_then(|(scope, values)| meshable(scope, values, &corners, vertex_count, &orig_to_new))
+        .and_then(|(scope, values)| scatter.map(scope, values, &corners))
         .map(|per_vertex| per_vertex.into_iter().map(|v| [v.x, v.y, v.z]).collect());
 
     // shortcut: the renderer's THREE.Points material ignores normals, so
@@ -621,75 +659,184 @@ where
     Ok(values.map(|values| (scope, values)))
 }
 
-/// Attribute values scattered to one entry per ORIGINAL vertex id
-/// (`points.len()` long), or `None` when a demanded slot has no value —
-/// the caller then drops the whole primvar instead of guessing.
-fn attribution<T: Clone>(
-    scope: Scope,
-    values: Vec<T>,
-    corners: &[(u32, usize, usize)],
-    vertex_count: usize,
-) -> Option<Vec<Option<T>>> {
-    if values.is_empty() {
-        return None;
+/// One faceVarying stream feeding the split key, compared in raw f32 bits
+/// (authored atlas UVs are exact).
+enum Fv<'a> {
+    Vec2(&'a [Vec2f]),
+    Vec3(&'a [Vec3f]),
+}
+
+impl Fv<'_> {
+    // A stream missing a value at any corner slot cannot key the split; it
+    // is dropped here and the scatter below drops the whole primvar.
+    fn covers(&self, corners: &[(u32, usize, usize)]) -> bool {
+        let len = match self {
+            Fv::Vec2(values) => values.len(),
+            Fv::Vec3(values) => values.len(),
+        };
+        corners.iter().all(|&(_, slot, _)| slot < len)
     }
-    match scope {
-        Scope::Constant => Some(vec![Some(values.into_iter().next()?); vertex_count]),
-        Scope::Vertex => Some(
-            (0..vertex_count)
-                .map(|id| values.get(id).cloned())
-                .collect(),
-        ),
-        // Uniform values are one per face: scatter each face's value to that
-        // face's surviving vertices (shared vertices keep the first face's
-        // value, the same first-occurrence rule as faceVarying below).
-        Scope::Uniform => {
-            let mut out: Vec<Option<T>> = vec![None; vertex_count];
-            for (vertex, _corner, face) in corners {
-                let slot = values.get(*face).cloned();
-                if let Some(entry) = out.get_mut(*vertex as usize) {
-                    *entry = entry.take().or(slot);
-                }
+
+    fn key_at(&self, slot: usize) -> [u32; 3] {
+        match self {
+            Fv::Vec2(values) => {
+                let value = &values[slot];
+                [value.x.to_bits(), value.y.to_bits(), 0]
             }
-            Some(out)
-        }
-        Scope::FaceVarying => {
-            let mut out: Vec<Option<T>> = vec![None; vertex_count];
-            for (vertex, corner, _face) in corners {
-                let slot = values.get(*corner).cloned();
-                if let Some(entry) = out.get_mut(*vertex as usize) {
-                    *entry = entry.take().or(slot);
-                }
+            Fv::Vec3(values) => {
+                let value = &values[slot];
+                [value.x.to_bits(), value.y.to_bits(), value.z.to_bits()]
             }
-            Some(out)
         }
     }
 }
 
-/// Attribute values landed in primvar order, compacted into per-vertex
-/// arrays that align with `positions`.
-fn meshable<T: Clone>(
-    scope: Scope,
-    values: Vec<T>,
+/// Split output vertices per distinct faceVarying corner value: corners of
+/// one original vertex whose values agree across every faceVarying stream
+/// share an output vertex, disagreeing corners each get their own (position
+/// duplicated), so every stream maps its corners exactly. Returns the
+/// output positions, the primvar scatter bookkeeping, and each corner's
+/// output vertex.
+fn split_face_varying(
+    normals: &Option<(Scope, Vec<Vec3f>)>,
+    uvs: &Option<(Scope, Vec<Vec2f>)>,
+    colors: &Option<(Scope, Vec<Vec3f>)>,
     corners: &[(u32, usize, usize)],
-    vertex_count: usize,
+    base_positions: &[[f32; 3]],
     orig_to_new: &[Option<u32>],
-) -> Option<Vec<T>> {
-    let per_vertex = attribution(scope, values, corners, vertex_count)?;
-    let mut out = Vec::new();
+) -> (Vec<[f32; 3]>, Scatter, Vec<u32>) {
+    // The partition is the union every faceVarying stream induces.
+    let streams: Vec<Fv> = [
+        normals.as_ref().map(|(scope, values)| (*scope, Fv::Vec3(values))),
+        uvs.as_ref().map(|(scope, values)| (*scope, Fv::Vec2(values))),
+        colors.as_ref().map(|(scope, values)| (*scope, Fv::Vec3(values))),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|(scope, _)| *scope == Scope::FaceVarying)
+    .map(|(_, values)| values)
+    .filter(|values| values.covers(corners))
+    .collect();
+
+    // Per original vertex: distinct corner keys and each key's first
+    // corner, in face-walk order.
+    let mut copy_keys: Vec<Vec<Vec<[u32; 3]>>> = vec![Vec::new(); orig_to_new.len()];
+    let mut copy_corners: Vec<Vec<usize>> = vec![Vec::new(); orig_to_new.len()];
+    let mut corner_copy: Vec<u32> = Vec::with_capacity(corners.len());
+    for (index, &(vertex, slot, _face)) in corners.iter().enumerate() {
+        let key: Vec<[u32; 3]> = streams.iter().map(|stream| stream.key_at(slot)).collect();
+        let keys = &mut copy_keys[vertex as usize];
+        let copy = match keys.iter().position(|other| *other == key) {
+            Some(copy) => copy,
+            None => {
+                keys.push(key);
+                copy_corners[vertex as usize].push(index);
+                keys.len() - 1
+            }
+        };
+        corner_copy.push(copy as u32);
+    }
+
+    // Output vertices in original-vertex order; a finite vertex no usable
+    // face references still ships as one corner-less copy (compaction
+    // behavior), which no face-driven primvar can map.
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(base_positions.len());
+    let mut first_corner: Vec<Option<usize>> = Vec::with_capacity(base_positions.len());
+    let mut orig_copies: Vec<Vec<u32>> = vec![Vec::new(); orig_to_new.len()];
     for (orig, slot) in orig_to_new.iter().enumerate() {
-        if slot.is_none() {
+        let Some(compact) = slot else {
+            continue;
+        };
+        let compact = *compact as usize;
+        if copy_keys[orig].is_empty() {
+            orig_copies[orig].push(positions.len() as u32);
+            positions.push(base_positions[compact]);
+            first_corner.push(None);
             continue;
         }
-        out.push(per_vertex.get(orig)?.clone()?);
+        for first in &copy_corners[orig] {
+            orig_copies[orig].push(positions.len() as u32);
+            positions.push(base_positions[compact]);
+            first_corner.push(Some(*first));
+        }
     }
-    Some(out)
+    let corner_new = corners
+        .iter()
+        .zip(corner_copy)
+        .map(|(&(vertex, _, _), copy)| orig_copies[vertex as usize][copy as usize])
+        .collect();
+
+    (
+        positions,
+        Scatter {
+            orig_copies,
+            first_corner,
+        },
+        corner_new,
+    )
+}
+
+/// Primvar scatter bookkeeping over the split output vertices:
+/// `orig_copies[orig]` lists the output-vertex ids the original vertex was
+/// split into, and `first_corner[out]` is each output vertex's first
+/// (face-walk order) corner — None for vertices no usable face references.
+struct Scatter {
+    orig_copies: Vec<Vec<u32>>,
+    first_corner: Vec<Option<usize>>,
+}
+
+impl Scatter {
+    /// Attribute values scattered to one entry per output vertex, or `None`
+    /// when a demanded slot has no value — the caller drops the whole
+    /// primvar instead of guessing.
+    fn map<T: Clone>(
+        &self,
+        scope: Scope,
+        values: Vec<T>,
+        corners: &[(u32, usize, usize)],
+    ) -> Option<Vec<T>> {
+        if values.is_empty() {
+            return None;
+        }
+        let out_count = self.first_corner.len();
+        match scope {
+            Scope::Constant => Some(vec![values.into_iter().next()?; out_count]),
+            Scope::Vertex => {
+                let mut out = Vec::with_capacity(out_count);
+                for (orig, copies) in self.orig_copies.iter().enumerate() {
+                    if copies.is_empty() {
+                        continue;
+                    }
+                    let value = values.get(orig)?;
+                    out.extend(copies.iter().map(|_| value.clone()));
+                }
+                Some(out)
+            }
+            // Uniform is one value per face, faceVarying one per corner
+            // slot: each output vertex takes the value at its first corner
+            // (split copies were keyed so all their corners agree).
+            Scope::Uniform | Scope::FaceVarying => {
+                let mut out = Vec::with_capacity(out_count);
+                for first in &self.first_corner {
+                    let (_, slot, face) = corners[(*first)?];
+                    let index = if scope == Scope::Uniform { face } else { slot };
+                    out.push(values.get(index)?.clone());
+                }
+                Some(out)
+            }
+        }
+    }
 }
 
 /// Per-vertex area-weighted average of face normals (the cross product is
 /// accumulated unnormalized); vertices with no valid face normal keep a zero
-/// normal.
-fn generated_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
+/// normal. `orig_copies` merges the accumulators of one original vertex's
+/// faceVarying split copies so generated normals stay smooth across UV seams.
+fn generated_normals(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+    orig_copies: &[Vec<u32>],
+) -> Vec<[f32; 3]> {
     let mut accumulators = vec![[0.0f32; 3]; positions.len()];
     for triangle in indices.chunks_exact(3) {
         let [a, b, c] = [
@@ -709,6 +856,20 @@ fn generated_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
             for axis in 0..3 {
                 accumulators[vertex as usize][axis] += normal[axis];
             }
+        }
+    }
+    // Split copies of one original vertex share the area-weighted sum over
+    // ALL its faces; all copies share a position, so the face normals are
+    // identical to the unsplit vertex's.
+    for copies in orig_copies {
+        let mut merged = [0.0f32; 3];
+        for &out in copies {
+            for axis in 0..3 {
+                merged[axis] += accumulators[out as usize][axis];
+            }
+        }
+        for &out in copies {
+            accumulators[out as usize] = merged;
         }
     }
     accumulators
