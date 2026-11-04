@@ -29,6 +29,10 @@ import {
 let loadGeneration = 0;
 let sceneLoading = false;
 let timeStepInFlight = false;
+// True while a queue drain calls setStageTime: the drained time was
+// optimistically written to this.time when it was queued, so the
+// same-time dedupe must not skip the apply.
+let drainingQueue = false;
 // The in-flight step is either a time step (void) or an edit refresh
 // (boolean: true when the caller must fall back to a full rebuild).
 let activeTimeStep: Promise<unknown> | null = null;
@@ -496,7 +500,14 @@ export const renderState = $state({
       sceneLoading = false;
       const pendingTime = queuedTime;
       queuedTime = null;
-      if (pendingTime !== null) await this.setStageTime(pendingTime);
+      if (pendingTime !== null) {
+        drainingQueue = true;
+        try {
+          await this.setStageTime(pendingTime);
+        } finally {
+          drainingQueue = false;
+        }
+      }
       const pendingRefresh = queuedRefresh;
       queuedRefresh = null;
       if (pendingRefresh !== null) await this.refreshAfterEdit(pendingRefresh);
@@ -523,6 +534,10 @@ export const renderState = $state({
   // time; rapid requests coalesce to the latest queued time. Loads still
   // supersede active work via loadGeneration.
   setStageTime(time: number): Promise<void> {
+    // Same-time dedupe: with time-code snapping the driver re-requests the
+    // identical time on most frames (each a full manifest fetch); skip
+    // when the state already sits at the requested time.
+    if (!drainingQueue && time === this.time) return Promise.resolve();
     this.time = time;
     this.onTimeChange?.(time);
     if (sceneLoading) {
@@ -563,7 +578,14 @@ export const renderState = $state({
           // its own; the load's single in-line drain (loadWork) stays
           // awaited so a queued-completion caller still resolves after the
           // load's refresh applied.
-          if (pendingTime !== null) void this.setStageTime(pendingTime);
+          if (pendingTime !== null) {
+            drainingQueue = true;
+            try {
+              void this.setStageTime(pendingTime);
+            } finally {
+              drainingQueue = false;
+            }
+          }
           const pendingRefresh = queuedRefresh;
           queuedRefresh = null;
           if (pendingRefresh !== null) void this.refreshAfterEdit(pendingRefresh);
@@ -622,7 +644,14 @@ export const renderState = $state({
         if (!sceneLoading) {
           const pendingTime = queuedTime;
           queuedTime = null;
-          if (pendingTime !== null) void this.setStageTime(pendingTime);
+          if (pendingTime !== null) {
+            drainingQueue = true;
+            try {
+              void this.setStageTime(pendingTime);
+            } finally {
+              drainingQueue = false;
+            }
+          }
           const pendingRefresh = queuedRefresh;
           queuedRefresh = null;
           if (pendingRefresh !== null) void this.refreshAfterEdit(pendingRefresh);

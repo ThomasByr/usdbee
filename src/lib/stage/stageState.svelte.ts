@@ -4,6 +4,11 @@ import { renderState } from "../render/renderState.svelte";
 
 let loadGeneration = 0;
 let selectionGeneration = 0;
+// In-flight guard for refreshSelectedDetails: one details refresh runs
+// at a time; triggers landing mid-flight re-run once with the latest
+// state instead of piling IPC requests onto the stage actor.
+let detailsRefreshInFlight = false;
+let detailsRefreshPending = false;
 
 export const stageState = $state({
   stageInfo: null as StageInfo | null,
@@ -104,7 +109,41 @@ export const stageState = $state({
   },
 
   async refreshSelectedDetails(): Promise<void> {
-    if (this.selectedPath) await this.selectPrim(this.selectedPath);
+    if (!this.selectedPath || detailsRefreshInFlight) {
+      detailsRefreshPending = detailsRefreshInFlight;
+      return;
+    }
+    detailsRefreshInFlight = true;
+    try {
+      await this.selectPrim(this.selectedPath);
+    } finally {
+      detailsRefreshInFlight = false;
+      if (detailsRefreshPending) {
+        detailsRefreshPending = false;
+        void this.refreshSelectedDetails();
+      }
+    }
+  },
+
+  // Playback perf: the per-time-step inspector refresh costs ~205 ms of
+  // stage work, so while the playhead auto-advances it is suppressed — the
+  // panel's values go stale during playback BY DESIGN. The page calls
+  // these two hooks from its renderState.onTimeChange / pause effect.
+  detailsSuppressed: false,
+
+  // The page's time-change hook: refresh unless playback is actively
+  // advancing (playing AND a stage is loaded).
+  onStageTimeChanged(playing: boolean): void {
+    this.detailsSuppressed = playing && this.activeStageId !== 0;
+    if (!this.detailsSuppressed) void this.refreshSelectedDetails();
+  },
+
+  // The page's pause hook: exactly one catch-up refresh at the current
+  // time. Selection changes bypass this via selectPrim directly.
+  onPlaybackPaused(): void {
+    if (!this.detailsSuppressed) return;
+    this.detailsSuppressed = false;
+    void this.refreshSelectedDetails();
   },
 
   // The usd-stage-changed refresh: an edit can reshape the composed tree

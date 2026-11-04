@@ -25,6 +25,7 @@ beforeEach(() => {
   mockedInvoke.mockReset();
   renderState.time = null;
   renderState.status = "idle";
+  renderState.timeCodes = [];
   stageState.stageInfo = {
     start_time_code: 0,
     end_time_code: 24,
@@ -84,5 +85,43 @@ describe("installPlaybackDriver", () => {
     for (let i = 0; i < 10; i++) v.onAdvanceTime!(1 / 60);
 
     expect(renderState.time).toBeCloseTo(10 / 60 * 24, 5);
+  });
+
+  it("advances past the first authored code under exact small deltas (stall regression)", () => {
+    // Regression: advancing from the ALREADY-SNAPPED time re-snaps to the
+    // same authored code every frame — 30 tcps at 60 Hz advances 0.5
+    // codes, then snapping eats the sub-code delta, so playback stalls.
+    // Real rAF deltas are irregular, which is why this only failed on
+    // exact-delta displays.
+    renderState.timeCodes = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+    stageState.stageInfo = {
+      start_time_code: 0,
+      end_time_code: 8,
+      time_codes_per_second: 30,
+    } as any;
+    renderState.time = 0;
+    renderState.status = "ready";
+    const v = viewer();
+    installPlaybackDriver(v);
+
+    for (let i = 0; i < 10; i++) v.onAdvanceTime!(1 / 60);
+
+    expect(renderState.time).toBeGreaterThan(1);
+  });
+
+  it("continues from an externally scrubbed time, not a stale playhead", () => {
+    // The driver keeps its own continuous playhead; any external write of
+    // renderState.time (scrub slider, new load) must be adopted on the
+    // very next frame so the two never diverge.
+    renderState.time = 0;
+    renderState.status = "ready";
+    const v = viewer();
+    installPlaybackDriver(v);
+
+    v.onAdvanceTime!(1 / 60); // the driver now holds a stale playhead
+    void renderState.setStageTime(10); // simulated scrub
+    v.onAdvanceTime!(1 / 60);
+
+    expect(renderState.time).toBeGreaterThan(10);
   });
 });

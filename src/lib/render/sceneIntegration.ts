@@ -1,7 +1,12 @@
 import * as THREE from "three";
 import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
 import { stageState } from "$lib/stage/stageState.svelte";
-import { renderState, advanceStageTime, toPlayheadOffset } from "$lib/render/renderState.svelte";
+import {
+  renderState,
+  advanceStageTime,
+  snapToTimeCodes,
+  toPlayheadOffset,
+} from "$lib/render/renderState.svelte";
 import { disposeScene } from "$lib/render/sceneBuilder";
 import { upAxisRotation } from "$lib/stage/upAxis";
 import { viewerSettings } from "$lib/state/viewerSettings.svelte";
@@ -143,6 +148,13 @@ export function installPlaybackDriver(viewer: RendererKit) {
   // Task 6 playback driver: the render loop advances the stage playhead
   // in USD time codes. The seconds -> time-code rate conversion lives
   // ONLY here and in the exporter (spec §8) — advanceStageTime.
+  //
+  // The playhead is CONTINUOUS (unsnapped): advancing from the already-
+  // snapped time eats sub-code deltas (60 Hz at 30 tcps advances 0.5
+  // codes, then snapping pulls back to the same authored code forever).
+  // Only the setStageTime query (and the progress display) snaps.
+  let continuous: number | null = null;
+  let lastEmitted: number | null = null;
   viewer.onAdvanceTime = (deltaSeconds: number) => {
     // Main-thread stalls (shader compile, GPU upload) pause the render
     // loop, so THREE.Clock hands us the whole stall as one delta — clamp
@@ -156,16 +168,17 @@ export function installPlaybackDriver(viewer: RendererKit) {
     // centers on depends on how long the load took. User scrubs still
     // queue via setStageTime directly.
     if (renderState.status === "loading") return;
+    // Resync: any external write of renderState.time (scrub slider, new
+    // load, edit refresh) adopts on the next frame so the continuous
+    // playhead never diverges from the stage.
+    if (renderState.time !== lastEmitted) continuous = renderState.time ?? start;
     const tcps = info?.time_codes_per_second ?? 24;
-    const next = advanceStageTime(
-      renderState.time ?? start,
-      delta,
-      tcps,
-      start,
-      end,
-      renderState.timeCodes,
-    );
+    // advanceStageTime without codes keeps the advanced value continuous
+    // (wrap past end, clamp at start); the query snaps and clamps itself.
+    continuous = advanceStageTime(continuous ?? start, delta, tcps, start, end);
+    const next = Math.min(Math.max(snapToTimeCodes(continuous, renderState.timeCodes), start), end);
     viewer.animationProgress = toPlayheadOffset(next, start);
+    lastEmitted = next;
     void renderState.setStageTime(next);
   };
 }

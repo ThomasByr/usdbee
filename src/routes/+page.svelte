@@ -5,7 +5,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { formatKeyName } from "$lib/utils/format";
   import ErrorModal from "$lib/components/ErrorModal.svelte";
   import TabBar from "$lib/components/TabBar.svelte";
@@ -171,6 +171,14 @@
     viewer.showExportModal = showExportModal;
   });
 
+  // Pause catch-up for the suppressed per-step inspector refresh (see
+  // onStageTimeChanged): one refresh when playback stops. untrack keeps
+  // the effect keyed to the play/pause flag alone.
+  $effect(() => {
+    if (viewer.isPlayingAnim) return;
+    untrack(() => stageState.onPlaybackPaused());
+  });
+
   onMount(() => {
     // Open the confirm-per-save dialog: only its confirm button ever writes
     // USD content to disk. The dialog refreshes the dirty-layer list on open.
@@ -245,7 +253,9 @@
     }
 
     renderState.onTimeChange = () => {
-      void stageState.refreshSelectedDetails();
+      // Playback perf: suppress the ~205 ms inspector refresh while the
+      // playhead auto-advances; the pause effect below catches up once.
+      stageState.onStageTimeChanged(viewer.isPlayingAnim);
     };
 
     // Listeners for Rust events

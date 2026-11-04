@@ -629,6 +629,41 @@ describe("renderState.setStageTime", () => {
     expect(instanced.parent!.visible).toBe(false);
   });
 
+  it("dedupes a repeated same-time step into zero extra fetches", async () => {
+    // Playback perf: with time-code snapping the driver re-requests the
+    // IDENTICAL time on most frames (60 Hz/30 tcps = every other frame,
+    // 79% at 144 Hz); each redundant request is a full manifest fetch.
+    const wobble = node({ path: "/Scene/Wobble", name: "Wobble", animated: true });
+    await loadScene(() => [wobble]);
+
+    mockIpc(() => [node({ ...wobble, transform: translate(2) })]);
+    await renderState.setStageTime(5);
+    mockedInvoke.mockClear();
+
+    await renderState.setStageTime(5); // same snapped code as the last step
+
+    expect(mockedInvoke).not.toHaveBeenCalled();
+    expect(renderState.time).toBe(5);
+  });
+
+  it("drops a scrub to the load's own time cleanly instead of stepping", async () => {
+    // A queued time equal to the load's final time can drop: the scene
+    // is already built at that time, so the drain must not fetch a delta.
+    const pending = deferred<RenderNode[]>();
+    mockIpc(() => pending.promise);
+    const loading = renderState.loadRenderScene(3);
+
+    await renderState.setStageTime(3);
+    pending.resolve([node({ path: "/Scene/New", name: "New", transform: translate(2) })]);
+    const group = await loading;
+    await Promise.resolve();
+
+    const deltaCalls = mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_animated_manifest");
+    expect(deltaCalls).toHaveLength(0);
+    expect(renderState.time).toBe(3);
+    expect(group).toBeTruthy();
+  });
+
   it("coalesces rapid time steps to one active and one latest manifest fetch", async () => {
     const wobble = node({ path: "/Scene/Wobble", name: "Wobble" });
     await loadScene(() => [wobble]);

@@ -69,6 +69,69 @@ describe("stageState", () => {
     expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { stageId: 7, path: "/A", time: 2 });
   });
 
+  it("suppresses the inspector refresh while playing and refreshes once on pause", async () => {
+    // Playback perf: the per-step details refresh costs ~205 ms of stage
+    // work; while the playhead auto-advances it must not run at all, and
+    // pausing refreshes exactly once. Values go stale during playback
+    // by design.
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    mockedInvoke.mockResolvedValueOnce(details);
+    await stageState.selectPrim("/A");
+    mockedInvoke.mockClear();
+
+    for (let i = 0; i < 5; i++) stageState.onStageTimeChanged(true);
+    expect(mockedInvoke).not.toHaveBeenCalled();
+
+    stageState.onPlaybackPaused();
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_prim_details")).toHaveLength(1);
+
+    // A second pause hook must not refresh again.
+    mockedInvoke.mockClear();
+    stageState.onPlaybackPaused();
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(mockedInvoke).not.toHaveBeenCalled();
+  });
+
+  it("refreshes on selection change even while the per-step refresh is suppressed", async () => {
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    stageState.onStageTimeChanged(true); // playback suppression on
+    mockedInvoke.mockClear();
+
+    mockedInvoke.mockResolvedValueOnce(details);
+    await stageState.selectPrim("/A");
+
+    expect(mockedInvoke).toHaveBeenCalledWith("get_prim_details", {
+      stageId: 7,
+      path: "/A",
+      time: renderState.time,
+    });
+  });
+
+  it("coalesces overlapping refreshes and re-runs with the latest time", async () => {
+    // In-flight guard: rapid triggers (scrub storms while paused) must not
+    // pile get_prim_details requests onto the stage actor; the last
+    // dropped trigger re-runs once the active refresh lands.
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    mockedInvoke.mockResolvedValueOnce(details);
+    await stageState.selectPrim("/A");
+    renderState.time = 1;
+
+    const slow = deferred<never>();
+    mockedInvoke.mockReturnValueOnce(slow.promise);
+    const first = stageState.refreshSelectedDetails();
+    stageState.onStageTimeChanged(false); // dropped while in flight, re-run pending
+    renderState.time = 9;
+    slow.resolve(details);
+    await first;
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+
+    expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { stageId: 7, path: "/A", time: 9 });
+  });
+
   it("adopts a backend-opened stage without composing it again", async () => {
     mockedInvoke.mockResolvedValueOnce([]);
 
