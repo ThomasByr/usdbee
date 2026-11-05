@@ -29,6 +29,12 @@ export function gizmoCorrection(proxyMatrix: THREE.Matrix4, worldMatrix: THREE.M
   return proxyMatrix.clone().invert().multiply(worldMatrix);
 }
 
+// The node's local matrix for a desired world pose: preview applies this
+// to the frozen node matrix, mirroring the commit's world->local ratio.
+export function previewLocalMatrix(parentWorld: THREE.Matrix4, endWorld: THREE.Matrix4): THREE.Matrix4 {
+  return endWorld.clone().premultiply(parentWorld.clone().invert());
+}
+
 export class TransformGizmo {
   readonly controls: TransformControls;
   private readonly proxy = new THREE.Object3D();
@@ -38,6 +44,9 @@ export class TransformGizmo {
   // Fired when a drag begins, before the anchor latch: the host pauses
   // playback here so its details catch-up lands before the drag ends.
   onDragStart: (() => void) | null = null;
+  // Fired continuously while a drag is active, with the same endWorld the
+  // commit would compute: the host previews the prim's node at that pose.
+  onPreview: ((endWorld: THREE.Matrix4) => void) | null = null;
 
   constructor(
     camera: THREE.Camera,
@@ -67,6 +76,13 @@ export class TransformGizmo {
           endWorld: this.proxy.matrixWorld.clone().multiply(this.correction),
         });
       }
+    });
+    // objectChange fires continuously mid-drag: the host moves the prim's
+    // node with the knob instead of waiting for the drag to end.
+    this.controls.addEventListener("objectChange", () => {
+      if (!this.controls.dragging || !this.onPreview) return;
+      this.proxy.updateMatrixWorld();
+      this.onPreview(this.proxy.matrixWorld.clone().multiply(this.correction));
     });
   }
 

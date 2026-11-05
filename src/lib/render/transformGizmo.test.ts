@@ -5,7 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three";
 import { gizmoAnchorCenter } from "./gizmoCommit.svelte";
-import { gizmoCorrection, TransformGizmo } from "./transformGizmo";
+import { gizmoCorrection, previewLocalMatrix, TransformGizmo } from "./transformGizmo";
 
 const IDENTITY = new THREE.Matrix4();
 
@@ -64,6 +64,22 @@ describe("gizmoCorrection", () => {
   });
 });
 
+describe("previewLocalMatrix", () => {
+  it("is the world pose when the parent is the identity", () => {
+    const endWorld = translation(3, -2, 7).multiply(rotZ(30));
+    close(previewLocalMatrix(IDENTITY, endWorld), endWorld);
+  });
+
+  it("strips the parent transform from the world pose", () => {
+    const endWorld = translation(10, 0, 0);
+    close(previewLocalMatrix(translation(5, 0, 0), endWorld), translation(5, 0, 0));
+    // A rotated parent: the preview must undo the full parent pose, not
+    // just its translation.
+    const parent = translation(5, 0, 0).multiply(rotZ(45));
+    close(previewLocalMatrix(parent, endWorld), parent.clone().invert().multiply(endWorld));
+  });
+});
+
 // The controls only need the event-listener surface; the per-frame pose sync
 // reuses the same attach path, so only the proxy pose and the attach latch
 // are observed here.
@@ -106,6 +122,46 @@ describe("TransformGizmo drag lifecycle", () => {
     gizmo.detach();
     gizmo.attach(translation(1, 1, 1));
     expect(attach).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("TransformGizmo drag preview", () => {
+  it("fires onPreview with the prim's end world pose", () => {
+    const gizmo = makeGizmo();
+    const world = translation(10, 0, 0);
+    gizmo.attach(world, new THREE.Vector3(30, 5, 0));
+    const proxy = gizmo.controls.object!;
+    // The correction attach latched, recomputed from the pinned math.
+    const correction = gizmoCorrection(proxy.matrix, world);
+    const onPreview = vi.fn();
+    gizmo.onPreview = onPreview;
+
+    // Assigning the property stands in for TransformControls' own pointer
+    // handlers: a dispatched dragging-changed event does not set it.
+    (gizmo.controls as any).dragging = true;
+    // TransformControls translates the proxy in world space.
+    proxy.position.set(32, 5, 0);
+    proxy.updateMatrix();
+    gizmo.controls.dispatchEvent({ type: "objectChange" });
+
+    expect(onPreview).toHaveBeenCalledTimes(1);
+    close(onPreview.mock.calls[0][0], proxy.matrixWorld.clone().multiply(correction));
+    // T(32,5,0) * inv(T(30,5,0)) * T(10,0,0) = T(12,0,0).
+    close(onPreview.mock.calls[0][0], translation(12, 0, 0));
+  });
+
+  it("stays silent outside a drag", () => {
+    const gizmo = makeGizmo();
+    gizmo.attach(translation(10, 0, 0), new THREE.Vector3(30, 5, 0));
+    const onPreview = vi.fn();
+    gizmo.onPreview = onPreview;
+
+    (gizmo.controls as any).dragging = false;
+    gizmo.controls.object!.position.set(32, 5, 0);
+    gizmo.controls.object!.updateMatrix();
+    gizmo.controls.dispatchEvent({ type: "objectChange" });
+
+    expect(onPreview).not.toHaveBeenCalled();
   });
 });
 

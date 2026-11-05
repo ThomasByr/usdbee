@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { TransformGizmo, type GizmoCommit } from "$lib/render/transformGizmo";
+import { TransformGizmo, previewLocalMatrix, type GizmoCommit } from "$lib/render/transformGizmo";
 import { composeOpUpdate, evaluateGizmoGate, matricesClose, type GizmoMode } from "$lib/render/xformOps";
 import { stageState } from "$lib/stage/stageState.svelte";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
@@ -115,6 +115,25 @@ function pauseOnDragStart() {
 // handler and is never rendered, so a rune adds nothing there.
 let gizmoCommitInFlight = false;
 
+// The node's frozen local matrix at drag start: restored at drag end so a
+// refused commit (and the commit's own async details refresh) leaves the
+// node at stage truth — the refresh overwrites it on success.
+const latchedNodeMatrix = new THREE.Matrix4();
+let previewActive = false;
+
+// First action on drag end: hand the node back to stage truth. The commit
+// path re-applies the real pose via the in-place scene refresh on success,
+// so the unconditional restore is at worst a one-frame snap-back.
+function restorePreviewNode(viewer: RendererKit) {
+  if (!previewActive) return;
+  previewActive = false;
+  const node = viewer.selectedNode as THREE.Object3D | null;
+  if (!node) return;
+  node.matrixAutoUpdate = false;
+  node.matrix.copy(latchedNodeMatrix);
+  node.matrixWorldNeedsUpdate = true;
+}
+
 // Re-anchor after a drag: stage truth wins, the commit's true end matrix
 // is the fallback when details are gone.
 function reattach(gizmo: TransformGizmo, viewer: RendererKit, fallback: THREE.Matrix4) {
@@ -128,6 +147,9 @@ export function initGizmo(viewer: RendererKit, getMode: () => GizmoMode) {
   // semantics: a fresh commit lock and no stale error message.
   gizmoPolicy.error = null;
   gizmoCommitInFlight = false;
+  // A remount mid-drag leaves a stale latch behind; a fresh mount starts
+  // clean, same as the commit lock above.
+  previewActive = false;
   gizmoPolicy.kit = new TransformGizmo(
     viewer.camera,
     viewer.renderer.domElement,
@@ -135,7 +157,23 @@ export function initGizmo(viewer: RendererKit, getMode: () => GizmoMode) {
     viewer.controls,
   );
   gizmoPolicy.kit.onCommit = handleGizmoCommit;
-  gizmoPolicy.kit.onDragStart = pauseOnDragStart;
+  gizmoPolicy.kit.onDragStart = () => {
+    pauseOnDragStart();
+    const node = viewer.selectedNode as THREE.Object3D | null;
+    if (node) {
+      latchedNodeMatrix.copy(node.matrix);
+      previewActive = true;
+    }
+  };
+  gizmoPolicy.kit.onPreview = (endWorld: THREE.Matrix4) => {
+    if (!previewActive) return;
+    const node = viewer.selectedNode as THREE.Object3D | null;
+    if (!node?.parent) return;
+    node.parent.updateWorldMatrix(true, false);
+    node.matrixAutoUpdate = false;
+    node.matrix.copy(previewLocalMatrix(node.parent.matrixWorld, endWorld));
+    node.matrixWorldNeedsUpdate = true;
+  };
   viewer.onFrameGizmoSync = () => frameSyncGizmo(viewer);
   // Effects created here run inside the component's initialization
   // (initGizmo is called from onMount), so they live and die with it.
@@ -156,6 +194,7 @@ async function handleGizmoCommit(commit: GizmoCommit) {
   // initGizmo always runs first (onCommit is only wired there), so the
   // captured viewer is never null when a commit fires.
   const viewer = gizmoViewer!;
+  restorePreviewNode(viewer);
   const gizmo = gizmoPolicy.kit;
   const gizmoMode = mode();
   if (gizmoCommitInFlight) return;
