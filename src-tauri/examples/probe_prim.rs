@@ -8,22 +8,15 @@ use std::path::PathBuf;
 
 use openusd::sdf;
 use openusd::usd::Prim;
-use usdbee_lib::stage::{RenderNode, open_stage, serialize_render_manifest, serialize_tree};
+use usdbee_lib::stage::{open_stage, serialize_render_manifest, serialize_tree, RenderNode};
 use usdbee_lib::tessellation::tessellate_prim;
 use usdbee_lib::values::local_transform;
 
 fn fmt_matrix(m: &[f64; 16]) -> String {
     // Row-major, row-vector (USD): translation = elements 12..14.
-    format!(
-        "[{:7.2} {:7.2} {:7.2} | {:7.2}]",
-        m[0], m[1], m[2], m[12]
-    ) + &format!(
-        " [{:7.2} {:7.2} {:7.2} | {:7.2}]",
-        m[4], m[5], m[6], m[13]
-    ) + &format!(
-        " [{:7.2} {:7.2} {:7.2} | {:7.2}]",
-        m[8], m[9], m[10], m[14]
-    )
+    format!("[{:7.2} {:7.2} {:7.2} | {:7.2}]", m[0], m[1], m[2], m[12])
+        + &format!(" [{:7.2} {:7.2} {:7.2} | {:7.2}]", m[4], m[5], m[6], m[13])
+        + &format!(" [{:7.2} {:7.2} {:7.2} | {:7.2}]", m[8], m[9], m[10], m[14])
 }
 
 fn fmt_point(p: [f64; 3]) -> String {
@@ -97,12 +90,7 @@ fn print_manifest(nodes: &[RenderNode], depth: usize) {
             indent = depth * 2
         );
         for (index, instance) in node.instances.iter().enumerate() {
-            println!(
-                "INSTANCE {}/{} {}",
-                node.path,
-                index,
-                fmt_matrix(instance)
-            );
+            println!("INSTANCE {}/{} {}", node.path, index, fmt_matrix(instance));
         }
         print_manifest(&node.children, depth + 1);
     }
@@ -142,7 +130,10 @@ fn main() {
             println!(
                 "PRIM {} [{}] instance={:?} world={}",
                 prim.path(),
-                prim.type_name().unwrap().map(|t| t.to_string()).unwrap_or_default(),
+                prim.type_name()
+                    .unwrap()
+                    .map(|t| t.to_string())
+                    .unwrap_or_default(),
                 prim.is_instance().unwrap(),
                 world
                     .as_ref()

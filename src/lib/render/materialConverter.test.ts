@@ -179,11 +179,8 @@ describe("convertMaterial", () => {
 
   it("maps wrap tokens to three.js wrapping modes", () => {
     const convert = (over: Partial<TextureInput> = {}) =>
-      convertMaterial(
-        { name: "Wrapped", surface: surface({ textures: [textureInput(over)] }) },
-        null,
-        loader,
-      ).map!;
+      convertMaterial({ name: "Wrapped", surface: surface({ textures: [textureInput(over)] }) }, null, loader)
+        .map!;
 
     expect(convert({ wrap_s: "repeat" }).wrapS).toBe(THREE.RepeatWrapping);
     expect(convert({ wrap_s: "clamp" }).wrapS).toBe(THREE.ClampToEdgeWrapping);
@@ -287,11 +284,8 @@ describe("convertMaterial", () => {
 
   it("applies the authored colorSpace regardless of slot", () => {
     const convert = (over: Partial<TextureInput> = {}) =>
-      convertMaterial(
-        { name: "Bike", surface: surface({ textures: [textureInput(over)] }) },
-        null,
-        loader,
-      ).map!;
+      convertMaterial({ name: "Bike", surface: surface({ textures: [textureInput(over)] }) }, null, loader)
+        .map!;
 
     // the CarbonFrameBike marks diffuse maps raw — three.js must not decode them as sRGB
     expect(convert({ color_space: "raw" }).colorSpace).toBe(THREE.NoColorSpace);
@@ -310,11 +304,7 @@ describe("convertMaterial", () => {
 
   it("picks the per-slot colorSpace default for unauthored sourceColorSpace", () => {
     const convert = (over: Partial<TextureInput> = {}) =>
-      convertMaterial(
-        { name: "Auto", surface: surface({ textures: [textureInput(over)] }) },
-        null,
-        loader,
-      );
+      convertMaterial({ name: "Auto", surface: surface({ textures: [textureInput(over)] }) }, null, loader);
 
     expect(convert({}).map!.colorSpace).toBe(THREE.SRGBColorSpace);
     expect(convert({ input: "normal" }).normalMap!.colorSpace).toBe(THREE.NoColorSpace);

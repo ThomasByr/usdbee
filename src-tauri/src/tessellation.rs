@@ -231,7 +231,11 @@ fn mesh_data(
         Some((scope, values)) => scatter
             .map(scope, values, &corners)
             .map(|per_vertex| per_vertex.into_iter().map(|v| [v.x, v.y, v.z]).collect()),
-        None => Some(generated_normals(&positions, &indices, &scatter.orig_copies)),
+        None => Some(generated_normals(
+            &positions,
+            &indices,
+            &scatter.orig_copies,
+        )),
     };
 
     let uvs = uvs_raw
@@ -707,9 +711,14 @@ fn split_face_varying(
 ) -> (Vec<[f32; 3]>, Scatter, Vec<u32>) {
     // The partition is the union every faceVarying stream induces.
     let streams: Vec<Fv> = [
-        normals.as_ref().map(|(scope, values)| (*scope, Fv::Vec3(values))),
-        uvs.as_ref().map(|(scope, values)| (*scope, Fv::Vec2(values))),
-        colors.as_ref().map(|(scope, values)| (*scope, Fv::Vec3(values))),
+        normals
+            .as_ref()
+            .map(|(scope, values)| (*scope, Fv::Vec3(values))),
+        uvs.as_ref()
+            .map(|(scope, values)| (*scope, Fv::Vec2(values))),
+        colors
+            .as_ref()
+            .map(|(scope, values)| (*scope, Fv::Vec3(values))),
     ]
     .into_iter()
     .flatten()

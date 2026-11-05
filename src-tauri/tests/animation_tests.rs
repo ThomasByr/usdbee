@@ -106,7 +106,12 @@ fn delta_manifest_carries_exactly_the_time_dependent_prims() {
     // Exactly the signal-bearing prims (plus connectors) — nothing else.
     assert_eq!(
         paths(&nodes),
-        vec!["/Scene".to_string(), "/Scene/Mover".to_string(), "/Scene/Pulse".to_string(), "/Scene/Wobble".to_string()]
+        vec![
+            "/Scene".to_string(),
+            "/Scene/Mover".to_string(),
+            "/Scene/Pulse".to_string(),
+            "/Scene/Wobble".to_string()
+        ]
     );
 }
 
@@ -124,7 +129,11 @@ fn delta_manifest_skips_static_descendants_of_moving_prims() {
 #[test]
 fn delta_manifest_is_empty_for_a_static_stage() {
     let nodes = delta_from("basic.usda", Some(0.0));
-    assert!(nodes.is_empty(), "expected an empty delta, got {:?}", paths(&nodes));
+    assert!(
+        nodes.is_empty(),
+        "expected an empty delta, got {:?}",
+        paths(&nodes)
+    );
 }
 
 #[test]
@@ -312,7 +321,10 @@ fn delta_manifest_copies_native_proto_root_visibility() {
     // matching the full walk.
     let full = manifest_from("native_proto_vis.usda", Some(1.0));
     let nodes = delta_from("native_proto_vis.usda", Some(1.0));
-    assert!(!expect(&nodes, "/Scene/I").visible, "instance flips invisible");
+    assert!(
+        !expect(&nodes, "/Scene/I").visible,
+        "instance flips invisible"
+    );
     let shape = expect(&nodes, "/Scene/I/Shape");
     assert_eq!(
         shape.visible,
@@ -362,9 +374,7 @@ fn delta_manifest_keeps_full_and_filtered_native_walks_apart() {
         find(&nodes, "/Scene/Inst/__proto_0/I1/Static").is_some(),
         "full walk inside the animated prototype keeps the static copy"
     );
-    assert!(
-        find(&nodes, "/Scene/Inst/__proto_0/I1/Wobble").is_some()
-    );
+    assert!(find(&nodes, "/Scene/Inst/__proto_0/I1/Wobble").is_some());
 }
 
 // The packed payload's positions start right after the 20-byte header;

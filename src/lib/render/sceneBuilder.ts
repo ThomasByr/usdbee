@@ -115,8 +115,7 @@ export function isLayoutCompatible(geometry: THREE.BufferGeometry, decoded: Deco
   )
     return false;
   const index = geometry.getIndex();
-  if (!index || !(index.array instanceof Uint32Array) || index.count !== decoded.indices.length)
-    return false;
+  if (!index || !(index.array instanceof Uint32Array) || index.count !== decoded.indices.length) return false;
   const optional: [string, Float32Array | null, number][] = [
     ["normal", decoded.normals, 3],
     ["uv", decoded.uvs, 2],
@@ -362,15 +361,7 @@ async function buildNode(
 
   for (const child of node.children) {
     object.add(
-      await buildNode(
-        child,
-        fetchers,
-        dependencies,
-        time,
-        childContext,
-        prefetched,
-        prefetchedMaterials,
-      ),
+      await buildNode(child, fetchers, dependencies, time, childContext, prefetched, prefetchedMaterials),
     );
   }
   return object;
@@ -409,9 +400,7 @@ export async function buildScene(
   onProgress?.("Assembling Scene", 95);
   const root = new THREE.Group();
   for (const node of manifest) {
-    root.add(
-      await buildNode(node, fetchers, dependencies, time, null, prefetched, prefetchedMaterials),
-    );
+    root.add(await buildNode(node, fetchers, dependencies, time, null, prefetched, prefetchedMaterials));
   }
   return root;
 }

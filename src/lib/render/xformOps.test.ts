@@ -304,7 +304,9 @@ describe("evaluateGizmoGate", () => {
   it("enables a plain prim with no authored xformOpOrder", () => {
     // The ruling: a prim with NO order reports identity transforms and the
     // gate must ENABLE it (the create-op path authors the order too).
-    expect(evaluateGizmoGate("/World/Ball", details({ path: "/World/Ball", local_transform: IDENTITY }))).toEqual({
+    expect(
+      evaluateGizmoGate("/World/Ball", details({ path: "/World/Ball", local_transform: IDENTITY })),
+    ).toEqual({
       attachable: true,
       message: null,
     });

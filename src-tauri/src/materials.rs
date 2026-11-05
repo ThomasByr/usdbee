@@ -10,9 +10,7 @@
 use openusd::gf;
 use openusd::sdf::{self, Value};
 use openusd::usd::{Prim, SchemaBase, Stage};
-use openusd_schemas::shade::nodes::{
-    PreviewSurface as UsdPreviewSurface, Transform2d, UVTexture,
-};
+use openusd_schemas::shade::nodes::{PreviewSurface as UsdPreviewSurface, Transform2d, UVTexture};
 use openusd_schemas::shade::{Connectable, Input, Material, MaterialBindingAPI, Shader};
 use serde::{Deserialize, Serialize};
 
@@ -261,7 +259,10 @@ fn st_primvar(texture: &UVTexture) -> Result<String, String> {
     let Some(mut shader) = st_source(texture)? else {
         return Ok("st".to_string());
     };
-    if Transform2d::from_shader(shader.clone()).map_err(err)?.is_some() {
+    if Transform2d::from_shader(shader.clone())
+        .map_err(err)?
+        .is_some()
+    {
         let Some(source) = shader
             .input("in")
             .connected_sources()
@@ -293,7 +294,9 @@ fn st_source(texture: &UVTexture) -> Result<Option<Shader>, String> {
     else {
         return Ok(None);
     };
-    Ok(Some(Shader::from_prim_unchecked(source.source_prim().clone())))
+    Ok(Some(Shader::from_prim_unchecked(
+        source.source_prim().clone(),
+    )))
 }
 
 /// The UsdTransform2d in the texture's `st` chain: its scale/translation/
@@ -307,7 +310,10 @@ fn uv_transform(texture: &UVTexture) -> Result<Option<UvTransform>, String> {
     let Some(transform) = Transform2d::from_shader(shader).map_err(err)? else {
         return Ok(None);
     };
-    let scale = transform.scale().map_err(err)?.unwrap_or_else(|| gf::vec2f(1.0, 1.0));
+    let scale = transform
+        .scale()
+        .map_err(err)?
+        .unwrap_or_else(|| gf::vec2f(1.0, 1.0));
     let translation = transform
         .translation()
         .map_err(err)?

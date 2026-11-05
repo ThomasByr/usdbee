@@ -5,7 +5,13 @@
 
 import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three";
-import { applyPackedGeometryInPlace, buildScene, disposeScene, isLayoutCompatible, toBufferGeometry } from "./sceneBuilder";
+import {
+  applyPackedGeometryInPlace,
+  buildScene,
+  disposeScene,
+  isLayoutCompatible,
+  toBufferGeometry,
+} from "./sceneBuilder";
 import * as materialConverter from "./materialConverter";
 import type { RenderNode } from "../stage/types";
 
@@ -430,13 +436,7 @@ describe("buildScene", () => {
     const getMaterialBatch = vi.fn(async (slice: string[]) => slice.map(() => null));
     const onProgress = vi.fn();
 
-    await buildScene(
-      manifest,
-      { ...fetchers(), getGeometryBatch, getMaterialBatch },
-      {},
-      0,
-      onProgress,
-    );
+    await buildScene(manifest, { ...fetchers(), getGeometryBatch, getMaterialBatch }, {}, 0, onProgress);
 
     // Geometry owns 55..80, materials 80..90, assembly 95: the whole build
     // stays under the ceiling the caller reserves for scene-ready.
@@ -686,7 +686,13 @@ describe("applyPackedGeometryInPlace", () => {
 
   it("isLayoutCompatible is pure: no mutation on rejection", () => {
     const geometry = toBufferGeometry(packedGeometry());
-    const decoded = { positions: new Float32Array(12), indices: new Uint32Array(3), normals: null, uvs: null, colors: null };
+    const decoded = {
+      positions: new Float32Array(12),
+      indices: new Uint32Array(3),
+      normals: null,
+      uvs: null,
+      colors: null,
+    };
     expect(isLayoutCompatible(geometry, decoded)).toBe(false);
     expect(geometry.getAttribute("position").count).toBe(3);
   });

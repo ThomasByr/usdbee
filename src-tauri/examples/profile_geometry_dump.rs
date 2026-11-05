@@ -5,7 +5,7 @@ use openusd::gf;
 use openusd::sdf::{self, Value};
 use openusd::usd::TimeCode;
 use usdbee_lib::stage::{
-    PrimNode, RenderNode, open_stage, serialize_render_manifest, serialize_tree,
+    open_stage, serialize_render_manifest, serialize_tree, PrimNode, RenderNode,
 };
 use usdbee_lib::tessellation::{pack_geometry, tessellate_prim};
 use usdbee_lib::values::local_transform;

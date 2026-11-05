@@ -279,7 +279,8 @@ fn transform2d_chain_wrap_tokens_and_value_scale_reach_the_payload() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "material_tiling.usda");
 
-    let info = request_material_data(&state.sender(), "/World/TiledBall").expect("tiled material data");
+    let info =
+        request_material_data(&state.sender(), "/World/TiledBall").expect("tiled material data");
     assert_eq!(info.name, "Tiled");
     let surface = info.surface.expect("Tiled is a UsdPreviewSurface");
 
@@ -288,7 +289,10 @@ fn transform2d_chain_wrap_tokens_and_value_scale_reach_the_payload() {
         .iter()
         .find(|t| t.input == "diffuseColor")
         .expect("diffuseColor texture input");
-    assert_eq!(albedo.st_primvar, "uv", "the reader sits behind the Transform2d");
+    assert_eq!(
+        albedo.st_primvar, "uv",
+        "the reader sits behind the Transform2d"
+    );
     assert_eq!(albedo.wrap_s.as_deref(), Some("mirror"));
     assert_eq!(albedo.wrap_t.as_deref(), Some("clamp"));
     assert_eq!(albedo.color_space.as_deref(), Some("raw"));
@@ -310,7 +314,10 @@ fn transform2d_chain_wrap_tokens_and_value_scale_reach_the_payload() {
         .expect("normal texture input");
     assert_eq!(normal.wrap_s.as_deref(), Some("repeat"));
     assert_eq!(normal.wrap_t.as_deref(), Some("repeat"));
-    assert_eq!(normal.uv_transform, None, "st connects straight to the reader");
+    assert_eq!(
+        normal.uv_transform, None,
+        "st connects straight to the reader"
+    );
     assert_eq!(normal.value_scale, None);
     assert_eq!(normal.value_bias, None);
     let normal_info = surface.normal.expect("normal TextureInfo");
@@ -363,7 +370,11 @@ fn material_batch_frames_json_slots_and_mirrors_per_path_semantics() {
         let batched: MaterialInfo =
             serde_json::from_slice(&payload).expect("ok slot is MaterialInfo JSON");
         let per_path = request_material_data(&state.sender(), path).expect("per-path material");
-        assert_eq!(batched, per_path, "{} slot mirrors the per-path fetch", path);
+        assert_eq!(
+            batched, per_path,
+            "{} slot mirrors the per-path fetch",
+            path
+        );
     }
 }
 
@@ -374,10 +385,7 @@ fn material_batch_fails_soft_per_slot() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "material_scene.usda");
 
-    let paths = vec![
-        "/World/PlasticBall".to_string(),
-        "/World/Nope".to_string(),
-    ];
+    let paths = vec!["/World/PlasticBall".to_string(), "/World/Nope".to_string()];
     let bytes = request_material_batch(&state.sender(), &paths).expect("batch should frame");
 
     let slots = material_batch_slots(&bytes);
@@ -426,14 +434,21 @@ fn unauthored_wrap_transform_and_scale_default_to_identity() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "material_tiling.usda");
 
-    let info = request_material_data(&state.sender(), "/World/PlainBall").expect("plain material data");
+    let info =
+        request_material_data(&state.sender(), "/World/PlainBall").expect("plain material data");
     let surface = info.surface.expect("Plain is a UsdPreviewSurface");
     assert_eq!(surface.textures.len(), 1);
     let texture = &surface.textures[0];
     assert_eq!(texture.wrap_s, None, "unauthored wrapS stays None");
     assert_eq!(texture.wrap_t, None);
-    assert_eq!(texture.color_space, None, "unauthored sourceColorSpace stays None");
-    assert_eq!(texture.uv_transform, None, "no st connection means no transform");
+    assert_eq!(
+        texture.color_space, None,
+        "unauthored sourceColorSpace stays None"
+    );
+    assert_eq!(
+        texture.uv_transform, None,
+        "no st connection means no transform"
+    );
     assert_eq!(texture.value_scale, None);
     assert_eq!(texture.value_bias, None);
     assert_eq!(texture.st_primvar, "st", "no st connection defaults to st");

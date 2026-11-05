@@ -11,7 +11,13 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { invoke } from "@tauri-apps/api/core";
 import * as THREE from "three";
-import { advanceStageTime, renderState, snapToTimeCodes, toAbsoluteTime, toPlayheadOffset } from "./renderState.svelte";
+import {
+  advanceStageTime,
+  renderState,
+  snapToTimeCodes,
+  toAbsoluteTime,
+  toPlayheadOffset,
+} from "./renderState.svelte";
 import { disposeScene, GEOMETRY_BATCH_SIZE } from "./sceneBuilder";
 import type { MaterialInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
@@ -204,10 +210,7 @@ function packedBatchGeometry(y = 1, count = 1): ArrayBuffer {
 // Material batch slots share the frame but carry MaterialInfo JSON bytes.
 function packedBatchMaterials(count = 1): ArrayBuffer {
   const bytes = new TextEncoder().encode(JSON.stringify({ name: "Mat", surface: null }));
-  const slot = bytes.buffer.slice(
-    bytes.byteOffset,
-    bytes.byteOffset + bytes.byteLength,
-  ) as ArrayBuffer;
+  const slot = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   return packedBatch(Array.from({ length: count }, () => slot));
 }
 
@@ -1045,7 +1048,8 @@ describe("renderState.setStageTime", () => {
     const slow = deferred<ArrayBuffer>();
     mockedInvoke.mockImplementation(async (cmd: string, args: any) => {
       if (cmd === "get_animated_manifest") return [wobble];
-      if (cmd === "get_geometry_batch") return args.time === 5 ? slow.promise : packedBatch([packedGeometry(2)]);
+      if (cmd === "get_geometry_batch")
+        return args.time === 5 ? slow.promise : packedBatch([packedGeometry(2)]);
       if (cmd === "get_material_data") return { name: "Mat", surface: null };
       throw new Error(`unexpected command: ${cmd}`);
     });

@@ -109,7 +109,8 @@ fn facevarying_uv_seam_splits_the_shared_vertex_per_face() {
         5,
         "split vertex count reaches the wire header"
     );
-    let uv_base = 20 + mesh.positions.len() * 12 + mesh.normals.as_ref().map_or(0, |n| n.len() * 12);
+    let uv_base =
+        20 + mesh.positions.len() * 12 + mesh.normals.as_ref().map_or(0, |n| n.len() * 12);
     let uv_at = |index: usize| {
         let offset = uv_base + index * 8;
         [

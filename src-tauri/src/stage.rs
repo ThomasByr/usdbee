@@ -781,12 +781,13 @@ fn spawn_stage_owner_for(
                             let slots = paths
                                 .iter()
                                 .map(|path| {
-                                    resolved_material_info(stage, &mut resolve_memo, path)
-                                        .and_then(|info| {
+                                    resolved_material_info(stage, &mut resolve_memo, path).and_then(
+                                        |info| {
                                             serde_json::to_vec(&info).map_err(|e| {
                                                 format!("material serialize failed: {}", e)
                                             })
-                                        })
+                                        },
+                                    )
                                 })
                                 .collect();
                             Ok(frame_batch(slots))
@@ -2527,8 +2528,7 @@ impl ManifestSkeleton {
                 ancestor_visibility_animated,
             )?;
         }
-        skeleton.time_codes =
-            Attribute::unioned_time_samples(&sampled_attrs).map_err(stage_err)?;
+        skeleton.time_codes = Attribute::unioned_time_samples(&sampled_attrs).map_err(stage_err)?;
         for key in skeleton.facts.keys().cloned().collect::<Vec<String>>() {
             signal_of(&skeleton.facts, &key, &mut skeleton.signals);
         }
@@ -3032,7 +3032,14 @@ fn prototype_children(
         } else {
             (
                 visible,
-                build_subtree(mode, skeleton, &prototype.children, time, animated, prototype_memo)?,
+                build_subtree(
+                    mode,
+                    skeleton,
+                    &prototype.children,
+                    time,
+                    animated,
+                    prototype_memo,
+                )?,
             )
         };
         rebase_render_paths(
@@ -3106,9 +3113,15 @@ fn build_subtree(
         SubtreeMode::Full => {
             render_children(skeleton, children, time, ancestor_moves, prototype_memo)
         }
-        SubtreeMode::DeltaFiltered { vis } => {
-            delta_children(skeleton, children, time, ancestor_moves, prototype_memo, false, vis)
-        }
+        SubtreeMode::DeltaFiltered { vis } => delta_children(
+            skeleton,
+            children,
+            time,
+            ancestor_moves,
+            prototype_memo,
+            false,
+            vis,
+        ),
     }
 }
 
@@ -3144,8 +3157,14 @@ fn native_prototype_children(
                     )
                 })?;
             let moves = ancestor_moves || prototype.self_moves;
-            let children =
-                build_subtree(mode, skeleton, &prototype.children, time, moves, prototype_memo)?;
+            let children = build_subtree(
+                mode,
+                skeleton,
+                &prototype.children,
+                time,
+                moves,
+                prototype_memo,
+            )?;
             prototype_memo.insert(memo_key.clone(), children.clone());
             children
         }
@@ -3282,8 +3301,7 @@ fn delta_children(
             .get(child)
             .ok_or_else(|| format!("cached manifest facts missing for prim {}", child))?;
         let deforms = facts.renders_geometry && facts.self_deforms;
-        let self_animated =
-            facts.self_moves || deforms || facts.self_visibility_animated;
+        let self_animated = facts.self_moves || deforms || facts.self_visibility_animated;
         if !(force || vis || self_animated || skeleton.signal(child)) {
             continue;
         }
@@ -3357,8 +3375,7 @@ fn delta_node_children(
             // emit_all: the frontend hides a delta instancer's absent
             // synthetic children, so whenever the instancer node itself is
             // in the delta every currently-drawn child must come along.
-            let emit_all =
-                force || facts.self_moves || facts.self_visibility_animated || vis;
+            let emit_all = force || facts.self_moves || facts.self_visibility_animated || vis;
             if !emit_all && !prototypes.iter().any(|path| skeleton.signal(path.as_str())) {
                 return Ok(Vec::new());
             }

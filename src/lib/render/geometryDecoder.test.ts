@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { decodeGeometry, decodeGeometryBatch, decodeMaterialBatch, GEOMETRY_MAGIC, GEOMETRY_VERSION } from "./geometryDecoder";
+import {
+  decodeGeometry,
+  decodeGeometryBatch,
+  decodeMaterialBatch,
+  GEOMETRY_MAGIC,
+  GEOMETRY_VERSION,
+} from "./geometryDecoder";
 
 // Hand-build the binary layout the Rust side emits (little-endian):
 // magic u32, version u32, vertex_count u32, index_count u32, flags u32
