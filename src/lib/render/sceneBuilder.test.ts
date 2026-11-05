@@ -416,6 +416,41 @@ describe("buildScene", () => {
     expect(getGeometry, "failed slots stay failed — no per-path retry").not.toHaveBeenCalled();
   });
 
+  it("reports bounded per-slice progress for the loading bar", async () => {
+    const paths = Array.from({ length: 70 }, (_, i) => `/World/M${i}`);
+    const manifest = [
+      node({
+        path: "/World",
+        children: paths.map((path) =>
+          node({ path, name: path.slice("/World/".length), type_name: "Mesh", has_geometry: true }),
+        ),
+      }),
+    ];
+    const getGeometryBatch = vi.fn(async (slice: string[]) => slice.map(() => packedGeometry()));
+    const getMaterialBatch = vi.fn(async (slice: string[]) => slice.map(() => null));
+    const onProgress = vi.fn();
+
+    await buildScene(
+      manifest,
+      { ...fetchers(), getGeometryBatch, getMaterialBatch },
+      {},
+      0,
+      onProgress,
+    );
+
+    // Geometry owns 55..80, materials 80..90, assembly 95: the whole build
+    // stays under the ceiling the caller reserves for scene-ready.
+    expect(onProgress.mock.calls).toEqual([
+      ["Loading Geometry 32/70", 66],
+      ["Loading Geometry 64/70", 78],
+      ["Loading Geometry 70/70", 80],
+      ["Loading Materials 32/70", 85],
+      ["Loading Materials 64/70", 89],
+      ["Loading Materials 70/70", 90],
+      ["Assembling Scene", 95],
+    ]);
+  });
+
   it("falls back to per-path fetches when the whole batch command fails", async () => {
     const manifest = [
       node({

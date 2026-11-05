@@ -181,6 +181,7 @@ async function preloadGeometry(
   manifest: RenderNode[],
   fetchers: SceneFetchers,
   time?: number | null,
+  onProgress?: BuildProgress,
 ): Promise<PrefetchedGeometry> {
   const prefetched: PrefetchedGeometry = new Map();
   const paths = geometryPaths(manifest);
@@ -191,6 +192,7 @@ async function preloadGeometry(
     try {
       const slots = await getGeometryBatch(slice, time);
       slice.forEach((path, slot) => prefetched.set(path, slots[slot] ?? null));
+      reportSliceProgress(onProgress, "Loading Geometry", start, slice.length, paths.length, 55, 25);
     } catch (e) {
       // Whole batch failed: leave unfetched so the per-path fetches still
       // run fail-soft inside buildNode.
@@ -204,6 +206,7 @@ async function preloadGeometry(
 async function preloadMaterials(
   manifest: RenderNode[],
   fetchers: SceneFetchers,
+  onProgress?: BuildProgress,
 ): Promise<PrefetchedMaterials> {
   const prefetched: PrefetchedMaterials = new Map();
   const getMaterialBatch = fetchers.getMaterialBatch;
@@ -216,6 +219,7 @@ async function preloadMaterials(
     try {
       const slots = await getMaterialBatch(slice);
       slice.forEach((path, slot) => prefetched.set(path, slots[slot] ?? null));
+      reportSliceProgress(onProgress, "Loading Materials", start, slice.length, paths.length, 80, 10);
     } catch (e) {
       // Whole batch failed: leave unfetched so the per-path fetches still
       // run fail-soft inside fetchMaterial.
@@ -372,14 +376,37 @@ async function buildNode(
   return object;
 }
 
+// Load-time progress for the loading bar: the caller owns the scale (the
+// Rust stream ends at 45 %, scene-ready clears it), the builder reports the
+// stages only it can see.
+export type BuildProgress = (stage: string, percent: number) => void;
+
+// One report per batch slice, spread over the stage's [base, base + span]
+// band so a long build advances instead of parking.
+function reportSliceProgress(
+  onProgress: BuildProgress | undefined,
+  label: string,
+  start: number,
+  count: number,
+  total: number,
+  base: number,
+  span: number,
+): void {
+  if (!onProgress) return;
+  const done = Math.min(start + count, total);
+  onProgress(`${label} ${done}/${total}`, base + Math.round((done / total) * span));
+}
+
 export async function buildScene(
   manifest: RenderNode[],
   fetchers: SceneFetchers,
   dependencies: FallbackDependencies = {},
   time?: number | null,
+  onProgress?: BuildProgress,
 ): Promise<THREE.Group> {
-  const prefetched = await preloadGeometry(manifest, fetchers, time);
-  const prefetchedMaterials = await preloadMaterials(manifest, fetchers);
+  const prefetched = await preloadGeometry(manifest, fetchers, time, onProgress);
+  const prefetchedMaterials = await preloadMaterials(manifest, fetchers, onProgress);
+  onProgress?.("Assembling Scene", 95);
   const root = new THREE.Group();
   for (const node of manifest) {
     root.add(

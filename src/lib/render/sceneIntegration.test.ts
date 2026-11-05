@@ -11,9 +11,10 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import * as THREE from "three";
 import { invoke } from "@tauri-apps/api/core";
-import { installPlaybackDriver, resetLoadedScene } from "./sceneIntegration";
+import { installPlaybackDriver, loadRustScene, resetLoadedScene } from "./sceneIntegration";
 import { loadCachedTexture } from "./textureCache";
 import { renderState } from "./renderState.svelte";
+import { loadOrchestrator } from "../state/loadOrchestrator.svelte";
 import { stageState } from "../stage/stageState.svelte";
 import type { RendererKit } from "../three/RendererKit.svelte";
 
@@ -145,5 +146,31 @@ describe("resetLoadedScene", () => {
     expect(scene.children).not.toContain(group);
     loadCachedTexture("/Textures/texgen_7.png", () => {}, load);
     expect(load).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("loadRustScene progress", () => {
+  it("holds the bar at the frontend half and forwards the build's own progress", async () => {
+    // The Rust stream ends at 45 %; everything the user waits on after it
+    // (manifest, batches, assembly) is reported from here.
+    const seen: { stage: string; percent: number }[] = [];
+    const spy = vi
+      .spyOn(renderState, "loadRenderScene")
+      .mockImplementation(async (_start, _fallbacks, onProgress) => {
+        seen.push({ ...loadOrchestrator.loadingProgress! });
+        onProgress?.("Loading Geometry 32/70", 66);
+        seen.push({ ...loadOrchestrator.loadingProgress! });
+        return null;
+      });
+
+    const kit = { scene: new THREE.Scene(), animationProgress: 0 } as unknown as RendererKit;
+    await loadRustScene(kit);
+
+    expect(seen).toEqual([
+      { stage: "Fetching Scene Manifest", percent: 50 },
+      { stage: "Loading Geometry 32/70", percent: 66 },
+    ]);
+    expect(loadOrchestrator.loadingProgress).toBeNull();
+    spy.mockRestore();
   });
 });

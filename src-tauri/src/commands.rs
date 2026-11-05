@@ -240,7 +240,7 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
         "usd-load-progress",
         ProgressEvent {
             stage: "Opening File".into(),
-            percent: 10,
+            percent: 5,
         },
     )
     .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
@@ -265,7 +265,7 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
             "usd-load-progress",
             ProgressEvent {
                 stage: "Unpacking USDZ Archive...".into(),
-                percent: 20,
+                percent: 10,
             },
         )
         .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
@@ -278,8 +278,8 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
     app.emit(
         "usd-load-progress",
         ProgressEvent {
-            stage: "Extracting Dependencies".into(),
-            percent: 40,
+            stage: "Opening Stage".into(),
+            percent: 15,
         },
     )
     .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
@@ -388,7 +388,7 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
         "usd-load-progress",
         ProgressEvent {
             stage: "Finalizing Metadata".into(),
-            percent: 90,
+            percent: 40,
         },
     )
     .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
@@ -402,7 +402,7 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
         "usd-load-progress",
         ProgressEvent {
             stage: "Dispatching Frame".into(),
-            percent: 100,
+            percent: 45,
         },
     )
     .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));

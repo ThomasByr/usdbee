@@ -212,3 +212,82 @@ fn gate_refusal_surfaces_through_the_refused_channel_only() {
         "a refused open must not start a load stream"
     );
 }
+
+// The loading bar's scale is only as honest as this stream: the frontend
+// takes over from 50 % on, so the Rust half must stay in the lower half and
+// never go backwards.
+fn record_progress(app: &tauri::App<tauri::test::MockRuntime>) -> Arc<Mutex<Vec<(String, u8)>>> {
+    let seen: Arc<Mutex<Vec<(String, u8)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    app.listen("usd-load-progress", move |event| {
+        let payload: serde_json::Value =
+            serde_json::from_str(event.payload()).expect("the payload must be progress JSON");
+        let stage = payload["stage"]
+            .as_str()
+            .expect("the event carries a stage label")
+            .to_string();
+        let percent = payload["percent"]
+            .as_u64()
+            .expect("the event carries a percent") as u8;
+        sink.lock().unwrap().push((stage, percent));
+    });
+    seen
+}
+
+#[test]
+fn plain_open_leaves_the_upper_half_to_the_frontend() {
+    let app = mock_app();
+    let seen = record_progress(&app);
+
+    tauri::async_runtime::block_on(open_usd_file_path(
+        app.handle().clone(),
+        fixture("basic.usda").to_string_lossy().into_owned(),
+    ))
+    .expect("basic.usda should open through the path command");
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![
+            ("Opening File".to_string(), 5),
+            ("Opening Stage".to_string(), 15),
+            ("Finalizing Metadata".to_string(), 40),
+            ("Dispatching Frame".to_string(), 45),
+        ],
+        "the open stream must name the phase it is parked in, at an honest percent"
+    );
+}
+
+#[test]
+fn usdz_open_reports_the_unpack_step_between_the_two_shared_ones() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let source = fixture("basic.usda");
+    let layer = openusd::sdf::Layer::open(source.to_str().expect("fixture path is UTF-8"))
+        .expect("source layer should open");
+    let usdz = dir.path().join("basic.usdz");
+    layer
+        .export(usdz.to_str().expect("temp path is UTF-8"))
+        .expect("usdz stage should be generated");
+
+    let app = mock_app();
+    let seen = record_progress(&app);
+
+    tauri::async_runtime::block_on(open_usd_file_path(
+        app.handle().clone(),
+        usdz.to_string_lossy().into_owned(),
+    ))
+    .expect("basic.usdz should extract and open through the path command");
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![
+            ("Opening File".to_string(), 5),
+            ("Unpacking USDZ Archive...".to_string(), 10),
+            ("Opening Stage".to_string(), 15),
+            ("Finalizing Metadata".to_string(), 40),
+            ("Dispatching Frame".to_string(), 45),
+        ],
+        "a usdz open adds the unpack step to the plain sequence"
+    );
+}

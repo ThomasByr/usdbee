@@ -22,6 +22,7 @@ import {
   disposeScene,
   GEOMETRY_BATCH_SIZE,
   toBufferGeometry,
+  type BuildProgress,
   type FallbackDependencies,
   type InstanceContext,
   type SceneFetchers,
@@ -503,15 +504,20 @@ export const renderState = $state({
   async loadRenderScene(
     startTime = 0,
     fallbackColors: FallbackDependencies = {},
+    onProgress?: BuildProgress,
   ): Promise<THREE.Group | null> {
-    const work = this.loadWork(startTime, fallbackColors);
+    const work = this.loadWork(startTime, fallbackColors, onProgress);
     // Assigned right after the call: the work body runs synchronously up to
     // its first await, so no caller can observe the gap below.
     loadPromise = work.then(() => {});
     return work;
   },
 
-  async loadWork(startTime: number, fallbackColors: FallbackDependencies): Promise<THREE.Group | null> {
+  async loadWork(
+    startTime: number,
+    fallbackColors: FallbackDependencies,
+    onProgress?: BuildProgress,
+  ): Promise<THREE.Group | null> {
     const generation = ++loadGeneration;
     // F6: the texture memo covers ONE load — the old scene's clones were
     // disposed by whoever dropped it, so the images they shared go too
@@ -535,7 +541,7 @@ export const renderState = $state({
       if (generation !== loadGeneration) return null;
       this.hasAnimated = anyAnimated(manifest);
       currentFallbacks = fallbackColors;
-      const group = await buildScene(manifest, fetchers, fallbackColors, startTime);
+      const group = await buildScene(manifest, fetchers, fallbackColors, startTime, onProgress);
       if (generation !== loadGeneration) {
         disposeScene(group);
         return null;

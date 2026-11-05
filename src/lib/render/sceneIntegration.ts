@@ -114,11 +114,13 @@ export async function loadRustScene(viewer: RendererKit) {
   if (!viewer.scene) return;
   resetLoadedScene(viewer);
   viewer.animationProgress = 0;
-  loadOrchestrator.loadingProgress = { stage: "Composing Rust render scene...", percent: 40 };
+  // The backend stream ends at 45 %: the upper half is this build.
+  loadOrchestrator.loadingProgress = { stage: "Fetching Scene Manifest", percent: 50 };
   try {
     const group = await renderState.loadRenderScene(
       stageState.stageInfo?.start_time_code ?? 0,
       loadOrchestrator.dependencies ?? {},
+      (stage, percent) => (loadOrchestrator.loadingProgress = { stage, percent }),
     );
     if (group) {
       integrateScene(viewer, group);
