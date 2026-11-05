@@ -228,9 +228,7 @@
         onmousedown={() => (viewer.isDraggingAnim = true)}
         onmouseup={() => (viewer.isDraggingAnim = false)}
       />
-      <span class="timeline-time" title={`${timeCodesPerSecond} fps`}
-        >{timelineCurrent} / {timelineEnd}</span
-      >
+      <span class="timeline-time" title={`${timeCodesPerSecond} fps`}>{timelineCurrent} / {timelineEnd}</span>
     </div>
   {/if}
 
@@ -241,7 +239,7 @@
     </div>
   {:else if loadOrchestrator.loadingProgress}
     <div class="loading-overlay">
-      <h3>Loading {loadOrchestrator.loadingProgress.stage}...</h3>
+      <h3>{loadOrchestrator.loadingProgress.stage}...</h3>
     </div>
   {/if}
 </section>

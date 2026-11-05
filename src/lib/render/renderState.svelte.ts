@@ -354,8 +354,7 @@ async function updateSceneDelta(
     if ((object as THREE.InstancedMesh).isInstancedMesh && !present.has(path)) {
       const slash = path.lastIndexOf("/");
       const isDirectWrapper = path.slice(slash + 1).startsWith("__proto_");
-      if (isDirectWrapper && present.has(path.slice(0, slash)))
-        object.parent!.visible = false;
+      if (isDirectWrapper && present.has(path.slice(0, slash))) object.parent!.visible = false;
     }
   }
 }
@@ -541,7 +540,14 @@ export const renderState = $state({
       if (generation !== loadGeneration) return null;
       this.hasAnimated = anyAnimated(manifest);
       currentFallbacks = fallbackColors;
-      const group = await buildScene(manifest, fetchers, fallbackColors, startTime, onProgress);
+      // A superseded build keeps running inside buildScene; only a live
+      // generation may write the shared loading bar.
+      const guardedProgress: BuildProgress | undefined = onProgress
+        ? (stage, percent) => {
+            if (generation === loadGeneration) onProgress(stage, percent);
+          }
+        : undefined;
+      const group = await buildScene(manifest, fetchers, fallbackColors, startTime, guardedProgress);
       if (generation !== loadGeneration) {
         disposeScene(group);
         return null;
