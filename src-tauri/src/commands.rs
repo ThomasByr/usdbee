@@ -318,9 +318,7 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
                     Ok((scan, stage_info))
                 })
                 .map_err(|e| format!("Failed to spawn parser thread: {}", e))?;
-            handle
-                .join()
-                .map_err(|_| "The USD parser thread panicked".to_string())?
+            handle.join().map_err(|_| PARSER_PANICKED.to_string())?
         }
     })
     .await
@@ -415,6 +413,33 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
     Ok(stage_info)
 }
 
+// The panic message the parser thread's `join` failure already produces.
+const PARSER_PANICKED: &str = "The USD parser thread panicked";
+
+/// Runs the open's post-open dependency work behind a panic guard.
+///
+/// The stage, its session layer file and its extraction dir are all live by
+/// the time this work starts, so a panic here would escape as a `join` error
+/// and leave them alive for the rest of the session. A panic fails the load
+/// like an error does, with the same message the join path reports.
+fn guard_post_open<F>(
+    stage_state: &crate::stage::StageState,
+    stage_id: u64,
+    pass: F,
+) -> Result<DependencyScan, String>
+where
+    F: FnOnce() -> Result<DependencyScan, String>,
+{
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(pass))
+        .unwrap_or_else(|_| Err(PARSER_PANICKED.to_string()));
+    if result.is_err() {
+        if let Err(e) = stage_state.close_stage(stage_id) {
+            eprintln!("usdbee: could not close the stage of a failed load: {}", e);
+        }
+    }
+    result
+}
+
 // The open orchestration's post-open dependency work: the owner's scan
 // (against the layers the open already parsed) and then the remote fetches.
 // A failure of either aborts the load (Phase 0 ruling), and the stage opened
@@ -425,16 +450,12 @@ fn dependencies_after_open(
     stage_id: u64,
     server_url: &str,
 ) -> Result<DependencyScan, String> {
-    let result = stage_state.get_dependencies(stage_id).and_then(|mut scan| {
-        resolve_remote_dependencies(&mut scan, server_url)?;
-        Ok(scan)
-    });
-    if result.is_err() {
-        if let Err(e) = stage_state.close_stage(stage_id) {
-            eprintln!("usdbee: could not close the stage of a failed load: {}", e);
-        }
-    }
-    result
+    guard_post_open(stage_state, stage_id, || {
+        stage_state.get_dependencies(stage_id).and_then(|mut scan| {
+            resolve_remote_dependencies(&mut scan, server_url)?;
+            Ok(scan)
+        })
+    })
 }
 
 // Path-based open (drag-drop, recent files): the SAME orchestration the
@@ -560,6 +581,33 @@ mod tests {
         assert!(
             state.sender(info.stage_id).is_err(),
             "the aborted load must not leave its stage open"
+        );
+        assert!(state.list_stages().unwrap().is_empty());
+    }
+
+    #[test]
+    fn panicked_post_open_pass_leaves_no_open_stage() {
+        use crate::stage::{noop_sink, StageState};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("plain.usda");
+        fs::write(&root, "#usda 1.0\ndef \"R\"\n{\n}\n").unwrap();
+
+        let state = StageState::new(noop_sink());
+        let info = state
+            .open(&root, false, None, None)
+            .expect("the stage opens before the pass runs");
+
+        let error = guard_post_open(&state, info.stage_id, || panic!("scan exploded"))
+            .err()
+            .expect("a panicked pass must fail the load, not escape the thread");
+        assert_eq!(
+            error, PARSER_PANICKED,
+            "the panic surfaces as the join path's error"
+        );
+        assert!(
+            state.sender(info.stage_id).is_err(),
+            "a panicked load must not leave its stage open"
         );
         assert!(state.list_stages().unwrap().is_empty());
     }
