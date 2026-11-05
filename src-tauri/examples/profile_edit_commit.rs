@@ -27,7 +27,10 @@ fn step(label: &str, start: Instant, extra: &str) -> f64 {
     elapsed
 }
 
-fn attribute<'a>(details: &'a PrimDetails, name: &str) -> Option<&'a usdbee_lib::values::AttributeInfo> {
+fn attribute<'a>(
+    details: &'a PrimDetails,
+    name: &str,
+) -> Option<&'a usdbee_lib::values::AttributeInfo> {
     details.attributes.iter().find(|attr| attr.name == name)
 }
 
@@ -41,7 +44,11 @@ fn main() {
     println!(
         "ASSET {} ({})",
         path.display(),
-        if cfg!(debug_assertions) { "debug" } else { "release" }
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
     );
 
     // The app opens a usdz through its extraction dir; reuse that shape.
@@ -78,8 +85,9 @@ fn main() {
                 .is_some_and(|value| {
                     value.eq_ignore_ascii_case("usdc") || value.eq_ignore_ascii_case("usda")
                 });
-            let shallower =
-                best.as_ref().is_none_or(|current| candidate.components().count() < current.components().count());
+            let shallower = best.as_ref().is_none_or(|current| {
+                candidate.components().count() < current.components().count()
+            });
             if is_usd && shallower {
                 best = Some(candidate);
             }
@@ -90,7 +98,12 @@ fn main() {
 
     let state = StageState::new(noop_sink());
     let info = state
-        .open(&open_path, extraction_dir.is_some(), None, extraction_dir.as_deref())
+        .open(
+            &open_path,
+            extraction_dir.is_some(),
+            None,
+            extraction_dir.as_deref(),
+        )
         .unwrap();
     let sender = state.sender(info.stage_id).unwrap();
     // Reads sample the playback time; the gizmo authors at DEFAULT time
@@ -100,7 +113,9 @@ fn main() {
 
     // Pick the first geometry prim from the manifest as the drag target.
     let manifest = request_scene_manifest(&sender, time).unwrap();
-    fn first_geometry<'a>(nodes: &'a [usdbee_lib::stage::RenderNode]) -> Option<&'a usdbee_lib::stage::RenderNode> {
+    fn first_geometry(
+        nodes: &[usdbee_lib::stage::RenderNode],
+    ) -> Option<&usdbee_lib::stage::RenderNode> {
         for node in nodes {
             if node.has_geometry {
                 return Some(node);
@@ -133,8 +148,14 @@ fn main() {
     let translate = attribute(&details, "xformOp:translate")
         .expect("the target should carry a translate op to update");
     let order: Vec<String> = attribute(&details, "xformOpOrder")
-        .map(|attr| attr.value.data.as_array().map(|values| values.iter().map(|v| v.as_str().unwrap_or_default().to_string()).collect()))
-        .flatten()
+        .and_then(|attr| {
+            attr.value.data.as_array().map(|values| {
+                values
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or_default().to_string())
+                    .collect()
+            })
+        })
         .unwrap_or_default();
     let current: Vec<f64> = translate
         .value
@@ -153,14 +174,23 @@ fn main() {
         &sender,
         &target_path,
         "xformOp:translate",
-        &ValuePayload { r#type: translate.value.r#type.clone(), data: serde_json::json!(moved), truncated: None, count: None },
+        &ValuePayload {
+            r#type: translate.value.r#type.clone(),
+            data: serde_json::json!(moved),
+            truncated: None,
+            count: None,
+        },
         None,
     )
     .expect("translate write");
     let lock_write = step("lock: write translate op", start, "");
     let start = Instant::now();
     let _ = request_stage_tree(&sender).unwrap();
-    let lock_tree = step("lock: refreshAfterEdit tree", start, "cache cleared by the write");
+    let lock_tree = step(
+        "lock: refreshAfterEdit tree",
+        start,
+        "cache cleared by the write",
+    );
     let start = Instant::now();
     request_stage_details(&sender, &target_path, time).unwrap();
     let lock_reselect = step("lock: reselect details", start, "");
@@ -194,7 +224,12 @@ fn main() {
         &sender,
         &target_path,
         "xformOp:rotateXYZ",
-        &ValuePayload { r#type: "float3".into(), data: serde_json::json!([0.0, 0.0, 90.0]), truncated: None, count: None },
+        &ValuePayload {
+            r#type: "float3".into(),
+            data: serde_json::json!([0.0, 0.0, 90.0]),
+            truncated: None,
+            count: None,
+        },
         None,
     )
     .expect("rotate write");
@@ -208,7 +243,12 @@ fn main() {
         &sender,
         &target_path,
         "xformOpOrder",
-        &ValuePayload { r#type: "token_array".into(), data: serde_json::json!(order_with_rotate), truncated: None, count: None },
+        &ValuePayload {
+            r#type: "token_array".into(),
+            data: serde_json::json!(order_with_rotate),
+            truncated: None,
+            count: None,
+        },
         None,
     )
     .expect("order write");
