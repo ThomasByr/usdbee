@@ -823,14 +823,34 @@ fn spawn_stage_owner_for(
                                 stage.edit_target().layer_identifier(),
                                 &path,
                             );
-                            after_mutation(
-                                &sink,
-                                &mut mesh_cache,
-                                &mut manifest_skeleton,
-                                &mut stage_tree,
-                                &mut resolve_memo,
-                                &path,
-                            );
+                            // The gizmo's hot path: a default-time xform op /
+                            // order write cannot change the tree shape or any
+                            // time-independent skeleton fact, yet the coarse
+                            // clear cost ~700 ms of tree rebuild plus ~3.4 s
+                            // of skeleton rebuild per commit (measured, see
+                            // .agents/knowledge/gizmo-edit-commit-costs.md).
+                            // Only the edited prim's cached static transform
+                            // can go stale. Sampled writes and every other
+                            // mutation keep the coarse clear.
+                            if time.is_none()
+                                && (name == "xformOpOrder" || name.starts_with("xformOp:"))
+                            {
+                                // shortcut: coarse clear — tessellation may bake
+                                // transform-dependent skinning
+                                mesh_cache.clear();
+                                invalidate_skeleton_transform(&mut manifest_skeleton, &path);
+                                resolve_memo.clear();
+                                emit_stage_changed(&sink, &path);
+                            } else {
+                                after_mutation(
+                                    &sink,
+                                    &mut mesh_cache,
+                                    &mut manifest_skeleton,
+                                    &mut stage_tree,
+                                    &mut resolve_memo,
+                                    &path,
+                                );
+                            }
                         }
                     }
                     let _ = reply.send(response);
@@ -1580,9 +1600,31 @@ fn after_mutation(
     // The tree may change shape too (variant switches, authored children).
     *stage_tree = None;
     resolve_memo.clear();
+    emit_stage_changed(sink, path);
+}
+
+/// The `usd-stage-changed` emission `after_mutation` ends with, split out so
+/// the warm path (a kept tree and skeleton) still announces the edit.
+fn emit_stage_changed(sink: &Option<StageChangeSink>, path: &str) {
     if let Some(sink) = sink {
         let edited = path.to_string();
         sink(std::slice::from_ref(&edited));
+    }
+}
+
+/// Undo the one cached fact a default-time xform write can falsify: the edited
+/// prim's static local matrix. `None` sends the walks back to the per-call
+/// `local_transform`, which reads the live stage. A path the kept facts miss
+/// drops the whole skeleton — cold, never wrong.
+fn invalidate_skeleton_transform(skeleton: &mut Option<ManifestSkeleton>, path: &str) {
+    // take/put so the missing-path arm can clear the holder (a match on
+    // `skeleton` would hold it borrowed).
+    let Some(mut cached) = skeleton.take() else {
+        return;
+    };
+    if let Some(facts) = cached.facts.get_mut(path) {
+        facts.static_transform = None;
+        *skeleton = Some(cached);
     }
 }
 

@@ -5,8 +5,8 @@ mod common;
 
 use usdbee_lib::stage::{
     request_edit_target, request_geometry_data, request_list_dirty_layers, request_save_layers,
-    request_set_edit_target, request_stage_details, request_stage_tree, EditTargetInfo,
-    LayerSaveRequest,
+    request_scene_manifest, request_set_edit_target, request_stage_details, request_stage_tree,
+    EditTargetInfo, LayerSaveRequest, RenderNode,
 };
 use usdbee_lib::values::PrimDetails;
 
@@ -531,6 +531,64 @@ fn set_value_time_sample_reads_back_and_clears_caches() {
     // The mutation cleared the mesh cache: the same fetch re-tessellates.
     request_geometry_data(&state.sender(), "/Scene/Still", None).expect("geometry refetches");
     assert_eq!(state.mesh_tessellations(), before + 1);
+}
+
+#[test]
+fn xform_value_write_keeps_serving_the_fresh_transform() {
+    // Pins correctness ACROSS the cache-keep change: a default-time xform value
+    // write may keep the manifest skeleton, so the edited prim's cached static
+    // transform must not survive it.
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+
+    // Warm both caches the way a viewport does before an edit.
+    request_stage_tree(&state.sender()).expect("tree should serialize");
+    let warm = request_scene_manifest(&state.sender(), None).expect("manifest serializes");
+    let before = render_node(&warm, "/World");
+    assert_eq!(before.transform[12], 1.0, "the authored translate");
+
+    request_set_value(
+        &state,
+        "/World",
+        "xformOp:translate",
+        payload("double3", serde_json::json!([5.0, 6.0, 7.0])),
+        None,
+    )
+    .expect("authoring the translate should succeed");
+
+    let edited = request_scene_manifest(&state.sender(), None).expect("manifest serializes");
+    let after = render_node(&edited, "/World");
+    assert_eq!(
+        [
+            after.transform[12],
+            after.transform[13],
+            after.transform[14]
+        ],
+        [5.0, 6.0, 7.0],
+        "the new translate, not the cached one"
+    );
+
+    let details = details_via_owner(&state, "/World", None);
+    assert_eq!(
+        attribute(&details, "xformOp:translate").value.data,
+        serde_json::json!([5.0, 6.0, 7.0])
+    );
+}
+
+fn render_node<'a>(nodes: &'a [RenderNode], path: &str) -> &'a RenderNode {
+    nodes
+        .iter()
+        .flat_map(|node| std::iter::once(node).chain(descendants(node)))
+        .find(|node| node.path == path)
+        .unwrap_or_else(|| panic!("expected manifest node {}", path))
+}
+
+fn descendants(node: &RenderNode) -> Box<dyn Iterator<Item = &RenderNode> + '_> {
+    Box::new(
+        node.children
+            .iter()
+            .flat_map(|child| std::iter::once(child).chain(descendants(child))),
+    )
 }
 
 #[test]
