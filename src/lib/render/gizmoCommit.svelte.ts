@@ -86,6 +86,10 @@ export function syncGizmoAnchor(viewer: RendererKit, gizmoMode: GizmoMode) {
 // prim keeps animating while details are suppressed, so the pose comes
 // from the live node. Skipped mid-drag: the proxy's own drag latch owns
 // the pose then, and re-anchoring would corrupt the commit math.
+// Scratch for the per-frame box center: attach copies it into the proxy,
+// so it never escapes this call.
+const frameAnchor = new THREE.Vector3();
+
 export function frameSyncGizmo(viewer: RendererKit) {
   const kit = gizmoPolicy.kit;
   if (!kit || kit.controls.dragging) return;
@@ -96,11 +100,7 @@ export function frameSyncGizmo(viewer: RendererKit) {
   // The selection helper's box was computed from this same node a moment
   // ago: reuse its center instead of running a second subtree traversal.
   const box = viewer.selectionHelper?.box;
-  const anchor = box
-    ? box.isEmpty()
-      ? null
-      : box.getCenter(new THREE.Vector3())
-    : gizmoAnchorCenter(viewer);
+  const anchor = box ? (box.isEmpty() ? null : box.getCenter(frameAnchor)) : gizmoAnchorCenter(viewer);
   kit.attach(node.matrixWorld, anchor);
 }
 
