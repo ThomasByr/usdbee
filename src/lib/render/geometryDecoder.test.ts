@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodeGeometry, decodeGeometryBatch, GEOMETRY_MAGIC, GEOMETRY_VERSION } from "./geometryDecoder";
+import { decodeGeometry, decodeGeometryBatch, decodeMaterialBatch, GEOMETRY_MAGIC, GEOMETRY_VERSION } from "./geometryDecoder";
 
 // Hand-build the binary layout the Rust side emits (little-endian):
 // magic u32, version u32, vertex_count u32, index_count u32, flags u32
@@ -211,7 +211,7 @@ describe("decodeGeometryBatch", () => {
     expect(Array.from(decoded.indices)).toEqual([0, 1, 2]);
   });
 
-  it("throws on bad magic and on trailing bytes", () => {
+  it("throws on bad magic and on trailing bytes (material JSON slots share the frame)", () => {
     const frame = buildPayload({ flags: 0, positions: [[0, 0, 0]], indices: [0] });
     const batch = buildBatch([frame]);
     const view = new DataView(batch);
@@ -221,5 +221,21 @@ describe("decodeGeometryBatch", () => {
     const tooLong = new ArrayBuffer(64);
     new Uint8Array(tooLong).set(new Uint8Array(buildBatch([frame])));
     expect(() => decodeGeometryBatch(tooLong)).toThrow(/trailing/i);
+  });
+
+  // Material slots carry UTF-8 JSON (MaterialInfo) instead of a USDB frame;
+  // the decode is per-slot JSON.parse over the same frame.
+  function jsonSlot(value: unknown): ArrayBuffer {
+    const bytes = new TextEncoder().encode(JSON.stringify(value));
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  }
+
+  it("decodes material slots as parsed JSON and error slots as null", () => {
+    const info = { name: "Plastic", surface: { diffuse_color: null, roughness: 0.35 } };
+    const slots = decodeMaterialBatch(buildBatch([jsonSlot(info), "prim not found: /World/Nope"]));
+
+    expect(slots).toHaveLength(2);
+    expect(slots[0]).toEqual(info);
+    expect(slots[1]).toBe(null);
   });
 });

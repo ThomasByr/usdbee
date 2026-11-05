@@ -4,7 +4,7 @@ mod common;
 
 use common::spawn_stage_owner;
 use usdbee_lib::materials::{material_info, MaterialInfo, UvTransform};
-use usdbee_lib::stage::{open_stage, request_material_data};
+use usdbee_lib::stage::{open_stage, request_material_batch, request_material_data};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -316,6 +316,109 @@ fn transform2d_chain_wrap_tokens_and_value_scale_reach_the_payload() {
     let normal_info = surface.normal.expect("normal TextureInfo");
     assert_eq!(normal_info.wrap_s.as_deref(), Some("repeat"));
     assert_eq!(normal_info.uv_transform, None);
+}
+
+// Batched material fetch (Phase 2 Task 3): one channel round trip for many
+// paths, each slot the JSON bytes of MaterialInfo (or the error message for a
+// failed path), framed by stage.rs::frame_batch — the geometry batch frame,
+// with JSON slots instead of USDB frames.
+fn material_batch_slots(bytes: &[u8]) -> Vec<(u32, Vec<u8>)> {
+    fn u32_le(bytes: &[u8], index: usize) -> u32 {
+        u32::from_le_bytes(bytes[index..index + 4].try_into().unwrap())
+    }
+    let mut offset: usize = 12;
+    let mut slots = Vec::new();
+    while offset < bytes.len() {
+        let status = u32_le(bytes, offset);
+        let len = u32_le(bytes, offset + 4) as usize;
+        slots.push((status, bytes[offset + 8..offset + 8 + len].to_vec()));
+        offset += 8 + ((len + 3) & !3);
+    }
+    slots
+}
+
+#[test]
+fn material_batch_frames_json_slots_and_mirrors_per_path_semantics() {
+    // Each ok slot carries the exact MaterialInfo the per-path command
+    // returns, including the direct-material and unbound-prim shapes.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "material_scene.usda");
+
+    let paths = vec![
+        "/World/PlasticBall".to_string(),
+        "/World/Looks/Plastic".to_string(),
+        "/World/Unbound".to_string(),
+    ];
+    let bytes = request_material_batch(&state.sender(), &paths).expect("batch should frame");
+
+    let header = |index: usize| u32::from_le_bytes(bytes[index..index + 4].try_into().unwrap());
+    assert_eq!(header(0), 0x5553_4247, "batch magic 'USBG'");
+    assert_eq!(header(4), 1, "batch version 1");
+    assert_eq!(header(8), 3, "slot count");
+
+    let slots = material_batch_slots(&bytes);
+    assert_eq!(slots.len(), 3);
+    for (path, (status, payload)) in paths.iter().zip(slots) {
+        assert_eq!(status, 0, "{} should be an ok slot", path);
+        let batched: MaterialInfo =
+            serde_json::from_slice(&payload).expect("ok slot is MaterialInfo JSON");
+        let per_path = request_material_data(&state.sender(), path).expect("per-path material");
+        assert_eq!(batched, per_path, "{} slot mirrors the per-path fetch", path);
+    }
+}
+
+#[test]
+fn material_batch_fails_soft_per_slot() {
+    // A bad path becomes an error slot without aborting the batch; the ok
+    // slot before it still decodes as JSON.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "material_scene.usda");
+
+    let paths = vec![
+        "/World/PlasticBall".to_string(),
+        "/World/Nope".to_string(),
+    ];
+    let bytes = request_material_batch(&state.sender(), &paths).expect("batch should frame");
+
+    let slots = material_batch_slots(&bytes);
+    assert_eq!(slots.len(), 2);
+
+    let (status, payload) = &slots[0];
+    assert_eq!(*status, 0, "first slot: ok");
+    let info: MaterialInfo = serde_json::from_slice(payload).expect("ok slot is MaterialInfo JSON");
+    assert_eq!(info.name, "Plastic");
+
+    let (status, payload) = &slots[1];
+    assert_eq!(*status, 1, "missing prim: error slot");
+    let error = String::from_utf8_lossy(payload);
+    assert!(
+        error.contains("/World/Nope"),
+        "error names the path: {}",
+        error
+    );
+}
+
+#[test]
+fn empty_material_batch_frames_zero_slots() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "material_scene.usda");
+
+    let bytes = request_material_batch(&state.sender(), &[]).expect("empty batch");
+
+    assert_eq!(bytes.len(), 12, "header only");
+    assert_eq!(
+        u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+        0x5553_4247
+    );
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 0);
+}
+
+#[test]
+fn material_batch_without_open_stage_fails() {
+    // No stage open means id 0 — the id lookup guards every command shape,
+    // the batch command included.
+    let state = spawn_stage_owner();
+    assert_eq!(state.state.sender(0).unwrap_err(), "no stage 0");
 }
 
 #[test]

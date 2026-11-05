@@ -441,6 +441,91 @@ describe("buildScene", () => {
     warn.mockRestore();
   });
 
+  it("prefetches materials in bounded sequential batches and consumes the prefill", async () => {
+    // Load-time material batching pin: one invoke per 32-path slice, and the
+    // build reads the prefill instead of calling the per-path fetcher.
+    const paths = Array.from({ length: 70 }, (_, i) => `/World/M${i}`);
+    const manifest = [
+      node({
+        path: "/World",
+        children: paths.map((path) =>
+          node({ path, name: path.slice("/World/".length), type_name: "Mesh", has_geometry: true }),
+        ),
+      }),
+    ];
+    const getMaterial = vi.fn(async () => ({ name: "Mat", surface: null }));
+    const getMaterialBatch = vi.fn(async (slice: string[]) =>
+      slice.map((path) => ({
+        name: path.slice("/World/".length),
+        surface: {
+          diffuse_color: { type: "color3f", data: [0, 1, 0] },
+          roughness: null,
+          metallic: null,
+          opacity: null,
+          normal: null,
+          textures: [],
+        },
+      })),
+    );
+    const group = await buildScene(manifest, { ...fetchers(), getMaterial, getMaterialBatch });
+
+    // ceil(70 / 32) invokes — the batching pin.
+    expect(getMaterialBatch).toHaveBeenCalledTimes(3);
+    expect(getMaterialBatch.mock.calls.map((call) => call[0].length)).toEqual([32, 32, 6]);
+    expect(getMaterialBatch.mock.calls.flatMap((call) => call[0])).toEqual(paths);
+    expect(getMaterial, "prefill served every node").not.toHaveBeenCalled();
+
+    // The prefilled JSON reached convertMaterial: green from the batch.
+    const mesh = group.getObjectByName("/World/M0")!.children[0] as THREE.Mesh;
+    const material = mesh.material as THREE.MeshPhysicalMaterial;
+    expect(material.color.getHex()).toBe(new THREE.Color(0, 1, 0).getHex());
+    material.dispose();
+  });
+
+  it("falls back to a failed material slot's per-path fetch", async () => {
+    const manifest = [
+      node({
+        path: "/World",
+        children: [
+          node({ path: "/World/Ok", name: "Ok", type_name: "Mesh", has_geometry: true }),
+          node({ path: "/World/Bad", name: "Bad", type_name: "Mesh", has_geometry: true }),
+        ],
+      }),
+    ];
+    const getMaterial = vi.fn(async () => ({ name: "Fallback", surface: null }));
+    const getMaterialBatch = vi.fn(async (slice: string[]) =>
+      slice.map((path) => (path === "/World/Ok" ? { name: "Ok", surface: null } : null)),
+    );
+    await buildScene(manifest, { ...fetchers(), getMaterial, getMaterialBatch });
+
+    expect(getMaterial).toHaveBeenCalledTimes(1);
+    expect(getMaterial).toHaveBeenCalledWith("/World/Bad");
+  });
+
+  it("falls back to per-path material fetches when the whole batch command fails", async () => {
+    const manifest = [
+      node({
+        path: "/World",
+        children: [
+          node({ path: "/World/A", name: "A", type_name: "Mesh", has_geometry: true }),
+          node({ path: "/World/B", name: "B", type_name: "Mesh", has_geometry: true }),
+        ],
+      }),
+    ];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const getMaterial = vi.fn(async () => ({ name: "Mat", surface: null }));
+    const getMaterialBatch = vi.fn(async () => {
+      throw new Error("no stage open");
+    });
+    const group = await buildScene(manifest, { ...fetchers(), getMaterial, getMaterialBatch });
+
+    expect(getMaterial).toHaveBeenCalledTimes(2);
+    expect(getMaterial).toHaveBeenCalledWith("/World/A");
+    expect(group.getObjectByName("/World/A")!.children[0]).toBeTruthy();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it("applies saved dependency fallback colors while building materials", async () => {
     const manifest = [node({ path: "/World/Floor", name: "Floor", type_name: "Mesh", has_geometry: true })];
     const group = await buildScene(

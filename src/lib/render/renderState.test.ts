@@ -189,6 +189,7 @@ function mockIpc(manifest: () => RenderNode[] | Promise<RenderNode[]>) {
     if (cmd === "get_geometry_data") return packedGeometry();
     if (cmd === "get_geometry_batch") return packedBatchGeometry(1, args.paths.length);
     if (cmd === "get_material_data") return { name: "Mat", surface: null };
+    if (cmd === "get_material_batch") return packedBatchMaterials(args.paths.length);
     throw new Error(`unexpected command: ${cmd}`);
   };
   mockedInvoke.mockImplementation(dispatcher as any);
@@ -198,6 +199,16 @@ function mockIpc(manifest: () => RenderNode[] | Promise<RenderNode[]>) {
 // layout: batch magic, version, count, then status/length/padded bytes).
 function packedBatchGeometry(y = 1, count = 1): ArrayBuffer {
   return packedBatch(Array.from({ length: count }, () => packedGeometry(y)));
+}
+
+// Material batch slots share the frame but carry MaterialInfo JSON bytes.
+function packedBatchMaterials(count = 1): ArrayBuffer {
+  const bytes = new TextEncoder().encode(JSON.stringify({ name: "Mat", surface: null }));
+  const slot = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+  return packedBatch(Array.from({ length: count }, () => slot));
 }
 
 // Batch response with one ok slot per frame passed in.
@@ -294,6 +305,26 @@ describe("renderState.setStageTime", () => {
     // The load's queued refresh ran and applied before the promise resolved.
     expect(group!.children[0].matrix.elements[12]).toBe(7);
     expect(renderState.time).toBe(5);
+  });
+
+  it("prefetches load-time materials in bounded batches instead of per prim", async () => {
+    // The wiring pin: the backend command name and the 32-path slices, so a
+    // broken fetcher cannot hide behind the per-path fail-soft fallback.
+    const mesh = (i: number) =>
+      node({ path: `/Scene/M${i}`, name: `M${i}`, type_name: "Mesh", has_geometry: true });
+    mockIpc(() => Array.from({ length: GEOMETRY_BATCH_SIZE + 1 }, (_, i) => mesh(i)));
+    await renderState.loadRenderScene();
+
+    const batches = mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_material_batch");
+    expect(batches.map(([, args]) => (args as { paths: string[] }).paths.length)).toEqual([
+      GEOMETRY_BATCH_SIZE,
+      1,
+    ]);
+    expect(
+      mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_material_data"),
+      "the prefill served every prim",
+    ).toHaveLength(0);
+    mockedInvoke.mockClear();
   });
 
   it("refetches geometry for deforming nodes and applies transforms in place", async () => {

@@ -106,6 +106,7 @@ pub fn run() {
             stage::get_geometry_data,
             stage::get_geometry_batch,
             stage::get_material_data,
+            stage::get_material_batch,
             stage::set_attribute_value,
             stage::set_prim_metadata,
             stage::set_variant_selection,

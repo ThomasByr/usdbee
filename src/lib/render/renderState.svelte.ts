@@ -13,7 +13,7 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import * as THREE from "three";
 import type { MaterialInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
-import { decodeGeometryBatch } from "./geometryDecoder";
+import { decodeGeometryBatch, decodeMaterialBatch } from "./geometryDecoder";
 import { loadCachedTexture, clearTextureCache } from "./textureCache";
 import {
   applyPackedGeometryInPlace,
@@ -83,6 +83,16 @@ const fetchers: SceneFetchers = {
       stageId: stageState.activeStageId,
       path,
     }).catch(() => null),
+  // Load-time material prefill (Phase 2 Task 3): one invoke per slice of
+  // GEOMETRY_BATCH_SIZE paths, JSON slots decoded here so sceneBuilder only
+  // sees per-path results.
+  getMaterialBatch: async (paths: string[]) =>
+    decodeMaterialBatch(
+      await invoke<ArrayBuffer>("get_material_batch", {
+        stageId: stageState.activeStageId,
+        paths,
+      }),
+    ),
   // F6: one decode per file — loadCachedTexture loads through the shared
   // loader on the first reference and clones for every later one.
   loadTexture: (filePath: string, onError: () => void) =>

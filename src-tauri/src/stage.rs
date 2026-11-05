@@ -97,6 +97,13 @@ pub enum StageRequest {
         path: String,
         reply: mpsc::Sender<Result<MaterialInfo, String>>,
     },
+    // Batched material fetch (Phase 2 Task 3): the same one-round-trip
+    // shape as GetGeometryBatch, with each slot the JSON bytes of
+    // MaterialInfo (or the error message) instead of a USDB frame.
+    GetMaterialBatch {
+        paths: Vec<String>,
+        reply: mpsc::Sender<Result<Vec<u8>, String>>,
+    },
     SetValue {
         path: String,
         name: String,
@@ -746,13 +753,28 @@ fn spawn_stage_owner_for(
                 StageRequest::GetMaterial { path, reply } => {
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
-                            // Synthetic prototype children resolve their
-                            // material through the real prototype prim
-                            // (memoized per stage-open like the geometry
-                            // arms).
-                            let resolved =
-                                resolved_render_path(stage, &mut resolve_memo, &path)?.to_string();
-                            material_info(stage, &resolved)
+                            resolved_material_info(stage, &mut resolve_memo, &path)
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::GetMaterialBatch { paths, reply } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            let slots = paths
+                                .iter()
+                                .map(|path| {
+                                    resolved_material_info(stage, &mut resolve_memo, path)
+                                        .and_then(|info| {
+                                            serde_json::to_vec(&info).map_err(|e| {
+                                                format!("material serialize failed: {}", e)
+                                            })
+                                        })
+                                })
+                                .collect();
+                            Ok(frame_batch(slots))
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -3691,6 +3713,18 @@ fn frame_batch(slots: Vec<Result<Vec<u8>, String>>) -> Vec<u8> {
     out
 }
 
+/// The material data one prim reads (GetMaterial and GetMaterialBatch):
+/// synthetic prototype children resolve their material through the real
+/// prototype prim (memoized per stage-open like the geometry arms).
+fn resolved_material_info(
+    stage: &Stage,
+    memo: &mut ResolveMemo,
+    path: &str,
+) -> Result<MaterialInfo, String> {
+    let resolved = resolved_render_path(stage, memo, path)?.to_string();
+    material_info(stage, &resolved)
+}
+
 /// Packed geometry bytes for one prim, tessellating on demand and caching the
 /// result (keyed by the resolved path, so prototype children share one
 /// tessellation with the prototype prim). Missing prims and non-geometry
@@ -3926,6 +3960,36 @@ pub fn request_material_data(
     sender
         .send(StageRequest::GetMaterial {
             path: path.to_string(),
+            reply,
+        })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Batched material (Phase 2 Task 3): one channel round trip for many paths,
+// per-slot fail-soft, framed by `frame_batch` over the raw
+// `tauri::ipc::Response` like the geometry batch. Slots hold MaterialInfo
+// JSON rather than a USDB frame, so the frontend decodes each slot with
+// JSON.parse. The per-path command stays for single-prim refetches.
+#[tauri::command]
+pub async fn get_material_batch(
+    stage_id: u64,
+    paths: Vec<String>,
+    state: tauri::State<'_, StageState>,
+) -> Result<tauri::ipc::Response, String> {
+    request_material_batch(&state.sender(stage_id)?, &paths).map(tauri::ipc::Response::new)
+}
+
+pub fn request_material_batch(
+    sender: &mpsc::Sender<StageRequest>,
+    paths: &[String],
+) -> Result<Vec<u8>, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::GetMaterialBatch {
+            paths: paths.to_vec(),
             reply,
         })
         .map_err(|_| "stage service unavailable".to_string())?;

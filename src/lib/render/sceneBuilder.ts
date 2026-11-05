@@ -28,6 +28,12 @@ export interface SceneFetchers {
   getGeometryBatch?: (paths: string[], time?: number | null) => Promise<(ArrayBuffer | Uint8Array | null)[]>;
   // null = fetch failed; the builder falls back to a plain material.
   getMaterial: (path: string) => Promise<MaterialInfo | null>;
+  // Optional load-time prefill (Phase 2 Task 3), mirroring getGeometryBatch:
+  // one batched backend call per slice of GEOMETRY_BATCH_SIZE paths; a slot
+  // value is that prim's MaterialInfo, null when the slot failed (fail-soft
+  // per path). Throws when the whole batch command fails; the builder then
+  // falls back to getMaterial, which stays the single-prim refetch path.
+  getMaterialBatch?: (paths: string[]) => Promise<(MaterialInfo | null)[]>;
   loadTexture: MaterialTextureLoader;
 }
 
@@ -39,6 +45,10 @@ export const GEOMETRY_BATCH_SIZE = 32;
 // Managed "path -> fetch outcome" the builder allocates from load time:
 // geometry frame bytes (a batch slot) or null (that slot failed).
 type PrefetchedGeometry = Map<string, ArrayBuffer | Uint8Array | null>;
+
+// The material twin: the prim's MaterialInfo from a batch slot, or null for a
+// slot that failed (the per-path fetch runs instead).
+type PrefetchedMaterials = Map<string, MaterialInfo | null>;
 
 // USD row-major row-vector matrices and three.js column-major column-vector
 // matrices store the same 16 numbers in the same order (translation at
@@ -191,6 +201,31 @@ async function preloadGeometry(
   return prefetched;
 }
 
+async function preloadMaterials(
+  manifest: RenderNode[],
+  fetchers: SceneFetchers,
+): Promise<PrefetchedMaterials> {
+  const prefetched: PrefetchedMaterials = new Map();
+  const getMaterialBatch = fetchers.getMaterialBatch;
+  if (!getMaterialBatch) return prefetched;
+  // Materials are read only for drawing prims, so the geometry walk is the
+  // exact path set — same slices, same 32 bound.
+  const paths = geometryPaths(manifest);
+  for (let start = 0; start < paths.length; start += GEOMETRY_BATCH_SIZE) {
+    const slice = paths.slice(start, start + GEOMETRY_BATCH_SIZE);
+    try {
+      const slots = await getMaterialBatch(slice);
+      slice.forEach((path, slot) => prefetched.set(path, slots[slot] ?? null));
+    } catch (e) {
+      // Whole batch failed: leave unfetched so the per-path fetches still
+      // run fail-soft inside fetchMaterial.
+      console.warn("usdbee: material batch failed; fetching per path:", e);
+      break;
+    }
+  }
+  return prefetched;
+}
+
 function fallbackColorFor(info: MaterialInfo, dependencies: FallbackDependencies): string | null {
   const entries = Object.entries(dependencies).filter((entry) => entry[1].fallback_color);
   const materialName = info.name.toLowerCase();
@@ -210,8 +245,13 @@ async function fetchMaterial(
   node: RenderNode,
   fetchers: SceneFetchers,
   dependencies: FallbackDependencies,
+  prefetched: PrefetchedMaterials = new Map(),
 ): Promise<THREE.MeshPhysicalMaterial> {
-  const info = await fetchers.getMaterial(node.path).catch(() => null);
+  // A consumed prefill saves the round trip; a null slot falls through to
+  // the per-path fetch, which stays fail-soft.
+  const prefill = prefetched.get(node.path);
+  prefetched.delete(node.path);
+  const info = prefill ?? (await fetchers.getMaterial(node.path).catch(() => null));
   const materialInfo = info ?? { name: node.name, surface: null };
   return convertMaterial(materialInfo, fallbackColorFor(materialInfo, dependencies), fetchers.loadTexture);
 }
@@ -234,6 +274,7 @@ async function buildNode(
   time?: number | null,
   instancing: InstanceContext | null = null,
   prefetched: PrefetchedGeometry = new Map(),
+  prefetchedMaterials: PrefetchedMaterials = new Map(),
 ): Promise<THREE.Object3D> {
   const object = new THREE.Group();
   object.name = node.path;
@@ -270,7 +311,7 @@ async function buildNode(
         // Point clouds: a size-based PointsMaterial colored by the vertex
         // colors when present, else the bound material's diffuse/fallback
         // color.
-        const material = await fetchMaterial(node, fetchers, dependencies);
+        const material = await fetchMaterial(node, fetchers, dependencies, prefetchedMaterials);
         const vertexColors = geometry.getAttribute("color") != null;
         const points = new THREE.Points(
           geometry,
@@ -287,7 +328,7 @@ async function buildNode(
         disposeMaterial(material);
         object.add(points);
       } else {
-        const material = await fetchMaterial(node, fetchers, dependencies);
+        const material = await fetchMaterial(node, fetchers, dependencies, prefetchedMaterials);
         // displayColor primvars arrive as a per-vertex "color" attribute;
         // three.js reads them only when the material opts in. A bound
         // material wins over displayColor, which stays off there (a bound
@@ -316,7 +357,17 @@ async function buildNode(
   }
 
   for (const child of node.children) {
-    object.add(await buildNode(child, fetchers, dependencies, time, childContext, prefetched));
+    object.add(
+      await buildNode(
+        child,
+        fetchers,
+        dependencies,
+        time,
+        childContext,
+        prefetched,
+        prefetchedMaterials,
+      ),
+    );
   }
   return object;
 }
@@ -328,9 +379,12 @@ export async function buildScene(
   time?: number | null,
 ): Promise<THREE.Group> {
   const prefetched = await preloadGeometry(manifest, fetchers, time);
+  const prefetchedMaterials = await preloadMaterials(manifest, fetchers);
   const root = new THREE.Group();
   for (const node of manifest) {
-    root.add(await buildNode(node, fetchers, dependencies, time, null, prefetched));
+    root.add(
+      await buildNode(node, fetchers, dependencies, time, null, prefetched, prefetchedMaterials),
+    );
   }
   return root;
 }

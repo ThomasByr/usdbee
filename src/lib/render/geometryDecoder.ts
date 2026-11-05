@@ -7,7 +7,7 @@
 // index_count u32, flags u32 (bit0 normals, bit1 uvs, bit2 colors); then
 // positions f32x3, normals f32x3, uvs f32x2, colors f32x3 in flag order,
 // then indices u32.
-import type { GeometryHeader } from "../stage/types";
+import type { GeometryHeader, MaterialInfo } from "../stage/types";
 
 export const GEOMETRY_MAGIC = 0x55534442;
 export const GEOMETRY_VERSION = 1;
@@ -130,4 +130,17 @@ export function decodeGeometryBatch(buffer: ArrayBuffer): (Uint8Array | null)[] 
     throw new Error(`geometry batch payload has ${buffer.byteLength - offset} trailing bytes`);
   }
   return slots;
+}
+
+// Material slots share the batch frame but carry UTF-8 JSON (the
+// MaterialInfo of that prim, or the error message of a failed path), so the
+// decode is a per-slot JSON.parse: parsed info for an ok slot, null for an
+// error slot. Non-JSON ok payloads throw — Rust only frames what it
+// serialized itself.
+const slotText = new TextDecoder();
+
+export function decodeMaterialBatch(buffer: ArrayBuffer): (MaterialInfo | null)[] {
+  return decodeGeometryBatch(buffer).map((slot) =>
+    slot === null ? null : (JSON.parse(slotText.decode(slot)) as MaterialInfo),
+  );
 }
