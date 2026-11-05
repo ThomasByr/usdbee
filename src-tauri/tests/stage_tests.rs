@@ -474,6 +474,17 @@ fn details_variant_sets_list_options_and_authored_selection() {
 }
 
 #[test]
+fn details_variant_sets_are_stable_across_calls() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "variants.usda");
+
+    let first = details_via_owner(&state, "/Prop", None).variant_sets;
+    let second = details_via_owner(&state, "/Prop", None).variant_sets;
+
+    assert_eq!(first, second);
+}
+
+#[test]
 fn details_animated_values_differ_by_time() {
     let state = spawn_stage_owner();
     open_via_owner(&state, "animated.usda");

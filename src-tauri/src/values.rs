@@ -705,7 +705,7 @@ fn variant_sets(stage: &Stage, prim: &Prim) -> Result<Vec<VariantSetInfo>, Strin
     }
     perf_mark("variantset.names_field", mark);
     let mark = std::time::Instant::now();
-    for name in layer_token_children(prim, "variantSetChildren", "") {
+    for name in layer_token_children(stage, prim, "variantSetChildren", "") {
         push_unique(&mut names, name);
     }
     perf_mark("variantset.set_children", mark);
@@ -721,7 +721,7 @@ fn variant_sets(stage: &Stage, prim: &Prim) -> Result<Vec<VariantSetInfo>, Strin
         .into_iter()
         .map(|name| VariantSetInfo {
             authored_selection: authored.get(&name).cloned(),
-            options: layer_token_children(prim, "variantChildren", &name),
+            options: layer_token_children(stage, prim, "variantChildren", &name),
             name,
         })
         .collect();
@@ -732,10 +732,17 @@ fn variant_sets(stage: &Stage, prim: &Prim) -> Result<Vec<VariantSetInfo>, Strin
 /// Token-children fields of the prim's contributing layer specs, unioned in
 /// strength order. `children_field` is a `ChildrenKey` spelling read at
 /// `site.path` (plus `{set=}` for `variantChildren` when `set` is non-empty).
-/// shortcut: a layer that cannot be re-opened is skipped, so children may be
+/// The stage's own copy of each layer is borrowed, never re-opened: parsing
+/// the file again costs ~192 ms on a 27 MB layer.
+/// shortcut: a layer missing from the stage is skipped, so children may be
 /// incomplete for exotic layer sources; upgrade if the crate grows a
 /// composed variant-options API.
-fn layer_token_children(prim: &Prim, children_field: &str, set: &str) -> Vec<String> {
+fn layer_token_children(
+    stage: &Stage,
+    prim: &Prim,
+    children_field: &str,
+    set: &str,
+) -> Vec<String> {
     let mut children: Vec<String> = Vec::new();
     let mark = std::time::Instant::now();
     let Ok(sites) = prim.prim_stack() else {
@@ -743,7 +750,7 @@ fn layer_token_children(prim: &Prim, children_field: &str, set: &str) -> Vec<Str
     };
     perf_mark("layer_children.prim_stack", mark);
     for site in sites {
-        let Ok(layer) = sdf::Layer::open(&site.layer) else {
+        let Some(layer) = stage.layer(&site.layer) else {
             continue;
         };
         let spec_path = if set.is_empty() {
