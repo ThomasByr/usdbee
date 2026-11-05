@@ -177,6 +177,28 @@ fn manifest_pins_visibility_inheritance() {
 }
 
 #[test]
+fn manifest_resamples_prototype_visibility_under_a_sampled_instancer() {
+    // A PointInstancer prototype is a real child prim, so the instancer's own
+    // sampled visibility inherits into the prototype subtree. Those nodes'
+    // computed visibility is time-dependent even though nothing inside the
+    // prototype chain samples, so the skeleton's static visibility cache must
+    // not stand in for the per-call read.
+    let at_one = open_fixture_manifest("instancer_vis_parent.usda", Some(1.0));
+    assert!(
+        !expect(&at_one, "/Scene/Inst/__proto_0").visible,
+        "prototype root inherits the instancer's invisible at t=1"
+    );
+    assert!(
+        !expect(&at_one, "/Scene/Inst/__proto_0/Child").visible,
+        "prototype child inherits the instancer's invisible at t=1"
+    );
+
+    let at_two = open_fixture_manifest("instancer_vis_parent.usda", Some(2.0));
+    assert!(expect(&at_two, "/Scene/Inst/__proto_0").visible);
+    assert!(expect(&at_two, "/Scene/Inst/__proto_0/Child").visible);
+}
+
+#[test]
 fn manifest_point_instancer_serializes_prototype_children() {
     let nodes = manifest();
 

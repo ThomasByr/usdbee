@@ -2331,6 +2331,12 @@ struct SkeletonFacts {
     /// covers "not cacheable" (a moving prim) and `Unsupported`, so the
     /// walks fall back to a per-call `local_transform`.
     static_transform: Option<gf::Matrix4d>,
+    /// The prim's computed visibility when nothing on its render path
+    /// samples `visibility`: neither the prim nor any ancestor the walk
+    /// threads down is visibility-animated, so one evaluation (at default
+    /// time) holds for the whole stage. `None` also covers "not cacheable",
+    /// so the walks fall back to the per-call read.
+    static_visible: Option<bool>,
     /// The prim's overall `visibility` attr carries authored time samples:
     /// the per-call visibility read flips across times, so the delta walk
     /// must include the prim even when nothing else about it samples.
@@ -2399,6 +2405,7 @@ impl ManifestSkeleton {
             &mut pending,
             &mut skel_memo,
             &mut sampled_attrs,
+            false,
         )?;
         // Native prototype roots (and any prototype target outside the
         // walked tree) only exist as prims once their instances composed,
@@ -2416,6 +2423,10 @@ impl ManifestSkeleton {
             if !prim.is_valid().map_err(stage_err)? {
                 continue;
             }
+            // A prototype root reaches the build outside the walk, so the
+            // recursion never threads its ancestors' visibility state: read
+            // it from the stage instead.
+            let ancestor_visibility_animated = ancestry_samples_visibility(stage, &path);
             build_facts(
                 stage,
                 &prim,
@@ -2423,6 +2434,7 @@ impl ManifestSkeleton {
                 &mut pending,
                 &mut skel_memo,
                 &mut sampled_attrs,
+                ancestor_visibility_animated,
             )?;
         }
         skeleton.time_codes =
@@ -2449,6 +2461,7 @@ fn build_facts(
     pending: &mut Vec<sdf::Path>,
     skel_memo: &mut SkelAnimMemo,
     sampled_attrs: &mut Vec<Attribute>,
+    ancestor_visibility_animated: bool,
 ) -> Result<Vec<String>, String> {
     let type_name = prim
         .type_name()
@@ -2477,6 +2490,23 @@ fn build_facts(
         SkeletonKind::Plain
     };
 
+    let (imageable, excluded) = match Imageable::from_prim(prim.clone()).map_err(stage_err)? {
+        None => (false, false),
+        Some(imageable) => (
+            true,
+            matches!(
+                imageable.compute_purpose().map_err(stage_err)?,
+                Purpose::Proxy | Purpose::Guide
+            ),
+        ),
+    };
+    let (self_moves, self_deforms, self_visibility_animated) =
+        samples_scene_motion(prim, renders, imageable, skel_memo, sampled_attrs)?;
+    // The walk threads this down as its `vis` force; the excluded lift and
+    // the prototype expansions decide it their own way, so it is recorded
+    // here as the union over the whole render path.
+    let visibility_animated = ancestor_visibility_animated || self_visibility_animated;
+
     // Only plain prims recurse into prim children: an instance's prim
     // children are instance proxies (rendered via its prototype expansion,
     // never walked per instance) and a PointInstancer renders synthetic
@@ -2493,29 +2523,25 @@ fn build_facts(
                 pending,
                 skel_memo,
                 sampled_attrs,
+                visibility_animated,
             )?;
             children.push(child_key);
         }
     }
 
-    let (imageable, excluded) = match Imageable::from_prim(prim.clone()).map_err(stage_err)? {
-        None => (false, false),
-        Some(imageable) => (
-            true,
-            matches!(
-                imageable.compute_purpose().map_err(stage_err)?,
-                Purpose::Proxy | Purpose::Guide
-            ),
-        ),
-    };
-    let (self_moves, self_deforms, self_visibility_animated) =
-        samples_scene_motion(prim, renders, imageable, skel_memo, sampled_attrs)?;
     // A prim whose transform samples nothing keeps one local matrix for the
     // whole stage: evaluate it once here rather than on every walk step.
     let static_transform = if self_moves {
         None
     } else {
         local_transform(prim, None)?
+    };
+    // Same hoist for visibility: with nothing sampling on the render path,
+    // one evaluation at default time holds for every queried time.
+    let static_visible = if visibility_animated {
+        None
+    } else {
+        Some(computed_visibility(prim, imageable, None)?)
     };
 
     let path = prim.path().to_string();
@@ -2530,6 +2556,7 @@ fn build_facts(
             self_moves,
             self_deforms,
             static_transform,
+            static_visible,
             self_visibility_animated,
             material: if renders {
                 direct_material(stage, prim)
@@ -2541,6 +2568,30 @@ fn build_facts(
         },
     );
     Ok(children)
+}
+
+/// Whether any real ancestor of a prim outside the walked tree samples
+/// `visibility`: a prototype root's inherited visibility feeds its whole
+/// subtree, and its own ancestry (the synthetic `/__Prototype_N` chain, or
+/// the instancer above a PointInstancer prototype) is not reachable from
+/// the recursion. A read error answers "yes": an uncached node only
+/// recomputes at the use site.
+fn ancestry_samples_visibility(stage: &Stage, path: &sdf::Path) -> bool {
+    let mut ancestor = path.parent();
+    while let Some(parent) = ancestor {
+        ancestor = parent.parent();
+        let Ok(prim) = stage.prim(parent) else {
+            return true;
+        };
+        if !prim.is_valid().unwrap_or(false) {
+            return true;
+        }
+        match prim.attribute("visibility").num_time_samples() {
+            Ok(0) => {}
+            _ => return true,
+        }
+    }
+    false
 }
 
 /// The direct `material:binding` target path, the same resolution
@@ -2813,11 +2864,15 @@ fn prototype_children(
         // computed purpose deciding, mirroring render_children's Exclude
         // arm for ordinary parents. The root's geometry must not draw, so
         // has_geometry clears when the root is excluded. Purpose is a
-        // cached fact; visibility samples the requested time.
+        // cached fact; visibility samples the requested time (the root's own
+        // flag is evaluated per instance, never from the build's cache).
         let (excluded, visible) = if prototype.excluded {
             (true, true)
         } else {
-            (false, visibility_at(prototype, time)?)
+            (
+                false,
+                computed_visibility(&prototype.prim, prototype.imageable, time)?,
+            )
         };
         let type_name = prototype.type_name.clone();
         let proto_xform = local_transform(&prototype.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
@@ -3071,9 +3126,10 @@ fn render_children(
             nodes.extend(descendants);
             continue;
         }
-        // Visibility is time-dependent by USD semantics — computed per call,
-        // never cached across manifest calls (Task 1 ruling).
-        let visible = visibility_at(facts, time)?;
+        // Visibility is time-dependent by USD semantics — the cached value
+        // only stands in when the build proved nothing on the render path
+        // samples it.
+        let visible = node_visible(facts, time, false)?;
         let node_children = render_node_children(skeleton, facts, time, moves, prototype_memo)?;
         let node = RenderNode {
             material: facts.material.clone(),
@@ -3161,9 +3217,10 @@ fn delta_children(
             nodes.extend(descendants);
             continue;
         }
-        // Visibility is time-dependent by USD semantics — computed per call,
-        // never cached across manifest calls (Task 1 ruling).
-        let visible = visibility_at(facts, time)?;
+        // Visibility is time-dependent by USD semantics — the cached value
+        // only stands in while no ancestor forces `vis` and the build could
+        // cache it.
+        let visible = node_visible(facts, time, vis)?;
         let node_children = delta_node_children(
             skeleton,
             facts,
@@ -3290,26 +3347,40 @@ fn delta_prototype_children(
     )
 }
 
-/// Computed visibility at the requested time — the one per-time imageable
-/// query the walk keeps (Task 1: compute_visibility must stay per-time and
-/// is NOT cached; non-imageable prims stay visible, matching the old
-/// renderable_state semantics).
-fn visibility_at(facts: &SkeletonFacts, time: Option<f64>) -> Result<bool, String> {
-    if !facts.imageable {
+/// Computed visibility at the requested time — the per-time imageable
+/// query (Task 1: compute_visibility must stay per-time; only the build's
+/// `static_visible` may stand in for it). Non-imageable prims stay visible,
+/// matching the old renderable_state semantics).
+fn computed_visibility(
+    prim: &openusd::usd::Prim,
+    imageable: bool,
+    time: Option<f64>,
+) -> Result<bool, String> {
+    if !imageable {
         return Ok(true);
     }
-    let imageable = Imageable::from_prim(facts.prim.clone())
+    let imageable = Imageable::from_prim(prim.clone())
         .map_err(stage_err)?
         .ok_or_else(|| {
             format!(
                 "imageable view missing for {} at manifest cache build",
-                facts.prim.path()
+                prim.path()
             )
         })?;
     Ok(imageable
         .compute_visibility(time.map(TimeCode::new))
         .map_err(stage_err)?
         != Visibility::Invisible)
+}
+
+/// The node's `visible` flag: the build's static value unless the walk is
+/// forcing visibility down this level (`forced`, the delta walk's `vis`),
+/// else the per-call read.
+fn node_visible(facts: &SkeletonFacts, time: Option<f64>, forced: bool) -> Result<bool, String> {
+    match facts.static_visible {
+        Some(visible) if !forced => Ok(visible),
+        _ => computed_visibility(&facts.prim, facts.imageable, time),
+    }
 }
 
 pub fn serialize_render_manifest(

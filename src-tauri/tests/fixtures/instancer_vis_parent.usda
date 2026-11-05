@@ -1,0 +1,35 @@
+#usda 1.0
+(
+    defaultPrim = "Scene",
+    startTimeCode = 1,
+    endTimeCode = 2
+)
+
+# A PointInstancer's prototype is a real child prim, so the instancer's own
+# sampled visibility is inherited into the whole prototype subtree. The
+# skeleton's static visibility cache must not freeze those nodes at their
+# default-time value.
+def Xform "Scene"
+{
+    def PointInstancer "Inst"
+    {
+        token visibility.timeSamples = {
+            1: "invisible",
+            2: "inherited",
+        }
+
+        point3f[] positions = [(0, 0, 0)]
+        int[] protoIndices = [0]
+        rel prototypes = [</Scene/Inst/Proto>]
+
+        def Xform "Proto"
+        {
+            def Mesh "Child"
+            {
+                int[] faceVertexCounts = [3]
+                int[] faceVertexIndices = [0, 1, 2]
+                point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+            }
+        }
+    }
+}
