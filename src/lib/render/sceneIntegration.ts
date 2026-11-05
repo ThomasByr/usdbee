@@ -8,6 +8,7 @@ import {
   toPlayheadOffset,
 } from "$lib/render/renderState.svelte";
 import { disposeScene } from "$lib/render/sceneBuilder";
+import { clearTextureCache } from "$lib/render/textureCache";
 import { upAxisRotation } from "$lib/stage/upAxis";
 import { viewerSettings } from "$lib/state/viewerSettings.svelte";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
@@ -23,6 +24,9 @@ export function resetLoadedScene(viewer: RendererKit) {
     disposeScene(viewer.loadedGroup);
     viewer.loadedGroup = null;
   }
+  // The only images the memo holds belong to the scene just dropped: a
+  // stage closed with no reload after it would keep them for the session.
+  clearTextureCache();
 }
 
 // Camera fit / grid / light framing for the rust scene (no skinned

@@ -9,8 +9,10 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => `asset://${path}`,
 }));
 
+import * as THREE from "three";
 import { invoke } from "@tauri-apps/api/core";
-import { installPlaybackDriver } from "./sceneIntegration";
+import { installPlaybackDriver, resetLoadedScene } from "./sceneIntegration";
+import { loadCachedTexture } from "./textureCache";
 import { renderState } from "./renderState.svelte";
 import { stageState } from "../stage/stageState.svelte";
 import type { RendererKit } from "../three/RendererKit.svelte";
@@ -84,7 +86,7 @@ describe("installPlaybackDriver", () => {
 
     for (let i = 0; i < 10; i++) v.onAdvanceTime!(1 / 60);
 
-    expect(renderState.time).toBeCloseTo(10 / 60 * 24, 5);
+    expect(renderState.time).toBeCloseTo((10 / 60) * 24, 5);
   });
 
   it("advances past the first authored code under exact small deltas (stall regression)", () => {
@@ -123,5 +125,25 @@ describe("installPlaybackDriver", () => {
     v.onAdvanceTime!(1 / 60);
 
     expect(renderState.time).toBeGreaterThan(10);
+  });
+});
+
+describe("resetLoadedScene", () => {
+  it("drops the scene and the texture memo so a closed stage holds no images", () => {
+    // The memo is cleared again at the next load, but a stage closed with
+    // no reload after it would keep the last scene's decoded images.
+    const load = vi.fn(() => new THREE.Texture());
+    loadCachedTexture("/Textures/texgen_7.png", () => {}, load);
+
+    const group = new THREE.Group();
+    const scene = new THREE.Scene();
+    scene.add(group);
+    const kit = { loadedGroup: group, scene } as unknown as RendererKit;
+
+    resetLoadedScene(kit);
+
+    expect(scene.children).not.toContain(group);
+    loadCachedTexture("/Textures/texgen_7.png", () => {}, load);
+    expect(load).toHaveBeenCalledTimes(2);
   });
 });
