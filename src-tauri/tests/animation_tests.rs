@@ -178,6 +178,37 @@ fn delta_manifest_rewrites_animated_instancer_instances() {
 }
 
 #[test]
+fn delta_manifest_folds_each_prototype_roots_own_xform_into_instances() {
+    // The prototype root's local xform multiplies into every instance
+    // matrix, so a SAMPLED proto root animates its instances — the static
+    // transform cache must not freeze it at its default-time value.
+    let at_one = delta_from("proto_xform_motion.usda", Some(1.0));
+    assert_eq!(
+        expect(&at_one, "/Scene/Moving/__proto_0").instances[0][12],
+        0.0,
+        "proto root translate at t=1"
+    );
+
+    let at_two = delta_from("proto_xform_motion.usda", Some(2.0));
+    assert_eq!(
+        expect(&at_two, "/Scene/Moving/__proto_0").instances[0][12],
+        5.0,
+        "proto root translate at t=2"
+    );
+
+    // A static proto root's offset still lands in the matrices when the
+    // value comes from the cache.
+    for time in [Some(1.0), Some(2.0)] {
+        let full = manifest_from("proto_xform_motion.usda", time);
+        assert_eq!(
+            expect(&full, "/Scene/Still/__proto_0").instances[0][13],
+            3.0,
+            "static proto root translate"
+        );
+    }
+}
+
+#[test]
 fn delta_manifest_leaves_static_instancers_and_native_instances_alone() {
     // A static PointInstancer (no sampled arrays, static prototypes):
     // nothing under it changes per step, so nothing of it rides the delta.

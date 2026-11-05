@@ -1,0 +1,55 @@
+#usda 1.0
+(
+    defaultPrim = "Scene",
+    startTimeCode = 1,
+    endTimeCode = 2
+)
+
+# The prototype root's own xform is folded into every instance matrix, so a
+# sampled proto xform animates the instances and a static one must still land
+# in the matrices served from the skeleton's static transform cache.
+def Xform "Scene"
+{
+    def PointInstancer "Moving"
+    {
+        point3f[] positions = [(0, 0, 0)]
+        int[] protoIndices = [0]
+        rel prototypes = [</Scene/Moving/Proto>]
+
+        def Xform "Proto"
+        {
+            double3 xformOp:translate.timeSamples = {
+                1: (0, 0, 0),
+                2: (5, 0, 0),
+            }
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+
+            def Mesh "Shape"
+            {
+                int[] faceVertexCounts = [3]
+                int[] faceVertexIndices = [0, 1, 2]
+                point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+            }
+        }
+    }
+
+    def PointInstancer "Still"
+    {
+        point3f[] positions = [(0, 0, 0)]
+        int[] protoIndices = [0]
+        rel prototypes = [</Scene/Still/Proto>]
+
+        def Xform "Proto"
+        {
+            double3 xformOp:translate = (0, 3, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+
+            def Mesh "Shape"
+            {
+                int[] faceVertexCounts = [3]
+                int[] faceVertexIndices = [0, 1, 2]
+                point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+            }
+        }
+    }
+}

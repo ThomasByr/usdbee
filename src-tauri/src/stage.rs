@@ -2939,7 +2939,12 @@ fn prototype_children(
             )
         };
         let type_name = prototype.type_name.clone();
-        let proto_xform = local_transform(&prototype.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
+        // A prototype root whose own xformOpOrder samples moves: the build
+        // leaves its static transform unset, so the per-call read stands in.
+        let proto_xform = match prototype.static_transform {
+            Some(matrix) => matrix,
+            None => local_transform(&prototype.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY),
+        };
         // The prototype root's own xform is folded into every
         // instance matrix, so sampled proto xformOps animate the
         // child as much as the instancer's own arrays do.
