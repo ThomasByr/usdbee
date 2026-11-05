@@ -2,10 +2,10 @@
 // the selection's box center while the commit still authors the prim's
 // true world matrix. The correction is pure and pinned here.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as THREE from "three";
 import { gizmoAnchorCenter } from "./gizmoCommit.svelte";
-import { gizmoCorrection } from "./transformGizmo";
+import { gizmoCorrection, TransformGizmo } from "./transformGizmo";
 
 const IDENTITY = new THREE.Matrix4();
 
@@ -61,6 +61,51 @@ describe("gizmoCorrection", () => {
     const origin = new THREE.Vector3(0, 0, 0).applyMatrix4(expected);
     expect(origin.x).toBeCloseTo(35, 6);
     expect(origin.y).toBeCloseTo(-15, 6);
+  });
+});
+
+// The controls only need the event-listener surface; the per-frame pose sync
+// reuses the same attach path, so only the proxy pose and the attach latch
+// are observed here.
+function makeGizmo(): TransformGizmo {
+  const domElement = {
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    style: {},
+  } as unknown as HTMLElement;
+  return new TransformGizmo(new THREE.PerspectiveCamera(), domElement, new THREE.Scene(), { enabled: true });
+}
+
+describe("TransformGizmo drag lifecycle", () => {
+  it("fires onDragStart once when a drag begins", () => {
+    const gizmo = makeGizmo();
+    const onDragStart = vi.fn();
+    gizmo.onDragStart = onDragStart;
+
+    gizmo.controls.dispatchEvent({ type: "dragging-changed", value: true });
+    expect(onDragStart).toHaveBeenCalledTimes(1);
+
+    gizmo.controls.dispatchEvent({ type: "dragging-changed", value: false });
+    expect(onDragStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-attach while the proxy stays the attached object", () => {
+    const gizmo = makeGizmo();
+    const proxy = gizmo.controls.object;
+    const attach = vi.spyOn(gizmo.controls, "attach");
+
+    gizmo.attach(translation(1, 2, 3));
+    gizmo.attach(translation(4, 5, 6), new THREE.Vector3(7, 8, 9));
+
+    expect(attach).not.toHaveBeenCalled();
+    expect(gizmo.controls.object).toBe(proxy);
+    // The pose still moved: skipping the attach only skips the reload.
+    expect(gizmo.controls.object.position.x).toBe(7);
+
+    // A detached gizmo must re-attach on the next pose sync.
+    gizmo.detach();
+    gizmo.attach(translation(1, 1, 1));
+    expect(attach).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -132,6 +132,33 @@ describe("stageState", () => {
     expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { stageId: 7, path: "/A", time: 9 });
   });
 
+  it("does not resolve an overlapping refresh before fresh details land", async () => {
+    // The gizmo commit awaits this refresh before reading the local
+    // transform: a caller landing mid-flight must not get the promise of a
+    // dedupe no-op, or it authors its delta from the stale payload.
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    const stale = { path: "/A", marker: "stale" } as never;
+    mockedInvoke.mockResolvedValueOnce(stale);
+    await stageState.selectPrim("/A");
+
+    const fresh = { path: "/A", marker: "fresh" } as never;
+    const slow = deferred<never>();
+    mockedInvoke.mockResolvedValue(fresh);
+    mockedInvoke.mockReturnValueOnce(slow.promise);
+
+    const first = stageState.refreshSelectedDetails();
+    const second = stageState.refreshSelectedDetails();
+    let settled = false;
+    void second.then(() => (settled = true));
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(settled).toBe(false);
+
+    slow.resolve(fresh);
+    await Promise.all([first, second]);
+    expect(stageState.details).toEqual(fresh);
+  });
+
   it("adopts a backend-opened stage without composing it again", async () => {
     mockedInvoke.mockResolvedValueOnce([]);
 

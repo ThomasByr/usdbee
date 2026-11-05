@@ -35,6 +35,9 @@ export class TransformGizmo {
   private readonly anchor = new THREE.Matrix4();
   private readonly correction = new THREE.Matrix4();
   onCommit: ((commit: GizmoCommit) => void) | null = null;
+  // Fired when a drag begins, before the anchor latch: the host pauses
+  // playback here so its details catch-up lands before the drag ends.
+  onDragStart: (() => void) | null = null;
 
   constructor(
     camera: THREE.Camera,
@@ -51,6 +54,7 @@ export class TransformGizmo {
     this.controls.addEventListener("dragging-changed", (event: any) => {
       orbit.enabled = !event.value;
       if (event.value) {
+        this.onDragStart?.();
         this.proxy.updateMatrixWorld();
         this.anchor.copy(this.proxy.matrixWorld);
       } else {
@@ -76,7 +80,9 @@ export class TransformGizmo {
     if (anchor) this.proxy.position.copy(anchor);
     this.proxy.updateMatrix();
     this.correction.copy(gizmoCorrection(this.proxy.matrix, worldMatrix));
-    this.controls.attach(this.proxy);
+    // The per-frame sync re-poses the proxy every frame; the attach call
+    // reloads controls state, so keep it off the steady path.
+    if (this.controls.object !== this.proxy) this.controls.attach(this.proxy);
   }
 
   detach(): void {

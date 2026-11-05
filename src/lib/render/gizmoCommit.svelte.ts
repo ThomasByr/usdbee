@@ -70,6 +70,9 @@ export function clearGizmoError() {
 export function syncGizmoAnchor(viewer: RendererKit, gizmoMode: GizmoMode) {
   const kit = gizmoPolicy.kit;
   if (!kit) return;
+  // A details refresh can land mid-drag (the pause catch-up): re-attaching
+  // then would snap the proxy back and corrupt the commit math.
+  if (kit.controls.dragging) return;
   kit.controls.setMode(gizmoMode);
   if (!getGizmoGate().attachable) {
     kit.detach();
@@ -77,6 +80,35 @@ export function syncGizmoAnchor(viewer: RendererKit, gizmoMode: GizmoMode) {
   }
   const world = gizmoWorldMatrix(viewer);
   if (world) kit.attach(world, gizmoAnchorCenter(viewer));
+}
+
+// Per-frame pose sync (called from the kit's render loop): the selected
+// prim keeps animating while details are suppressed, so the pose comes
+// from the live node. Skipped mid-drag: the proxy's own drag latch owns
+// the pose then, and re-anchoring would corrupt the commit math.
+export function frameSyncGizmo(viewer: RendererKit) {
+  const kit = gizmoPolicy.kit;
+  if (!kit || kit.controls.dragging) return;
+  const node = viewer.selectedNode as THREE.Object3D | null;
+  if (!node || !getGizmoGate().attachable) return;
+  // The renderer already refreshed the node's world matrix this frame.
+  node.updateWorldMatrix(true, false);
+  // The selection helper's box was computed from this same node a moment
+  // ago: reuse its center instead of running a second subtree traversal.
+  const box = viewer.selectionHelper?.box;
+  const anchor = box
+    ? box.isEmpty()
+      ? null
+      : box.getCenter(new THREE.Vector3())
+    : gizmoAnchorCenter(viewer);
+  kit.attach(node.matrixWorld, anchor);
+}
+
+// A drag started during playback saw stale details (playback suppresses
+// their refresh): pause so the commit's own refresh reads the current
+// time instead of the animated pose the drag began from.
+function pauseOnDragStart() {
+  if (gizmoViewer) gizmoViewer.isPlayingAnim = false;
 }
 
 // Plain (non-$state) lock: it is only ever read inside the commit
@@ -103,6 +135,8 @@ export function initGizmo(viewer: RendererKit, getMode: () => GizmoMode) {
     viewer.controls,
   );
   gizmoPolicy.kit.onCommit = handleGizmoCommit;
+  gizmoPolicy.kit.onDragStart = pauseOnDragStart;
+  viewer.onFrameGizmoSync = () => frameSyncGizmo(viewer);
   // Effects created here run inside the component's initialization
   // (initGizmo is called from onMount), so they live and die with it.
   $effect(() => clearGizmoError());
@@ -112,6 +146,7 @@ export function initGizmo(viewer: RendererKit, getMode: () => GizmoMode) {
 export function disposeGizmo() {
   gizmoPolicy.kit?.dispose();
   gizmoPolicy.kit = null;
+  if (gizmoViewer) gizmoViewer.onFrameGizmoSync = null;
 }
 
 // Drag end -> desired USD local matrix -> the op(s) to author. The
@@ -123,11 +158,15 @@ async function handleGizmoCommit(commit: GizmoCommit) {
   const viewer = gizmoViewer!;
   const gizmo = gizmoPolicy.kit;
   const gizmoMode = mode();
-  const details = stageState.details;
-  if (gizmoCommitInFlight || !details?.local_transform || !details.world_transform) return;
+  if (gizmoCommitInFlight) return;
   gizmoCommitInFlight = true;
   if (gizmo) gizmo.controls.enabled = false;
   try {
+    // The math must not run on suppressed details: a playback drag, or a
+    // grab inside the window after a manual pause, both leave them stale.
+    await stageState.refreshSelectedDetails();
+    const details = stageState.details;
+    if (!details?.local_transform || !details.world_transform) return;
     const local = new THREE.Matrix4().fromArray(details.local_transform);
     const target = local
       .clone()

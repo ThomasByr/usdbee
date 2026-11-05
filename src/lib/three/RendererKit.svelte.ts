@@ -29,6 +29,9 @@ export class RendererKit {
   // animation-frame tick advances the playhead with the frame delta in
   // seconds; null = nothing animates.
   onAdvanceTime: ((deltaSeconds: number) => void) | null = null;
+  // Per-frame gizmo pose hook: the gizmo policy re-anchors the gizmo from
+  // the live selected node, exactly like the selection box below.
+  onFrameGizmoSync: (() => void) | null = null;
   clock: THREE.Clock;
   usdCameras = $state<THREE.Camera[]>([]);
   activeCameraIndex = $state<number>(-1);
@@ -255,6 +258,8 @@ export class RendererKit {
       this.selectionHelper.box.setFromObject(this.selectedNode, true);
       this.selectionHelper.visible = !this.selectionHelper.box.isEmpty();
     }
+    // After the selection box: the gizmo anchor reuses its center.
+    this.onFrameGizmoSync?.();
 
     const renderCam =
       this.activeCameraIndex >= 0 && this.usdCameras[this.activeCameraIndex]

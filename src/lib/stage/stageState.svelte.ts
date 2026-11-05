@@ -6,8 +6,9 @@ let loadGeneration = 0;
 let selectionGeneration = 0;
 // In-flight guard for refreshSelectedDetails: one details refresh runs
 // at a time; triggers landing mid-flight re-run once with the latest
-// state instead of piling IPC requests onto the stage actor.
-let detailsRefreshInFlight = false;
+// state instead of piling IPC requests onto the stage actor. The promise
+// is kept so overlapping callers await the same completion.
+let detailsRefreshInFlight: Promise<void> | null = null;
 let detailsRefreshPending = false;
 
 export const stageState = $state({
@@ -112,21 +113,28 @@ export const stageState = $state({
     }
   },
 
-  async refreshSelectedDetails(): Promise<void> {
-    if (!this.selectedPath || detailsRefreshInFlight) {
-      detailsRefreshPending = detailsRefreshInFlight;
-      return;
+  // Awaitable: every overlapping caller resolves only once the fetch it
+  // coalesced into (and its one queued re-run) has landed, so a caller that
+  // needs fresh details — the gizmo commit — never reads the stale payload.
+  refreshSelectedDetails(): Promise<void> {
+    if (detailsRefreshInFlight) {
+      detailsRefreshPending = true;
+      return detailsRefreshInFlight;
     }
-    detailsRefreshInFlight = true;
-    try {
-      await this.selectPrim(this.selectedPath);
-    } finally {
-      detailsRefreshInFlight = false;
-      if (detailsRefreshPending) {
-        detailsRefreshPending = false;
-        void this.refreshSelectedDetails();
+    if (!this.selectedPath) return Promise.resolve();
+    detailsRefreshInFlight = (async () => {
+      try {
+        do {
+          detailsRefreshPending = false;
+          const path = this.selectedPath;
+          if (!path) return;
+          await this.selectPrim(path);
+        } while (detailsRefreshPending);
+      } finally {
+        detailsRefreshInFlight = null;
       }
-    }
+    })();
+    return detailsRefreshInFlight;
   },
 
   // Playback perf: the per-time-step inspector refresh costs ~205 ms of
