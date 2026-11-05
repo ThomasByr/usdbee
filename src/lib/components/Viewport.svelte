@@ -229,9 +229,7 @@
         onmouseup={() => (viewer.isDraggingAnim = false)}
       />
       <span class="timeline-time" title={`${timeCodesPerSecond} fps`}
-        >{timelineCurrent}
-        /
-        {timelineEnd}</span
+        >{timelineCurrent} / {timelineEnd}</span
       >
     </div>
   {/if}
@@ -302,6 +300,10 @@
     min-width: 125px;
     text-align: right;
     font-variant-numeric: tabular-nums;
+    /* The label is padded with leading spaces to the end label's width;
+       default whitespace processing eats them, so the span resizes as the
+       digits change. pre keeps the padding literal. */
+    white-space: pre;
   }
 
   .empty-state {
