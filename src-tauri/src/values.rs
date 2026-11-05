@@ -565,6 +565,19 @@ const PRIM_METADATA_FIELDS: &[&str] = &[
     "apiSchemas",
 ];
 
+/// Prints `label` with the elapsed time when `USDBEE_PERF` is set: the read
+/// paths in this module are the ones that stall the UI, so measuring them
+/// should not need a rebuild.
+pub(crate) fn perf_mark(label: &str, start: std::time::Instant) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ENABLED.get_or_init(|| std::env::var_os("USDBEE_PERF").is_some()) {
+        eprintln!(
+            "[perf] {label} {:.2} ms",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
 /// Pure details serializer, mirroring `serialize_tree`: reads one prim's
 /// composed state at `time` (`None` = default time, not a time sample).
 /// Fails only on composition errors; unknown value kinds never fail.
@@ -580,15 +593,18 @@ pub fn serialize_details(
         return Err(format!("prim not found: {}", path));
     }
 
+    let attributes_start = std::time::Instant::now();
     let attributes = prim
         .attributes()
         .map_err(err)?
         .iter()
         .map(|attribute| attribute_info(attribute, time))
         .collect::<Result<Vec<_>, String>>()?;
+    perf_mark("details.attributes", attributes_start);
 
     // A metadata field the schema registry cannot decode is skipped, not
     // fatal: the inspector still shows everything else.
+    let metadata_start = std::time::Instant::now();
     let metadata = PRIM_METADATA_FIELDS
         .iter()
         .filter_map(|key| {
@@ -599,6 +615,7 @@ pub fn serialize_details(
         })
         .collect();
 
+    perf_mark("details.metadata", metadata_start);
     let instance_of = prim
         .prototype()
         .map_err(err)?
@@ -622,10 +639,25 @@ pub fn serialize_details(
         instance_of,
         attributes,
         metadata,
-        variant_sets: variant_sets(stage, &prim)?,
-        composition_arcs: composition_arcs(stage, &prim),
+        variant_sets: {
+            let start = std::time::Instant::now();
+            let sets = variant_sets(stage, &prim)?;
+            perf_mark("details.variant_sets", start);
+            sets
+        },
+        composition_arcs: {
+            let start = std::time::Instant::now();
+            let arcs = composition_arcs(stage, &prim);
+            perf_mark("details.composition_arcs", start);
+            arcs
+        },
         local_transform: local_transform(&prim, time)?.map(|matrix| matrix.0),
-        world_transform: world_transform(&prim, time)?,
+        world_transform: {
+            let start = std::time::Instant::now();
+            let world = world_transform(&prim, time)?;
+            perf_mark("details.world_transform", start);
+            world
+        },
     })
 }
 
@@ -663,6 +695,7 @@ fn variant_sets(stage: &Stage, prim: &Prim) -> Result<Vec<VariantSetInfo>, Strin
     // layers' `variantSetChildren` specs — the same field the composition
     // engine walks — which is complete for every set with authored variants.
     let mut names: Vec<String> = Vec::new();
+    let mark = std::time::Instant::now();
     if let Ok(Some(Value::StringListOp(op))) =
         stage.field::<Value>(prim.path().clone(), "variantSetNames")
     {
@@ -670,22 +703,30 @@ fn variant_sets(stage: &Stage, prim: &Prim) -> Result<Vec<VariantSetInfo>, Strin
             push_unique(&mut names, name);
         }
     }
+    perf_mark("variantset.names_field", mark);
+    let mark = std::time::Instant::now();
     for name in layer_token_children(prim, "variantSetChildren", "") {
         push_unique(&mut names, name);
     }
+    perf_mark("variantset.set_children", mark);
+    let mark = std::time::Instant::now();
     let authored: HashMap<String, String> =
         match stage.field::<Value>(prim.path().clone(), "variantSelection") {
             Ok(Some(Value::VariantSelectionMap(map))) => map,
             _ => HashMap::new(),
         };
-    Ok(names
+    perf_mark("variantset.selection_field", mark);
+    let mark = std::time::Instant::now();
+    let result = names
         .into_iter()
         .map(|name| VariantSetInfo {
             authored_selection: authored.get(&name).cloned(),
             options: layer_token_children(prim, "variantChildren", &name),
             name,
         })
-        .collect())
+        .collect();
+    perf_mark("variantset.options", mark);
+    Ok(result)
 }
 
 /// Token-children fields of the prim's contributing layer specs, unioned in
@@ -696,9 +737,11 @@ fn variant_sets(stage: &Stage, prim: &Prim) -> Result<Vec<VariantSetInfo>, Strin
 /// composed variant-options API.
 fn layer_token_children(prim: &Prim, children_field: &str, set: &str) -> Vec<String> {
     let mut children: Vec<String> = Vec::new();
+    let mark = std::time::Instant::now();
     let Ok(sites) = prim.prim_stack() else {
         return children;
     };
+    perf_mark("layer_children.prim_stack", mark);
     for site in sites {
         let Ok(layer) = sdf::Layer::open(&site.layer) else {
             continue;
