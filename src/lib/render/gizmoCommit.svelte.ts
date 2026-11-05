@@ -115,18 +115,19 @@ function pauseOnDragStart() {
 // handler and is never rendered, so a rune adds nothing there.
 let gizmoCommitInFlight = false;
 
-// The node's frozen local matrix at drag start: restored at drag end so a
-// refused commit (and the commit's own async details refresh) leaves the
-// node at stage truth — the refresh overwrites it on success.
+// The node's frozen local matrix at drag start: the pose a release hands
+// back when the commit authors nothing, so a refused or failed commit
+// leaves the node at stage truth instead of the previewed pose.
 const latchedNodeMatrix = new THREE.Matrix4();
 let previewActive = false;
 
-// First action on drag end: hand the node back to stage truth. The commit
-// path re-applies the real pose via the in-place scene refresh on success,
-// so the unconditional restore is at worst a one-frame snap-back.
-function restorePreviewNode(viewer: RendererKit) {
+// Drag-end bookkeeping: on success the previewed pose equals the committed
+// truth, so the node keeps it and the scene refresh lands seamlessly; any
+// other path hands the node back to its pre-drag (stage-truth) matrix.
+function releasePreviewNode(viewer: RendererKit, keepPose: boolean) {
   if (!previewActive) return;
   previewActive = false;
+  if (keepPose) return;
   const node = viewer.selectedNode as THREE.Object3D | null;
   if (!node) return;
   node.matrixAutoUpdate = false;
@@ -194,11 +195,12 @@ async function handleGizmoCommit(commit: GizmoCommit) {
   // initGizmo always runs first (onCommit is only wired there), so the
   // captured viewer is never null when a commit fires.
   const viewer = gizmoViewer!;
-  restorePreviewNode(viewer);
   const gizmo = gizmoPolicy.kit;
   const gizmoMode = mode();
   if (gizmoCommitInFlight) return;
   gizmoCommitInFlight = true;
+  // Only a commit that authored everything may keep the previewed pose.
+  let keepPreviewPose = false;
   if (gizmo) gizmo.controls.enabled = false;
   try {
     // The math must not run on suppressed details: a playback drag, or a
@@ -245,11 +247,13 @@ async function handleGizmoCommit(commit: GizmoCommit) {
         break;
       }
     }
+    keepPreviewPose = !failed;
     // Keep commits disabled until fresh details land; a second drag must
     // never compute from the pre-commit local transform.
     if (!failed) await stageState.refreshAfterEdit();
     if (gizmo) reattach(gizmo, viewer, commit.endWorld);
   } finally {
+    releasePreviewNode(viewer, keepPreviewPose);
     gizmoCommitInFlight = false;
     if (gizmo) gizmo.controls.enabled = true;
   }
