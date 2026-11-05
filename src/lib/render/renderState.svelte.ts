@@ -44,6 +44,18 @@ let loadPromise: Promise<void> | null = null;
 let queuedTime: number | null = null;
 // An edit refresh queued behind a load or an active step (Phase 3 Task 4).
 let queuedRefresh: string[] | null = null;
+// Coalesced edit-refresh callers await the drain's verdict instead of a
+// conservative rebuild: a transform-only second event no longer vanishes
+// the whole scene. Plain, like the other queue state — never rendered.
+let queuedVerdict: ReturnType<typeof Promise.withResolvers<boolean>> | null = null;
+
+// Superseded or failed work drops the queued refresh and hands its
+// coalesced callers the rebuild they would have asked for.
+function dropQueuedRefresh() {
+  queuedRefresh = null;
+  queuedVerdict?.resolve(true);
+  queuedVerdict = null;
+}
 
 // The group + path->object index of the last successfully built scene.
 // loadRenderScene hands the group to the caller (which integrates it into
@@ -526,7 +538,7 @@ export const renderState = $state({
     queuedTime = null;
     // A rebuild supersedes any queued edit refresh (the load re-fetches
     // everything anyway) — drop it like a queued time step.
-    queuedRefresh = null;
+    dropQueuedRefresh();
     this.time = startTime;
     this.timeCodes = [];
     this.onTimeChange?.(startTime);
@@ -577,14 +589,15 @@ export const renderState = $state({
           drainingQueue = false;
         }
       }
-      const pendingRefresh = queuedRefresh;
-      queuedRefresh = null;
-      if (pendingRefresh !== null) await this.refreshAfterEdit(pendingRefresh);
+      await this.drainQueuedRefresh();
       return group;
     } catch (e) {
       if (generation !== loadGeneration) return null;
       sceneLoading = false;
       queuedTime = null;
+      // Nothing applied: a queued edit refresh must still hand its callers
+      // the rebuild instead of leaving them pending.
+      dropQueuedRefresh();
       // A failed load leaves no integrated scene to step: release the old
       // group so setStageTime cannot mutate a dead scene.
       currentGroup = null;
@@ -660,9 +673,7 @@ export const renderState = $state({
               drainingQueue = false;
             }
           }
-          const pendingRefresh = queuedRefresh;
-          queuedRefresh = null;
-          if (pendingRefresh !== null) void this.refreshAfterEdit(pendingRefresh);
+          void this.drainQueuedRefresh();
         }
       }
     })();
@@ -674,16 +685,16 @@ export const renderState = $state({
   // fetch plus one batched geometry fetch for the affected paths — through
   // the same generation-guard/coalescing machinery as playback steps, so
   // refreshes never fight the bounded drain. Resolves true when the edit
-  // changed the scene structure (or the refresh was coalesced away and
-  // the verdict is unknown): the caller then falls back to a full rebuild.
+  // changed the scene structure: the caller then falls back to a full
+  // rebuild. A caller coalesced behind an in-flight step resolves with the
+  // drained refresh's verdict (see drainQueuedRefresh).
   refreshAfterEdit(paths: string[]): Promise<boolean> {
     // Whole-layer imports and their undo/redo can reshape any prim.
     if (paths.includes("/")) return Promise.resolve(true);
     if (sceneLoading || timeStepInFlight) {
-      queuedRefresh = paths;
-      // shortcut: the coalesced drain loses the rebuild verdict, so a
-      // coalesced caller conservatively rebuilds the whole scene.
-      return Promise.resolve(true);
+      queuedRefresh = queuedRefresh ? Array.from(new Set([...queuedRefresh, ...paths])) : paths;
+      if (!queuedVerdict) queuedVerdict = Promise.withResolvers<boolean>();
+      return queuedVerdict.promise;
     }
     const generation = ++loadGeneration;
     const group = currentGroup;
@@ -726,13 +737,35 @@ export const renderState = $state({
               drainingQueue = false;
             }
           }
-          const pendingRefresh = queuedRefresh;
-          queuedRefresh = null;
-          if (pendingRefresh !== null) void this.refreshAfterEdit(pendingRefresh);
+          void this.drainQueuedRefresh();
         }
       }
     })();
     return activeTimeStep as Promise<boolean>;
+  },
+
+  // Tails every queue drain: runs the queued edit refresh and hands its
+  // verdict to the callers it coalesced away. Resolves with that verdict;
+  // the load awaits it so a queued-completion caller still resolves after
+  // the refresh applied. A re-queue (a time step that restarted mid-drain)
+  // goes through the same coalescing branch, so the chained call's own
+  // verdict is what those callers finally observe.
+  drainQueuedRefresh(): Promise<boolean> {
+    const pendingRefresh = queuedRefresh;
+    queuedRefresh = null;
+    const verdict = queuedVerdict;
+    queuedVerdict = null;
+    if (pendingRefresh === null) return Promise.resolve(true);
+    return this.refreshAfterEdit(pendingRefresh).then(
+      (v) => {
+        verdict?.resolve(v);
+        return v;
+      },
+      () => {
+        verdict?.resolve(true);
+        return true;
+      },
+    );
   },
 
   // Animated content refresh: a full re-load at the current stage time,

@@ -1250,7 +1250,29 @@ describe("renderState.refreshAfterEdit", () => {
     expect(rebuild).toBe(true);
   });
 
-  it("coalesces behind an active step and conservatively reports a rebuild", async () => {
+  it("resolves a refresh coalesced behind an in-flight one with the drained verdict", async () => {
+    // A new-op gizmo commit authors two attributes: the second
+    // usd-stage-changed coalesces behind the first refresh. A
+    // transform-only second event must not vanish the whole scene.
+    const shape = node({ path: "/Scene/Shape", name: "Shape", type_name: "Mesh", has_geometry: true });
+    await loadScene(() => [shape]);
+    const active = deferred<RenderNode[]>();
+    let calls = 0;
+    mockIpc(() => {
+      calls += 1;
+      return calls === 1 ? active.promise : [shape];
+    });
+
+    const first = renderState.refreshAfterEdit(["/Scene/Shape"]);
+    const coalesced = renderState.refreshAfterEdit(["/Scene/Shape"]);
+    active.resolve([shape]);
+
+    expect(await coalesced, "coalesced caller reports the drained verdict").toBe(false);
+    expect(await first, "the in-flight refresh itself needs no rebuild").toBe(false);
+    expect(calls).toBe(2);
+  });
+
+  it("resolves a refresh coalesced behind an active step with the drained verdict", async () => {
     const shape = node({ path: "/Scene/Shape", name: "Shape", type_name: "Mesh", has_geometry: true });
     await loadScene(() => [shape]);
     const active = deferred<RenderNode[]>();
@@ -1262,13 +1284,13 @@ describe("renderState.refreshAfterEdit", () => {
 
     const step = renderState.setStageTime(5);
     const rebuild = renderState.refreshAfterEdit(["/Scene/Shape"]);
-    expect(await rebuild).toBe(true);
     active.resolve([shape]);
     await step;
-    await Promise.resolve();
 
     // The queued refresh ran behind the active step (same slot, same
-    // generation guards) — two manifest fetches total.
+    // generation guards) — two manifest fetches total, and its verdict
+    // reaches the caller the step coalesced away.
+    expect(await rebuild).toBe(false);
     expect(calls).toBe(2);
   });
 });
