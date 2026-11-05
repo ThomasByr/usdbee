@@ -2,6 +2,7 @@
   import * as THREE from "three";
   import PrimTree from "$lib/components/stage/PrimTree.svelte";
   import PropertyInspector from "$lib/components/stage/PropertyInspector.svelte";
+  import { stageState } from "$lib/stage/stageState.svelte";
   import type { RendererKit } from "$lib/three/RendererKit.svelte";
 
   let { viewer }: { viewer: RendererKit } = $props();
@@ -25,6 +26,7 @@
     if (node && selectedNodeId === node.uuid) {
       selectedNodeId = null;
       viewer.selectedNode = null;
+      stageState.deselectPrim();
       if (viewer.selectionHelper) {
         viewer.scene.remove(viewer.selectionHelper);
         viewer.selectionHelper.dispose();

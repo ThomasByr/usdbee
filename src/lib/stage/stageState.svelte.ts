@@ -113,6 +113,14 @@ export const stageState = $state({
     }
   },
 
+  // Full deselect (the tree's toggle-off click): the generation bump drops
+  // any in-flight details fetch so it cannot repopulate the inspector/gizmo.
+  deselectPrim(): void {
+    ++selectionGeneration;
+    this.selectedPath = null;
+    this.details = null;
+  },
+
   // Awaitable: every overlapping caller resolves only once the fetch it
   // coalesced into (and its one queued re-run) has landed, so a caller that
   // needs fresh details — the gizmo commit — never reads the stale payload.
