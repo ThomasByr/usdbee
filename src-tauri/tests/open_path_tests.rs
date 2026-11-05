@@ -2,11 +2,12 @@
 // the same orchestration as the dialog flow — usdz extraction, dependency
 // scan, stage open — and return the opened stage's info.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tauri::{Listener, Manager};
 use usdbee_lib::get_usdbee_cache_dir;
+use usdbee_lib::parser::scan_dependencies;
 use usdbee_lib::{open_usd_file_path, AppState, LoadGate, OPEN_IN_FLIGHT_MESSAGE};
 
 fn fixture(name: &str) -> PathBuf {
@@ -71,6 +72,75 @@ fn extracts_and_opens_usdz_via_path_command() {
         info.root_layer
     );
     assert!(info.composition_errors.is_empty());
+}
+
+#[test]
+fn scene_loaded_event_carries_the_scan_of_the_opened_stage() {
+    // One packed dependency (root.usda references ./asset.usda) so the
+    // scan has something to report after extraction.
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let usdz = dir.path().join("packed.usdz");
+    let mut archive =
+        openusd::usdz::ArchiveWriter::create(&usdz).expect("archive should be created");
+    archive
+        .add_layer(
+            "root.usda",
+            b"#usda 1.0\ndef \"Root\" (\n    references = @./asset.usda@\n)\n{\n}\n",
+        )
+        .expect("root layer should be packed");
+    archive
+        .add_layer("asset.usda", b"#usda 1.0\ndef \"Asset\"\n{\n}\n")
+        .expect("referenced layer should be packed");
+    archive.finish().expect("archive should be finalized");
+
+    let app = mock_app();
+    let payload: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let sink = payload.clone();
+    app.listen("usd-scene-loaded", move |event| {
+        *sink.lock().unwrap() = Some(event.payload().to_string());
+    });
+
+    tauri::async_runtime::block_on(open_usd_file_path(
+        app.handle().clone(),
+        usdz.to_string_lossy().into_owned(),
+    ))
+    .expect("packed.usdz should open through the path command");
+
+    let payload = payload
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("usd-scene-loaded must fire");
+    let scene: serde_json::Value =
+        serde_json::from_str(&payload).expect("the payload must be the scene JSON");
+    let root_file = scene["root_file"]
+        .as_str()
+        .expect("the payload carries the opened root file");
+    let dependencies = scene["dependencies"]
+        .as_object()
+        .expect("the payload carries the dependency map");
+
+    // The map must say what a standalone scan of the same root says about
+    // the packed reference. (The usdz fallback pre-populates the extracted
+    // files too, so this pins the scanned entry, not the map size.)
+    let standalone = scan_dependencies(Path::new(root_file)).expect("the root should scan");
+    let reference = standalone
+        .entries
+        .iter()
+        .find(|entry| entry.key == "asset.usda")
+        .expect("the packed reference must scan as a dependency");
+    assert_eq!(
+        dependencies.get(&reference.key),
+        Some(&serde_json::to_value(&reference.node).unwrap()),
+        "the event's dependency node must match the standalone scan"
+    );
+    assert!(
+        dependencies
+            .get(&reference.key)
+            .and_then(|node| node["resolved"].as_bool())
+            .unwrap_or(false),
+        "the extracted reference resolves"
+    );
 }
 
 #[test]

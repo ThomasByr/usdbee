@@ -27,6 +27,10 @@ pub struct DependencyScan {
 /// `compute_all_dependencies`. Local paths are reported in full; remote
 /// dependencies (http(s), omniverse) are reported as pending entries that
 /// [`resolve_remote_dependencies`] fetches.
+///
+/// This opens its own stage: the standalone scan the tests drive. The app
+/// scans the stage its owner already opened, through
+/// [`dependency_scan_from_stage`].
 pub fn scan_dependencies(root: &Path) -> Result<DependencyScan, String> {
     let root = root
         .canonicalize()
@@ -35,7 +39,17 @@ pub fn scan_dependencies(root: &Path) -> Result<DependencyScan, String> {
 
     let stage = Stage::open(&root_str)
         .map_err(|e| format!("Failed to open USD stage {}: {}", root_str, e))?;
-    let deps = compute_all_dependencies(&stage, &root_str)
+    dependency_scan_from_stage(&stage, &root)
+}
+
+/// [`scan_dependencies`] over a stage that is already open, which is what
+/// the stage owner calls: `compute_all_dependencies` walks the layers the
+/// open already parsed instead of re-reading the root layer. `root` must be
+/// the stage's root layer identifier (the resolver's canonical path), whose
+/// directory the entry keys are relative to.
+pub fn dependency_scan_from_stage(stage: &Stage, root: &Path) -> Result<DependencyScan, String> {
+    let root_str = clean(&root.to_string_lossy());
+    let deps = compute_all_dependencies(stage, &root_str)
         .map_err(|e| format!("Failed to compute dependencies of {}: {}", root_str, e))?;
 
     let root_dir = root.parent().unwrap_or(Path::new(""));
@@ -82,7 +96,10 @@ pub fn scan_dependencies(root: &Path) -> Result<DependencyScan, String> {
         }
     }
 
-    Ok(DependencyScan { root, entries })
+    Ok(DependencyScan {
+        root: root.to_path_buf(),
+        entries,
+    })
 }
 
 /// Fetches the remote dependencies a scan found into the download cache.

@@ -19,7 +19,6 @@ use openusd::usd::{Prim, TimeCode};
 use openusd_schemas::geom::{Imageable, ImageableExt};
 use usdbee_lib::values::local_transform;
 
-use usdbee_lib::parser::scan_dependencies;
 use usdbee_lib::stage::{
     noop_sink, open_stage, request_animated_manifest, request_geometry_batch,
     request_geometry_data, request_material_data, request_scene_manifest, request_stage_details,
@@ -138,13 +137,6 @@ fn main() {
             }
             open_path = best.expect("extracted archive should hold a USD root");
         }
-        let start = Instant::now();
-        let scan = scan_dependencies(&open_path).unwrap();
-        println!(
-            "PHASE dep_scan {:.1} ms  {} dependencies",
-            ms(start.elapsed()),
-            scan.entries.len()
-        );
         extraction_dir = Some(dir);
     }
 
@@ -153,7 +145,6 @@ fn main() {
     let info = state
         .open(&open_path, is_usdz, None, extraction_dir.as_deref())
         .unwrap();
-    let sender = state.sender(info.stage_id).unwrap();
     println!(
         "PHASE open {:.1} ms  tcps={} start={} end={}",
         ms(start.elapsed()),
@@ -161,6 +152,16 @@ fn main() {
         info.start_time_code,
         info.end_time_code
     );
+
+    // The app's dependency scan: against the stage the open just parsed.
+    let start = Instant::now();
+    let scan = state.get_dependencies(info.stage_id).unwrap();
+    println!(
+        "PHASE dep_scan {:.1} ms  {} dependencies",
+        ms(start.elapsed()),
+        scan.entries.len()
+    );
+    let sender = state.sender(info.stage_id).unwrap();
 
     let start = Instant::now();
     let tree = request_stage_tree(&sender).unwrap();

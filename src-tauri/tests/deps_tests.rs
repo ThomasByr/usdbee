@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use usdbee_lib::parser::scan_dependencies;
+mod common;
+
+use common::spawn_stage_owner;
+use usdbee_lib::parser::{scan_dependencies, DependencyScan};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -66,6 +69,66 @@ fn scan_follows_payload_arcs() {
         "payload arcs are dependencies too, got: {:?}",
         scan.entries
     );
+}
+
+#[test]
+fn stage_scan_matches_the_standalone_scan() {
+    // The owner computes the scan against the layers its open already
+    // parsed, so it must report exactly what the standalone scan (which
+    // opens its own stage) reports for the same file — text, binary and
+    // packaged alike.
+    let dir = tempfile::tempdir().unwrap();
+    let source = fixture("scene_with_ref.usda");
+    let layer = openusd::sdf::Layer::open(source.to_str().unwrap()).expect("fixture layer opens");
+    fs::copy(fixture("asset.usda"), dir.path().join("asset.usda")).unwrap();
+    let owner = spawn_stage_owner();
+
+    /// The scan in its comparable form: (key, every node field) per entry, sorted.
+    fn serialized_entries(scan: &DependencyScan) -> Vec<(String, String)> {
+        let mut entries: Vec<(String, String)> = scan
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.key.clone(),
+                    serde_json::to_string(&entry.node).expect("dependency node serializes"),
+                )
+            })
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    for extension in ["usdc", "usdz"] {
+        let path = dir.path().join(format!("scene_with_ref.{}", extension));
+        layer
+            .export(path.to_str().unwrap())
+            .expect("generated stage is written");
+
+        let standalone = scan_dependencies(&path).unwrap();
+        let info = owner.open(&path);
+        let through_owner = owner
+            .state
+            .get_dependencies(info.stage_id)
+            .expect("an open stage must report its dependencies");
+        owner
+            .state
+            .close_stage(info.stage_id)
+            .expect("the stage closes cleanly");
+
+        assert!(
+            !through_owner.entries.is_empty(),
+            "{}: the fixture must reach a dependency for this comparison to mean anything",
+            extension
+        );
+        assert_eq!(
+            serialized_entries(&through_owner),
+            serialized_entries(&standalone),
+            "{} scan differs from the standalone scan",
+            extension
+        );
+        assert_eq!(through_owner.root, standalone.root);
+    }
 }
 
 #[test]

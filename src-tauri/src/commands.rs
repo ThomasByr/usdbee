@@ -1,6 +1,6 @@
 use crate::fetcher::get_usdbee_cache_dir;
 use crate::models::{ProgressEvent, UsdDependencyNode, UsdSceneData};
-use crate::parser::{resolve_remote_dependencies, scan_dependencies, DependencyScan};
+use crate::parser::{resolve_remote_dependencies, DependencyScan};
 use crate::stage::StageInfo;
 
 use std::collections::hash_map::DefaultHasher;
@@ -303,10 +303,6 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
                 .stack_size(32 * 1024 * 1024)
                 .name("usd_deps_parser".into())
                 .spawn(move || {
-                    let mut scan = scan_dependencies(Path::new(&p_str))?;
-                    // Remote fetches stay off the async runtime; a failure
-                    // here aborts the load (Phase 0 ruling).
-                    resolve_remote_dependencies(&mut scan, &server_url)?;
                     let stage_state = stage_app.state::<crate::stage::StageState>();
                     let stage_info = stage_state.open(
                         Path::new(&p_str),
@@ -314,6 +310,11 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
                         is_usdz.then_some(file_path.as_path()),
                         open_extraction_dir.as_deref(),
                     )?;
+                    // The scan runs against the stage the open already
+                    // parsed, then the remote fetches; both stay off the
+                    // async runtime.
+                    let scan =
+                        dependencies_after_open(&stage_state, stage_info.stage_id, &server_url)?;
                     Ok((scan, stage_info))
                 })
                 .map_err(|e| format!("Failed to spawn parser thread: {}", e))?;
@@ -414,6 +415,28 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
     Ok(stage_info)
 }
 
+// The open orchestration's post-open dependency work: the owner's scan
+// (against the layers the open already parsed) and then the remote fetches.
+// A failure of either aborts the load (Phase 0 ruling), and the stage opened
+// ahead of the scan must not outlive it — before the scan moved behind the
+// open, a failed scan never left a stage behind.
+fn dependencies_after_open(
+    stage_state: &crate::stage::StageState,
+    stage_id: u64,
+    server_url: &str,
+) -> Result<DependencyScan, String> {
+    let result = stage_state.get_dependencies(stage_id).and_then(|mut scan| {
+        resolve_remote_dependencies(&mut scan, server_url)?;
+        Ok(scan)
+    });
+    if result.is_err() {
+        if let Err(e) = stage_state.close_stage(stage_id) {
+            eprintln!("usdbee: could not close the stage of a failed load: {}", e);
+        }
+    }
+    result
+}
+
 // Path-based open (drag-drop, recent files): the SAME orchestration the
 // dialog flow runs — usdz extraction, dependency scan + remote fetch,
 // fallback-color population, usd-load-* events — with the error returned
@@ -484,6 +507,61 @@ mod tests {
             w.write_all(data).unwrap();
         }
         w.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn failed_remote_load_leaves_no_open_stage() {
+        use crate::fetcher::{cached_path_for, get_usdbee_cache_dir};
+        use crate::stage::{noop_sink, StageState};
+        use std::io::Read;
+
+        // A dependency server that refuses the download.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut head = [0; 1024];
+                let _ = stream.read(&mut head);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+
+        // The download cache outlives the run, so the URL carries this
+        // process's id and its entry is evicted like the parser tests do.
+        let url = format!(
+            "http://127.0.0.1:{}/remote_{}/tex.png",
+            port,
+            std::process::id()
+        );
+        let _ = fs::remove_file(cached_path_for(&url, &get_usdbee_cache_dir()));
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("remote_root.usda");
+        fs::write(
+            &root,
+            format!("#usda 1.0\ndef \"R\"\n{{\n    asset t = @{}@\n}}\n", url),
+        )
+        .unwrap();
+
+        let state = StageState::new(noop_sink());
+        let info = state
+            .open(&root, false, None, None)
+            .expect("the stage opens before the scan runs");
+
+        let error = dependencies_after_open(&state, info.stage_id, "")
+            .err()
+            .expect("a failed dependency download must abort the load");
+        assert!(
+            error.contains("Failed to download"),
+            "the error must stay user-readable, got: {}",
+            error
+        );
+        assert!(
+            state.sender(info.stage_id).is_err(),
+            "the aborted load must not leave its stage open"
+        );
+        assert!(state.list_stages().unwrap().is_empty());
     }
 
     #[test]

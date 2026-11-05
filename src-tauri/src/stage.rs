@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fetcher::get_usdbee_cache_dir;
 use crate::materials::{material_info, MaterialInfo};
+use crate::parser::{dependency_scan_from_stage, DependencyScan};
 use crate::skinning::{skel_joint_transforms_vary, SkelAnimMemo};
 use crate::tessellation::{pack_geometry, tessellate_prim, MeshData};
 use crate::values::{
@@ -49,6 +50,11 @@ pub enum StageRequest {
     },
     GetTree {
         reply: mpsc::Sender<Result<Vec<PrimNode>, String>>,
+    },
+    // The dependency scan of the open stage: computed against the layers
+    // the open already parsed, so the load pays one parse, not two.
+    GetDependencies {
+        reply: mpsc::Sender<Result<DependencyScan, String>>,
     },
     GetDetails {
         path: String,
@@ -359,6 +365,20 @@ impl StageState {
             .ok_or_else(|| format!("no stage {}", stage_id))
     }
 
+    /// The dependency scan of one open stage, from its own owner: the scan
+    /// walks the layers the owner parsed, so the caller pays no second
+    /// parse of the root layer.
+    pub fn get_dependencies(&self, stage_id: u64) -> Result<DependencyScan, String> {
+        let sender = self.sender(stage_id)?;
+        let (reply, response) = mpsc::channel();
+        sender
+            .send(StageRequest::GetDependencies { reply })
+            .map_err(|_| "stage service unavailable".to_string())?;
+        response
+            .recv()
+            .map_err(|_| "stage service unavailable".to_string())?
+    }
+
     /// Open a stage as a NEW map entry: mint the id, spawn a fresh owner
     /// thread, send the Open, and wait for the reply. A failed open removes
     /// only the entry it created (and shuts the fresh owner down, cleaning
@@ -597,6 +617,22 @@ fn spawn_stage_owner_for(
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| serialize_tree(stage)))
                             .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::GetDependencies { reply } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            // The root layer's own identifier anchors the
+                            // entry keys and keeps the walk on the layers
+                            // this stage already holds.
+                            dependency_scan_from_stage(
+                                stage,
+                                Path::new(stage.root_layer().identifier()),
+                            )
+                        }))
+                        .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
                     };
                     let _ = reply.send(response);
