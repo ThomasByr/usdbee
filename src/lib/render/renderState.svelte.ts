@@ -14,6 +14,7 @@ import * as THREE from "three";
 import type { MaterialInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
 import { decodeGeometryBatch } from "./geometryDecoder";
+import { loadCachedTexture, clearTextureCache } from "./textureCache";
 import {
   applyPackedGeometryInPlace,
   applyTransform,
@@ -82,13 +83,17 @@ const fetchers: SceneFetchers = {
       stageId: stageState.activeStageId,
       path,
     }).catch(() => null),
-  loadTexture: (filePath: string, onError: () => void) => {
-    try {
-      return textureLoader.load(convertFileSrc(filePath), undefined, undefined, onError);
-    } catch {
-      return null;
-    }
-  },
+  // F6: one decode per file — loadCachedTexture loads through the shared
+  // loader on the first reference and clones for every later one.
+  loadTexture: (filePath: string, onError: () => void) =>
+    loadCachedTexture(filePath, onError, (onLoad, onImageError) => {
+      const url = convertFileSrc(filePath);
+      try {
+        return textureLoader.load(url, onLoad, undefined, onImageError);
+      } catch {
+        return null;
+      }
+    }),
 };
 
 // Spec §8 pin: the seconds -> time-code conversion lives ONLY in this
@@ -498,6 +503,10 @@ export const renderState = $state({
 
   async loadWork(startTime: number, fallbackColors: FallbackDependencies): Promise<THREE.Group | null> {
     const generation = ++loadGeneration;
+    // F6: the texture memo covers ONE load — the old scene's clones were
+    // disposed by whoever dropped it, so the images they shared go too
+    // before the new build repopulates the memo.
+    clearTextureCache();
     sceneLoading = true;
     queuedTime = null;
     // A rebuild supersedes any queued edit refresh (the load re-fetches

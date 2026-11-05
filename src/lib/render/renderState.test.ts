@@ -12,8 +12,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { invoke } from "@tauri-apps/api/core";
 import * as THREE from "three";
 import { advanceStageTime, renderState, snapToTimeCodes, toAbsoluteTime, toPlayheadOffset } from "./renderState.svelte";
-import { GEOMETRY_BATCH_SIZE } from "./sceneBuilder";
-import type { RenderNode } from "../stage/types";
+import { disposeScene, GEOMETRY_BATCH_SIZE } from "./sceneBuilder";
+import type { MaterialInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
 
 const mockedInvoke = vi.mocked(invoke);
@@ -1235,6 +1235,69 @@ describe("renderState.refreshAfterEdit", () => {
     // The queued refresh ran behind the active step (same slot, same
     // generation guards) — two manifest fetches total.
     expect(calls).toBe(2);
+  });
+});
+
+// --- F6: texture dedup ------------------------------------------------
+
+function texturedMaterial(name: string): MaterialInfo {
+  return {
+    name,
+    surface: {
+      diffuse_color: null,
+      roughness: null,
+      metallic: null,
+      opacity: null,
+      normal: null,
+      textures: [{ input: "diffuseColor", file_path: "/Textures/texgen_7.png", st_primvar: "st" }],
+    },
+  };
+}
+
+function meshNode(path: string): RenderNode {
+  return node({ path, name: path.slice(1), type_name: "Mesh", has_geometry: true });
+}
+
+describe("texture dedup", () => {
+  it("decodes a file shared by two materials once", async () => {
+    // The bike references 92 texture inputs across 10 files: the same image
+    // must not be decoded and uploaded once per material.
+    const loadSpy = vi
+      .spyOn(THREE.TextureLoader.prototype, "load")
+      .mockImplementation(() => new THREE.Texture());
+    try {
+      const prims = [meshNode("/Scene/A"), meshNode("/Scene/B")];
+      mockedInvoke.mockImplementation((async (cmd: string, args: any) => {
+        if (cmd === "get_scene_manifest") return prims;
+        if (cmd === "get_geometry_batch") return packedBatchGeometry(1, args.paths.length);
+        if (cmd === "get_material_data") return texturedMaterial(args.path);
+        if (cmd === "get_time_codes") return [];
+        throw new Error(`unexpected command: ${cmd}`);
+      }) as any);
+
+      const group = await renderState.loadRenderScene();
+      const maps: THREE.MeshPhysicalMaterial[] = [];
+      group!.traverse((object) => {
+        if ((object as THREE.Mesh).isMesh)
+          maps.push((object as THREE.Mesh).material as THREE.MeshPhysicalMaterial);
+      });
+
+      expect(loadSpy).toHaveBeenCalledOnce();
+      expect(maps).toHaveLength(2);
+      // Distinct texture objects (per-slot transforms stay independent) over
+      // one shared, decoded image.
+      expect(maps[0]!.map).not.toBe(maps[1]!.map);
+      expect(maps[0]!.map!.source).toBe(maps[1]!.map!.source);
+
+      // Scene disposal must not leave the memo behind: the next build loads
+      // the file again instead of serving a texture from the closed scene.
+      disposeScene(group!);
+      const rebuilt = await renderState.loadRenderScene();
+      expect(rebuilt).toBeTruthy();
+      expect(loadSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      loadSpy.mockRestore();
+    }
   });
 });
 
