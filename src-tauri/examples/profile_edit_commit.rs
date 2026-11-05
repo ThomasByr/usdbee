@@ -93,6 +93,9 @@ fn main() {
         .open(&open_path, extraction_dir.is_some(), None, extraction_dir.as_deref())
         .unwrap();
     let sender = state.sender(info.stage_id).unwrap();
+    // Reads sample the playback time; the gizmo authors at DEFAULT time
+    // (`gizmoCommit.svelte.ts` passes `undefined` for op values), so the
+    // writes below pass None.
     let time = Some(info.start_time_code);
 
     // Pick the first geometry prim from the manifest as the drag target.
@@ -151,7 +154,7 @@ fn main() {
         &target_path,
         "xformOp:translate",
         &ValuePayload { r#type: translate.value.r#type.clone(), data: serde_json::json!(moved), truncated: None, count: None },
-        time,
+        None,
     )
     .expect("translate write");
     let lock_write = step("lock: write translate op", start, "");
@@ -192,7 +195,7 @@ fn main() {
         &target_path,
         "xformOp:rotateXYZ",
         &ValuePayload { r#type: "float3".into(), data: serde_json::json!([0.0, 0.0, 90.0]), truncated: None, count: None },
-        time,
+        None,
     )
     .expect("rotate write");
     lock_b += step("lock: write rotateXYZ op", start, "");
