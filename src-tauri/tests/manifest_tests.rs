@@ -13,9 +13,10 @@ use common::spawn_stage_owner;
 use openusd::gf;
 
 use usdbee_lib::stage::{
-    open_stage, request_geometry_data, request_material_data, request_scene_manifest,
-    serialize_render_manifest, RenderNode,
+    open_stage, request_geometry_data, request_material_data, request_redo, request_scene_manifest,
+    request_set_attribute_value, request_undo, serialize_render_manifest, RenderNode,
 };
+use usdbee_lib::values::ValuePayload;
 
 fn open_fixture_manifest(name: &str, time: Option<f64>) -> Vec<RenderNode> {
     let (stage, info) = open_stage(&fixture(name)).expect("stage should open");
@@ -60,6 +61,15 @@ fn assert_absent(nodes: &[RenderNode], path: &str) {
         "{} must not be in the manifest",
         path
     );
+}
+
+fn payload(r#type: &str, data: serde_json::Value) -> ValuePayload {
+    ValuePayload {
+        r#type: r#type.to_string(),
+        data,
+        truncated: None,
+        count: None,
+    }
 }
 
 fn assert_matrix_close(expected: &[f64; 16], actual: &[f64; 16]) {
@@ -545,4 +555,94 @@ fn warm_manifest_resamples_sampled_visibility_per_time() {
         !expect(&back_to_one, "/Scene/Toggle").visible,
         "re-samples at t=1"
     );
+}
+
+#[test]
+fn warm_manifest_uses_identity_for_unsupported_xform_ops() {
+    // xforms.usda: /World/Unsupported authors `xformOp:flip`, an op the
+    // evaluator refuses, so `local_transform` answers None and the skeleton
+    // caches no static transform. At the walk's use site that None becomes the
+    // identity matrix, on the cold and on the warm call alike: an unsupported
+    // chain never yields a partial or wrong matrix.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "xforms.usda");
+
+    let identity = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    let cold = request_scene_manifest(&state.sender(), None).expect("manifest should serialize");
+    let warm =
+        request_scene_manifest(&state.sender(), Some(1.0)).expect("manifest should serialize");
+    for nodes in [&cold, &warm] {
+        assert_matrix_close(&identity, &expect(nodes, "/World/Unsupported").transform);
+    }
+
+    // The parent still holds its own authored translate: the identity is the
+    // child's local matrix, not a flattened world one.
+    assert_eq!(expect(&cold, "/World").transform[12], 10.0);
+}
+
+#[test]
+fn editing_a_static_prims_transform_and_visibility_clears_the_skeleton() {
+    // xforms.usda: /World/StaticXform authors a static translate and a static
+    // `visibility = "invisible"`, so both values live in the skeleton cache.
+    // The edit, the undo and the redo must each drop that cache: a stale
+    // skeleton serves the pre-edit values forever.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "xforms.usda");
+
+    // Warm the cache and pin the authored values.
+    let original =
+        request_scene_manifest(&state.sender(), None).expect("manifest should serialize");
+    let before = expect(&original, "/World/StaticXform").clone();
+    assert_eq!(before.transform[12], 4.0, "authored translate");
+    assert!(!before.visible, "authored visibility");
+
+    // The same authoring path the editing commands use.
+    request_set_attribute_value(
+        &state.sender(),
+        "/World/StaticXform",
+        "xformOp:translate",
+        &payload("double3", serde_json::json!([0, 3, 0])),
+        None,
+    )
+    .expect("authoring the translate should succeed");
+    request_set_attribute_value(
+        &state.sender(),
+        "/World/StaticXform",
+        "visibility",
+        &payload("token", serde_json::json!("inherited")),
+        None,
+    )
+    .expect("authoring visibility should succeed");
+
+    let edited = request_scene_manifest(&state.sender(), None).expect("manifest should serialize");
+    let after = expect(&edited, "/World/StaticXform").clone();
+    assert_eq!(
+        after.transform[12], 0.0,
+        "the new translate, not the cached one"
+    );
+    assert_eq!(
+        after.transform[13], 3.0,
+        "the new translate, not the cached one"
+    );
+    assert!(after.visible, "the new visibility, not the cached one");
+
+    // One undo entry per authored attribute.
+    for _ in 0..2 {
+        assert!(request_undo(&state.sender()).expect("undo should succeed"));
+    }
+    let reverted =
+        request_scene_manifest(&state.sender(), None).expect("manifest should serialize");
+    let node = expect(&reverted, "/World/StaticXform");
+    assert_matrix_close(&before.transform, &node.transform);
+    assert_eq!(node.visible, before.visible, "undo restores the visibility");
+
+    for _ in 0..2 {
+        assert!(request_redo(&state.sender()).expect("redo should succeed"));
+    }
+    let redone = request_scene_manifest(&state.sender(), None).expect("manifest should serialize");
+    let node = expect(&redone, "/World/StaticXform");
+    assert_matrix_close(&after.transform, &node.transform);
+    assert_eq!(node.visible, after.visible, "redo restores the edit");
 }

@@ -64,6 +64,13 @@ def Xform "World"
         uniform token[] xformOpOrder = ["xformOp:flip"]
     }
 
+    def Xform "StaticXform"
+    {
+        double3 xformOp:translate = (4, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        token visibility = "invisible"
+    }
+
     def Xform "TimeOrient"
     {
         quatd xformOp:orient.timeSamples = {

@@ -2310,9 +2310,13 @@ const PROTO_PREFIX: &str = "__proto_";
 /// time-independent in the Task 1 profile: type names, computed purpose
 /// (no time parameter), material bindings (relationships), the geometry flag
 /// and the authored time-samples audit (`samples_scene_motion`) re-derive
-/// identically for every call at every time. Visibility values, transform
-/// evaluation and the PointInstancer instance arrays are NOT here — they
-/// sample the requested time and stay per-call.
+/// identically for every call at every time. Transforms and visibility are
+/// cached here too, but only their static half (`static_transform`,
+/// `static_visible`): when nothing on the render path samples them, the value
+/// is evaluated once and reused for every queried time. Animated or
+/// unevaluable ones stay `None` and the walks sample them per call. The
+/// PointInstancer instance arrays are never cached — they always sample the
+/// requested time.
 struct SkeletonFacts {
     prim: openusd::usd::Prim,
     type_name: String,
@@ -2361,9 +2365,11 @@ enum SkeletonKind {
 }
 
 /// The stage-open manifest cache: every time-independent manifest fact,
-/// built once, held in the stage-owner loop state, cleared on `Open` like
-/// the MeshCache. Each manifest call samples ONLY the per-time data
-/// (transforms, visibility, instancer arrays) against the cached skeleton.
+/// built once, held in the stage-owner loop state, cleared on `Open` and on
+/// every successful mutation like the MeshCache. Each manifest call reuses
+/// the cached `static_transform` and `static_visible` and samples ONLY what
+/// the build proved time-dependent: animated transforms, animated visibility
+/// and the PointInstancer instance arrays.
 struct ManifestSkeleton {
     /// Facts for every prim reachable from the pseudo-root plus every
     /// prototype subtree discovered along the way (native prototype roots
