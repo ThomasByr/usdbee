@@ -2325,6 +2325,12 @@ struct SkeletonFacts {
     imageable: bool,
     self_moves: bool,
     self_deforms: bool,
+    /// The prim's local matrix when `self_moves` is false: nothing in its
+    /// xformOpOrder samples, so one evaluation (at default time) holds for
+    /// the whole stage. Only a static transform is cached — `None` also
+    /// covers "not cacheable" (a moving prim) and `Unsupported`, so the
+    /// walks fall back to a per-call `local_transform`.
+    static_transform: Option<gf::Matrix4d>,
     /// The prim's overall `visibility` attr carries authored time samples:
     /// the per-call visibility read flips across times, so the delta walk
     /// must include the prim even when nothing else about it samples.
@@ -2504,6 +2510,13 @@ fn build_facts(
     };
     let (self_moves, self_deforms, self_visibility_animated) =
         samples_scene_motion(prim, renders, imageable, skel_memo, sampled_attrs)?;
+    // A prim whose transform samples nothing keeps one local matrix for the
+    // whole stage: evaluate it once here rather than on every walk step.
+    let static_transform = if self_moves {
+        None
+    } else {
+        local_transform(prim, None)?
+    };
 
     let path = prim.path().to_string();
     skeleton.facts.insert(
@@ -2516,6 +2529,7 @@ fn build_facts(
             imageable,
             self_moves,
             self_deforms,
+            static_transform,
             self_visibility_animated,
             material: if renders {
                 direct_material(stage, prim)
@@ -3041,7 +3055,10 @@ fn render_children(
             .ok_or_else(|| format!("cached manifest facts missing for prim {}", child))?;
         let deforms = facts.renders_geometry && facts.self_deforms;
         let moves = ancestor_moves || facts.self_moves;
-        let transform = local_transform(&facts.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
+        let transform = match facts.static_transform {
+            Some(matrix) => matrix,
+            None => local_transform(&facts.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY),
+        };
         if facts.excluded {
             // Purpose proxy/guide is a cached fact: the prim itself emits
             // nothing and its descendants flatten up with its transform
@@ -3120,7 +3137,10 @@ fn delta_children(
             continue;
         }
         let moves = ancestor_moves || facts.self_moves;
-        let transform = local_transform(&facts.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
+        let transform = match facts.static_transform {
+            Some(matrix) => matrix,
+            None => local_transform(&facts.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY),
+        };
         if facts.excluded {
             // The lift composes this transform into the descendants' local
             // matrices, so its own motion forces the whole level along; its
