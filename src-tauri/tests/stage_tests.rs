@@ -6,7 +6,8 @@ mod common;
 use common::spawn_stage_owner;
 use usdbee_lib::parser::{resolve_remote_dependencies, scan_dependencies};
 use usdbee_lib::stage::{
-    open_stage, request_stage_details, request_stage_tree, serialize_tree, PrimNode,
+    open_stage, request_set_variant_selection, request_stage_details, request_stage_tree,
+    serialize_tree, PrimNode, StageRequest,
 };
 use usdbee_lib::values::PrimDetails;
 
@@ -343,6 +344,68 @@ fn reopening_opens_a_fresh_stage_with_its_own_tree() {
     // The first stage is untouched by the second open.
     let first_again = request_stage_tree(&first_sender).expect("first tree again");
     assert_eq!(first_again[0].path, "/World");
+}
+
+#[test]
+fn repeated_tree_requests_in_one_epoch_return_the_same_tree() {
+    // The tree is served from the epoch cache after the first build, so a
+    // second fetch must answer with the same nodes (a rebuild that walked
+    // differently would show up as a mismatch here).
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "scene_with_ref.usda");
+    let first = serde_json::to_value(tree_via_owner(&state)).expect("first tree to JSON");
+    let second = serde_json::to_value(tree_via_owner(&state)).expect("second tree to JSON");
+
+    assert_eq!(first, second);
+}
+
+#[test]
+fn structural_edit_clears_the_cached_tree() {
+    // Invalidation pin: the fetch above caches the tree, and the variant
+    // switch after it changes the composed children, so a stale cache would
+    // answer with the red variant's `/Prop/Shape`.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "variants.usda");
+    let before = tree_via_owner(&state);
+    assert_eq!(before[0].children.len(), 1);
+    assert_eq!(before[0].children[0].path, "/Prop/Shape");
+
+    request_set_variant_selection(&state.sender(), "/Prop", "color", Some("green"))
+        .expect("selecting the green variant should succeed");
+
+    let after = tree_via_owner(&state);
+    assert_eq!(after[0].children.len(), 1, "got: {:?}", after[0].children);
+    assert_eq!(after[0].children[0].path, "/Prop/GreenShape");
+}
+
+#[test]
+fn reopening_the_owner_with_another_stage_replaces_the_cached_tree() {
+    // Open clears pin: a second Open on the SAME owner thread must drop the
+    // previous stage's cached tree, not serve it for the new stage.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "basic.usda");
+    let first = tree_via_owner(&state);
+    assert_eq!(first[0].path, "/World");
+
+    let (reply, response) = std::sync::mpsc::channel();
+    state
+        .sender()
+        .send(StageRequest::Open {
+            path: fixture("variants.usda"),
+            is_usdz: false,
+            source_usdz: None,
+            extraction_dir: None,
+            reply,
+        })
+        .expect("the open request reaches the owner");
+    response
+        .recv()
+        .expect("the owner replies to the open")
+        .expect("the second stage opens");
+
+    let second = tree_via_owner(&state);
+    assert_eq!(second.len(), 1, "got: {:?}", second);
+    assert_eq!(second[0].path, "/Prop", "the new stage's tree");
 }
 
 #[test]

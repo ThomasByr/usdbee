@@ -539,6 +539,9 @@ fn spawn_stage_owner_for(
         // The time-independent manifest skeleton, built by the first manifest
         // call after an open; cleared on Open (like the geometry MeshCache).
         let mut manifest_skeleton: Option<ManifestSkeleton> = None;
+        // The built prim tree, riding the same epoch as the skeleton: cleared
+        // wherever the skeleton is (Open and every committed mutation).
+        let mut stage_tree: Option<Vec<PrimNode>> = None;
         // One entry per committed user mutation, mirroring the UndoStage's
         // bounded stack (both cap at UNDO_DEPTH; the crate evicts the oldest
         // transaction, the journal pops its front). `redo_stack` holds the
@@ -603,6 +606,7 @@ fn spawn_stage_owner_for(
                             source_usdz.or_else(|| direct_usdz.then_some(path.clone()));
                         mesh_cache.clear();
                         manifest_skeleton = None;
+                        stage_tree = None;
                         resolve_memo.clear();
                         dirty_ledger.clear();
                         undo_journal.clear();
@@ -622,8 +626,19 @@ fn spawn_stage_owner_for(
                 }
                 StageRequest::GetTree { reply } => {
                     let response = match current_stage {
-                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| serialize_tree(stage)))
-                            .unwrap_or_else(panic_reply),
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            if stage_tree.is_none() {
+                                // A failed build leaves the cache empty, so
+                                // the next call retries instead of serving it.
+                                stage_tree = Some(serialize_tree(stage)?);
+                            }
+                            match stage_tree {
+                                // Clone-on-reply: the cache keeps its own copy.
+                                Some(ref tree) => Ok(tree.clone()),
+                                None => Err("stage tree build failed".to_string()),
+                            }
+                        }))
+                        .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
                     };
                     let _ = reply.send(response);
@@ -811,6 +826,7 @@ fn spawn_stage_owner_for(
                                 &sink,
                                 &mut mesh_cache,
                                 &mut manifest_skeleton,
+                                &mut stage_tree,
                                 &mut resolve_memo,
                                 &path,
                             );
@@ -847,6 +863,7 @@ fn spawn_stage_owner_for(
                                 &sink,
                                 &mut mesh_cache,
                                 &mut manifest_skeleton,
+                                &mut stage_tree,
                                 &mut resolve_memo,
                                 &path,
                             );
@@ -888,6 +905,7 @@ fn spawn_stage_owner_for(
                                 &sink,
                                 &mut mesh_cache,
                                 &mut manifest_skeleton,
+                                &mut stage_tree,
                                 &mut resolve_memo,
                                 &path,
                             );
@@ -923,6 +941,7 @@ fn spawn_stage_owner_for(
                                 &sink,
                                 &mut mesh_cache,
                                 &mut manifest_skeleton,
+                                &mut stage_tree,
                                 &mut resolve_memo,
                                 &path,
                             );
@@ -1023,6 +1042,7 @@ fn spawn_stage_owner_for(
                                     &sink,
                                     &mut mesh_cache,
                                     &mut manifest_skeleton,
+                                    &mut stage_tree,
                                     &mut resolve_memo,
                                     &path,
                                 );
@@ -1037,6 +1057,7 @@ fn spawn_stage_owner_for(
                                     &sink,
                                     &mut mesh_cache,
                                     &mut manifest_skeleton,
+                                    &mut stage_tree,
                                     &mut resolve_memo,
                                     "/",
                                 );
@@ -1081,6 +1102,7 @@ fn spawn_stage_owner_for(
                                     &sink,
                                     &mut mesh_cache,
                                     &mut manifest_skeleton,
+                                    &mut stage_tree,
                                     &mut resolve_memo,
                                     &path,
                                 );
@@ -1148,6 +1170,7 @@ fn spawn_stage_owner_for(
                                 &sink,
                                 &mut mesh_cache,
                                 &mut manifest_skeleton,
+                                &mut stage_tree,
                                 &mut resolve_memo,
                                 "/",
                             );
@@ -1534,7 +1557,7 @@ fn author_prim_metadata(
 }
 
 /// Post-success bookkeeping every mutation arm shares: the coarse cache
-/// clears (tessellations, manifest skeleton, resolve memo) and the
+/// clears (tessellations, manifest skeleton, prim tree, resolve memo) and the
 /// `usd-stage-changed` emission for the edited path. The dirty mark and the
 /// undo journal live in `record_user_mutation` (mutation arms) or the
 /// undo/redo arms' own ledger updates.
@@ -1542,6 +1565,7 @@ fn after_mutation(
     sink: &Option<StageChangeSink>,
     mesh_cache: &mut MeshCache,
     manifest_skeleton: &mut Option<ManifestSkeleton>,
+    stage_tree: &mut Option<Vec<PrimNode>>,
     resolve_memo: &mut ResolveMemo,
     path: &str,
 ) {
@@ -1552,6 +1576,8 @@ fn after_mutation(
     // types/purpose/bindings, so the whole manifest skeleton rebuilds;
     // fine until edits become frequent
     *manifest_skeleton = None;
+    // The tree may change shape too (variant switches, authored children).
+    *stage_tree = None;
     resolve_memo.clear();
     if let Some(sink) = sink {
         let edited = path.to_string();
