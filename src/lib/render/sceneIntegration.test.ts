@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import * as THREE from "three";
 import { invoke } from "@tauri-apps/api/core";
-import { installPlaybackDriver, loadRustScene, resetLoadedScene } from "./sceneIntegration";
+import { installPlaybackDriver, integrateScene, loadRustScene, resetLoadedScene } from "./sceneIntegration";
 import { loadCachedTexture } from "./textureCache";
 import { renderState } from "./renderState.svelte";
 import { loadOrchestrator } from "../state/loadOrchestrator.svelte";
@@ -24,11 +24,42 @@ function viewer(): RendererKit {
   return { animationProgress: 0 } as unknown as RendererKit;
 }
 
+// Minimal kit that integrateScene can drive: camera/controls framing plus
+// the helpers it recreates.
+function integrateKit(): RendererKit {
+  return {
+    scene: new THREE.Scene(),
+    camera: new THREE.PerspectiveCamera(),
+    controls: {
+      target: new THREE.Vector3(),
+      reset: vi.fn(),
+      update: vi.fn(),
+      saveState: vi.fn(),
+    },
+    gridHelper: null,
+    boxHelper: null,
+    dirLight: null,
+    showGrid: false,
+    showBoundingBox: false,
+    selectedNode: null,
+    animationProgress: 0,
+  } as unknown as RendererKit;
+}
+
+function namedGroup(path: string): { group: THREE.Group; node: THREE.Object3D } {
+  const group = new THREE.Group();
+  const node = new THREE.Object3D();
+  node.name = path;
+  group.add(node);
+  return { group, node };
+}
+
 beforeEach(() => {
   mockedInvoke.mockReset();
   renderState.time = null;
   renderState.status = "idle";
   renderState.timeCodes = [];
+  stageState.selectedPath = null;
   stageState.stageInfo = {
     start_time_code: 0,
     end_time_code: 24,
@@ -146,6 +177,35 @@ describe("resetLoadedScene", () => {
     expect(scene.children).not.toContain(group);
     loadCachedTexture("/Textures/texgen_7.png", () => {}, load);
     expect(load).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("integrateScene", () => {
+  it("re-binds the selection to the rebuilt subtree", () => {
+    // A rebuild disposes the old group: without the re-bind the selection
+    // box and the gizmo keep tracking a detached node until the user
+    // clicks the prim's tree row again.
+    const kit = integrateKit();
+    const old = namedGroup("/Scene/Shape");
+    kit.selectedNode = old.node;
+    stageState.selectedPath = "/Scene/Shape";
+
+    const rebuilt = namedGroup("/Scene/Shape");
+    integrateScene(kit, rebuilt.group);
+
+    expect(kit.selectedNode).toBe(rebuilt.node);
+  });
+
+  it("clears the selection when the rebuilt subtree lost the selected path", () => {
+    const kit = integrateKit();
+    const old = namedGroup("/Scene/Gone");
+    kit.selectedNode = old.node;
+    stageState.selectedPath = "/Scene/Gone";
+
+    const rebuilt = namedGroup("/Scene/Shape");
+    integrateScene(kit, rebuilt.group);
+
+    expect(kit.selectedNode).toBeNull();
   });
 });
 

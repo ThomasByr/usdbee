@@ -33,6 +33,11 @@ export function resetLoadedScene(viewer: RendererKit) {
 // meshes, no USD cameras).
 export function integrateScene(viewer: RendererKit, group: THREE.Group) {
   viewer.loadedGroup = group;
+  // A rebuild replaces every node: re-bind the selection to the new subtree
+  // or the gizmo and selection box would track a detached node (the old
+  // pre-rebind bug where clicking the tree row "fixed" them).
+  const selected = stageState.selectedPath;
+  viewer.selectedNode = selected ? (group.getObjectByName(selected) ?? null) : null;
   // Stand Z-up stages upright (rotation must land before the fit below).
   group.rotation.x = upAxisRotation(stageState.stageInfo?.up_axis ?? "Y");
   let tris = 0;
