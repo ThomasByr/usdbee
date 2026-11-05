@@ -322,6 +322,7 @@ async function updateSceneDelta(
   nodes: RenderNode[],
   time: number,
   isStale: () => boolean,
+  prefetched: Map<string, ArrayBuffer | Uint8Array | null> | null = null,
 ): Promise<void> {
   const present = new Set<string>();
   const collect = (entries: RenderNode[]) => {
@@ -331,7 +332,7 @@ async function updateSceneDelta(
     }
   };
   collect(nodes);
-  await updateNodes(nodes, currentPaths, time, isStale, null, null, null);
+  await updateNodes(nodes, currentPaths, time, isStale, null, null, prefetched);
   if (isStale()) return;
   for (const [path, object] of currentPaths) {
     if ((object as THREE.InstancedMesh).isInstancedMesh && !present.has(path)) {
@@ -341,6 +342,43 @@ async function updateSceneDelta(
         object.parent!.visible = false;
     }
   }
+}
+
+// Geometry for the animated prims of ONE pose (F5): fetched through the
+// BATCH command in bounded sequential slices, so a pose costs one round
+// trip per slice instead of one per prim. Deduped — a shared prototype
+// subtree can repeat a path. A failed batch command leaves the map
+// unfilled and updateNodes falls back to per-path fetches, fail-soft.
+async function prefetchAnimatedGeometry(
+  manifest: RenderNode[],
+  time: number,
+  isStale: () => boolean,
+): Promise<Map<string, ArrayBuffer | Uint8Array | null>> {
+  const prefetched = new Map<string, ArrayBuffer | Uint8Array | null>();
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  const walk = (nodes: RenderNode[]) => {
+    for (const node of nodes) {
+      if (node.has_geometry && node.geometry_animated && !seen.has(node.path)) {
+        seen.add(node.path);
+        paths.push(node.path);
+      }
+      walk(node.children);
+    }
+  };
+  walk(manifest);
+  for (let start = 0; start < paths.length; start += GEOMETRY_BATCH_SIZE) {
+    const slice = paths.slice(start, start + GEOMETRY_BATCH_SIZE);
+    try {
+      const slots = await fetchers.getGeometryBatch!(slice, time);
+      if (isStale()) return prefetched;
+      slice.forEach((path, slot) => prefetched.set(path, slots[slot] ?? null));
+    } catch (e) {
+      console.warn("usdbee: playback geometry batch failed; fetching per path:", e);
+      break;
+    }
+  }
+  return prefetched;
 }
 
 // Geometry for the edit-refreshed prims, fetched through the BATCH
@@ -560,7 +598,12 @@ export const renderState = $state({
           time,
         });
         if (generation !== loadGeneration || currentGroup !== group) return;
-        await updateSceneDelta(manifest, time, () => generation !== loadGeneration || currentGroup !== group);
+        const isStale = () => generation !== loadGeneration || currentGroup !== group;
+        // One batched prefetch per pose: updateNodes consumes these slots
+        // instead of paying a round trip per animated prim.
+        const prefetched = await prefetchAnimatedGeometry(manifest, time, isStale);
+        if (isStale()) return;
+        await updateSceneDelta(manifest, time, isStale, prefetched);
       } catch (e) {
         if (generation === loadGeneration) {
           // Keep the last good scene on screen; surface why.
