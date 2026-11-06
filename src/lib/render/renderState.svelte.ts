@@ -85,6 +85,7 @@ export function getTimeCodes(stageId: number): Promise<number[]> {
 // so decode with a cursor rather than typed-array views.
 const poseText = new TextDecoder();
 
+// shortcut: the merged pose batches ALL geometry_animated prims with no slot cap (the old 32-slice batching is gone), upgrade to a capped batch + per-prim fallback when a stage with more than ~32 deforming prims appears.
 function decodeAnimatedPose(payload: ArrayBuffer): AnimatedPose {
   const view = new DataView(payload);
   let offset = 0;
@@ -107,6 +108,9 @@ function decodeAnimatedPose(payload: ArrayBuffer): AnimatedPose {
   for (let count = u32(); count > 0; count--) paths.push(poseText.decode(bytes(u32())));
   align();
   const slots = decodeGeometryBatch(new Uint8Array(payload, offset));
+  if (slots.length !== paths.length) {
+    throw new Error(`pose slot count ${slots.length} does not match path count ${paths.length}`);
+  }
   const prefetched: AnimatedPose["prefetched"] = new Map();
   paths.forEach((path, slot) => prefetched.set(path, slots[slot] ?? null));
   return { manifest, prefetched };

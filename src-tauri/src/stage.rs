@@ -4129,6 +4129,7 @@ fn animated_geometry_paths(nodes: &[RenderNode]) -> Vec<String> {
 /// (`align4`), so the batch tail — and every slot inside it — starts 4-byte
 /// aligned and the frontend can view it in place. The path list is the batch's
 /// slot order, so nothing on the client re-derives the walk.
+/// shortcut: the merged pose batches ALL geometry_animated prims with no slot cap (the old 32-slice batching is gone), upgrade to a capped batch + per-prim fallback when a stage with more than ~32 deforming prims appears.
 fn frame_pose(manifest: Vec<u8>, paths: Vec<String>, mut batch: Vec<u8>) -> Vec<u8> {
     let paths_len: usize = paths.iter().map(|path| 4 + path.len()).sum();
     let mut out = Vec::with_capacity(16 + manifest.len() + paths_len + batch.len());
