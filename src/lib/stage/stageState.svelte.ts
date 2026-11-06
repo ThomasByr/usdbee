@@ -94,22 +94,28 @@ export const stageState = $state({
   // fresh payload lands: nulling them unmounts the inspector body, the panel
   // collapses and the tree's scroll position is lost. Stale details are safe
   // because every consumer keys off `details.path`, and the generation guard
-  // below drops out-of-order responses.
-  async selectPrim(path: string): Promise<void> {
+  // below drops out-of-order responses. Resolves true when this call's
+  // assignment applied (still the current generation when the payload
+  // lands), false when a younger selection superseded it — the awaited
+  // refresh paths re-run on false so they never read a stale payload.
+  async selectPrim(path: string): Promise<boolean> {
     const generation = ++selectionGeneration;
     this.selectedPath = path;
-    if (this.status !== "ready") return;
+    if (this.status !== "ready") return true;
     try {
       const details = await invoke<PrimDetails>("get_prim_details", {
         stageId: this.activeStageId,
         path,
         time: renderState.time,
       });
-      if (generation === selectionGeneration) this.details = details;
+      if (generation !== selectionGeneration) return false;
+      this.details = details;
+      return true;
     } catch (e) {
-      if (generation !== selectionGeneration) return;
+      if (generation !== selectionGeneration) return false;
       this.details = null;
       this.error = typeof e === "string" ? e : String(e);
+      return true;
     }
   },
 
@@ -121,9 +127,11 @@ export const stageState = $state({
     this.details = null;
   },
 
-  // Awaitable: every overlapping caller resolves only once the fetch it
-  // coalesced into (and its one queued re-run) has landed, so a caller that
-  // needs fresh details — the gizmo commit — never reads the stale payload.
+  // Awaitable: every overlapping caller resolves only once a fetch whose
+  // assignment actually applied has landed, so a caller that needs fresh
+  // details — the gizmo commit — never reads a stale payload. A fetch
+  // superseded by a younger selectPrim (the page's per-event re-select)
+  // drops its assignment, so the loop re-issues until one applies.
   refreshSelectedDetails(): Promise<void> {
     if (detailsRefreshInFlight) {
       detailsRefreshPending = true;
@@ -134,9 +142,12 @@ export const stageState = $state({
       try {
         do {
           detailsRefreshPending = false;
-          const path = this.selectedPath;
-          if (!path) return;
-          await this.selectPrim(path);
+          let applied = false;
+          while (!applied) {
+            const path = this.selectedPath;
+            if (!path) return;
+            applied = await this.selectPrim(path);
+          }
         } while (detailsRefreshPending);
       } finally {
         detailsRefreshInFlight = null;

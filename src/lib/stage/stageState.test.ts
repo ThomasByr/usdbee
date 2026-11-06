@@ -132,6 +132,43 @@ describe("stageState", () => {
     expect(mockedInvoke).toHaveBeenLastCalledWith("get_prim_details", { stageId: 7, path: "/A", time: 9 });
   });
 
+  it("re-runs an awaited refresh when a younger selectPrim superseded its fetch", async () => {
+    // The supersede hole: the awaited refresh's payload assignment is
+    // dropped when a younger selectPrim is in flight, but the promise
+    // still resolved — the gizmo commit then authored from stale details
+    // (the rotate-reverted-the-move bug). The refresh must re-run until
+    // an assignment actually applies.
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    await stageState.loadStage("/a.usda");
+    const old = { path: "/A", marker: "old" } as never;
+    mockedInvoke.mockResolvedValueOnce(old);
+    await stageState.selectPrim("/A");
+    expect(stageState.details).toEqual(old);
+
+    const mine = deferred<never>();
+    const other = deferred<never>();
+    const fresh = { path: "/A", marker: "fresh" } as never;
+    mockedInvoke
+      .mockReturnValueOnce(mine.promise)
+      .mockReturnValueOnce(other.promise)
+      .mockResolvedValueOnce(fresh);
+
+    const refresh = stageState.refreshSelectedDetails();
+    void stageState.selectPrim("/A");
+
+    mine.resolve({ path: "/A", marker: "mine" } as never);
+    await refresh;
+    // mine was superseded and dropped: the re-run's payload must be what
+    // an awaiting caller sees, not the pre-refresh `old`.
+    expect(stageState.details).toEqual(fresh);
+
+    other.resolve({ path: "/A", marker: "other" } as never);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    // The younger selectPrim's generation is now older than the re-run's:
+    // its late payload must not overwrite the fresh details.
+    expect(stageState.details).toEqual(fresh);
+  });
+
   it("does not resolve an overlapping refresh before fresh details land", async () => {
     // The gizmo commit awaits this refresh before reading the local
     // transform: a caller landing mid-flight must not get the promise of a
