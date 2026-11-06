@@ -827,6 +827,9 @@ fn undo_and_redo_of_a_sampled_xform_edit_reach_the_manifest() {
 // slots as the two commands it replaces — otherwise a playback step would
 // apply a different pose on the two paths, and a slot swapped with its
 // neighbour would paint the wrong mesh on the wrong prim.
+// The reference side runs the owner-thread request functions directly
+// (`request_animated_manifest` + `request_geometry_batch`), the same path the
+// profile probes drive; no IPC command wraps the delta manifest any more.
 
 fn animated_geometry_paths(nodes: &[RenderNode], paths: &mut Vec<String>) {
     for node in nodes {

@@ -229,11 +229,7 @@
           );
           if (viewer.showBoundingBox && viewer.loadedGroup)
             viewer.sceneBox.setFromObject(viewer.loadedGroup, true);
-          if (viewer.selectedNode && viewer.selectionHelper) {
-            // @ts-ignore
-            viewer.selectionHelper.box.setFromObject(viewer.selectedNode, false);
-            viewer.selectionHelper.visible = !viewer.selectionHelper.box.isEmpty();
-          }
+          viewer.refreshSelectionBox();
         }}
         onmousedown={() => (viewer.isDraggingAnim = true)}
         onmouseup={() => (viewer.isDraggingAnim = false)}

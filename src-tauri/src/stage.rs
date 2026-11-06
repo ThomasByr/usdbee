@@ -4265,17 +4265,9 @@ pub fn request_scene_manifest(
         .map_err(|_| "stage service unavailable".to_string())?
 }
 
-// Playback/scrub path: only the time-dependent nodes at `time`. Loads and
-// edit refreshes keep the full manifest above.
-#[tauri::command]
-pub async fn get_animated_manifest(
-    stage_id: u64,
-    time: Option<f64>,
-    state: tauri::State<'_, StageState>,
-) -> Result<Vec<RenderNode>, String> {
-    request_animated_manifest(&state.sender(stage_id)?, time)
-}
-
+// Owner-thread entry for the delta manifest. Kept as the two-command
+// reference the pose-equivalence test and the profile probes drive; playback
+// itself merged into `get_animated_pose`, so no IPC command wraps this.
 pub fn request_animated_manifest(
     sender: &mpsc::Sender<StageRequest>,
     time: Option<f64>,

@@ -262,7 +262,9 @@ export class RendererKit {
       // Playback nulls the animated geometry's bounding box on every pose, so
       // a per-frame setFromObject walks every vertex of the selection in dev
       // JS. Keep the box from before the play started; pause, paused scrub and
-      // a selection change refresh it.
+      // a selection change refresh it. The gizmo anchor reads this same box
+      // (onFrameGizmoSync below), so the frozen box also parks the knob at the
+      // play-start center until drag start refreshes and re-anchors it.
       if (!this.isPlayingAnim || this.selectedNode !== this.boxNode) this.refreshSelectionBox();
     } else if (this.selectionHelper) {
       // A cleared selection must take the last-drawn box with it.

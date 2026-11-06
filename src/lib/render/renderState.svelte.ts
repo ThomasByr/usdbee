@@ -650,12 +650,18 @@ export const renderState = $state({
     activeTimeStep = (async () => {
       try {
         // Frame-pacing diagnostics: how long one pose costs end to end.
-        performance.mark("usdbee:pose:issued");
+        // Optional-called: a webview without User Timing must lose the
+        // diagnostic, not the pose (this try is what keeps the last good
+        // scene). Cleared right after measuring so a long playback does not
+        // grow the timeline.
+        performance.mark?.("usdbee:pose:issued");
         const { manifest, prefetched } = await fetchers.getAnimatedPose!(time);
         if (generation !== loadGeneration || currentGroup !== group) return;
         const isStale = () => generation !== loadGeneration || currentGroup !== group;
         await updateSceneDelta(manifest, time, isStale, prefetched);
-        performance.measure("usdbee:pose", "usdbee:pose:issued");
+        performance.measure?.("usdbee:pose", "usdbee:pose:issued");
+        performance.clearMarks?.("usdbee:pose:issued");
+        performance.clearMeasures?.("usdbee:pose");
       } catch (e) {
         if (generation === loadGeneration) {
           // Keep the last good scene on screen; surface why.
