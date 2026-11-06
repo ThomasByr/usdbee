@@ -4,9 +4,11 @@ import { stageState } from "$lib/stage/stageState.svelte";
 import {
   renderState,
   advanceStageTime,
+  prefetchPoses,
   snapToTimeCodes,
   toPlayheadOffset,
 } from "$lib/render/renderState.svelte";
+import { invalidatePoseBuffer } from "$lib/render/posePrefetch";
 import { disposeScene } from "$lib/render/sceneBuilder";
 import { clearTextureCache } from "$lib/render/textureCache";
 import { upAxisRotation } from "$lib/stage/upAxis";
@@ -196,6 +198,9 @@ export function installPlaybackDriver(viewer: RendererKit) {
       continuous = renderState.time ?? start;
       frameDiag.setRate(tcps);
       frameDiag.onPoseResync();
+      // A scrub, load or edit refresh wrote the playhead: the poses looked
+      // ahead from the one we just left no longer follow it.
+      invalidatePoseBuffer();
     }
     // advanceStageTime without codes keeps the advanced value continuous
     // (wrap past end, clamp at start); the query snaps and clamps itself.
@@ -206,6 +211,11 @@ export function installPlaybackDriver(viewer: RendererKit) {
       frameDiag.onPose(performance.now(), frameDiag.codeIndex(renderState.timeCodes, next));
     lastEmitted = next;
     void renderState.setStageTime(next);
+    // Look ahead while playing: below K/2 buffered poses, one background batch
+    // of the next K authored codes. The frame itself is already stepped above,
+    // so a cold buffer costs a few single-pose steps, never a stall. Only a
+    // live scene looks ahead — a failed load has nothing to fill.
+    if (renderState.status === "ready") void prefetchPoses(next);
   };
 }
 

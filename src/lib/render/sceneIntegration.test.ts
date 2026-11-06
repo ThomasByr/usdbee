@@ -21,6 +21,7 @@ import {
 } from "./sceneIntegration";
 import { loadCachedTexture } from "./textureCache";
 import { renderState } from "./renderState.svelte";
+import { invalidatePoseBuffer, poseCoverage, takePose } from "./posePrefetch";
 import * as frameDiag from "../perf/frameDiag";
 import { loadOrchestrator } from "../state/loadOrchestrator.svelte";
 import { stageState } from "../stage/stageState.svelte";
@@ -214,6 +215,118 @@ describe("installPlaybackDriver", () => {
     v.onAdvanceTime!(1 / 60);
 
     expect(renderState.time).toBeGreaterThan(10);
+  });
+});
+
+// One pose frame with no geometry slots (`[]` manifest, no paths), the
+// smallest legal frame for the batch decode.
+function emptyPoseFrame(): ArrayBuffer {
+  const manifest = new TextEncoder().encode("[]");
+  const buffer = new ArrayBuffer(24);
+  const view = new DataView(buffer);
+  view.setUint32(0, manifest.length, true);
+  new Uint8Array(buffer).set(manifest, 4);
+  view.setUint32(8, 0, true); // path count
+  view.setUint32(12, 0x55534247, true); // geometry batch magic
+  view.setUint32(16, 1, true); // batch version
+  view.setUint32(20, 0, true); // slot count
+  return buffer;
+}
+
+function poseBatch(count: number): ArrayBuffer {
+  const frame = new Uint8Array(emptyPoseFrame());
+  const buffer = new ArrayBuffer(4 + count * frame.byteLength);
+  new DataView(buffer).setUint32(0, count, true);
+  for (let i = 0; i < count; i++) {
+    new Uint8Array(buffer, 4 + i * frame.byteLength, frame.byteLength).set(frame);
+  }
+  return buffer;
+}
+
+describe("installPlaybackDriver pose prefetch", () => {
+  const codes = Array.from({ length: 60 }, (_, i) => i);
+
+  function batchCalls() {
+    return mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_animated_pose_batch");
+  }
+
+  // The batch fill lands in microtasks: a macrotask flushes all of them.
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  beforeEach(() => {
+    invalidatePoseBuffer();
+    renderState.timeCodes = codes;
+    renderState.time = 0;
+    renderState.status = "ready";
+    stageState.stageInfo = {
+      start_time_code: 0,
+      end_time_code: 60,
+      time_codes_per_second: 24,
+    } as any;
+    mockedInvoke.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === "get_animated_pose_batch") return poseBatch(args.times.length);
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+  });
+
+  it("issues one batch for the look-ahead instead of one pose per frame", async () => {
+    const v = viewer();
+    installPlaybackDriver(v);
+
+    v.onAdvanceTime!(1 / 24); // presents code 1
+    await flush(); // the batch lands and fills the buffer
+    for (let i = 0; i < 5; i++) v.onAdvanceTime!(1 / 24);
+
+    expect(batchCalls()).toHaveLength(1);
+    expect(batchCalls()[0]![1]).toEqual({
+      stageId: stageState.activeStageId,
+      times: codes.slice(2, 2 + 12),
+    });
+  });
+
+  it("refills only once the window drops below half", async () => {
+    const v = viewer();
+    installPlaybackDriver(v);
+    v.onAdvanceTime!(1 / 24); // presents code 1: cold look-ahead, one batch
+    await flush(); // ...which lands and fills 2..13
+    expect(batchCalls()).toHaveLength(1);
+
+    // The playhead consumes the window (a loaded scene takes these); at half
+    // full the look-ahead is still enough.
+    for (let code = 2; code <= 7; code++) {
+      takePose(code);
+      v.onAdvanceTime!(1 / 24);
+    }
+    expect(poseCoverage(7)).toBe(6);
+    expect(batchCalls()).toHaveLength(1);
+
+    takePose(8);
+    v.onAdvanceTime!(1 / 24); // coverage 5: exactly one refill
+
+    expect(batchCalls()).toHaveLength(2);
+    expect(batchCalls()[1]![1]).toEqual({
+      stageId: stageState.activeStageId,
+      times: codes.slice(9, 9 + 12),
+    });
+  });
+
+  it("drops the look-ahead when the playhead is written externally", async () => {
+    const v = viewer();
+    installPlaybackDriver(v);
+    v.onAdvanceTime!(1 / 24); // presents code 1
+    await flush(); // batch fills 2..13
+    expect(poseCoverage(1)).toBe(12);
+    expect(batchCalls()).toHaveLength(1);
+
+    renderState.time = 30; // simulated scrub
+    v.onAdvanceTime!(0);
+
+    expect(poseCoverage(30)).toBe(0);
+    expect(batchCalls()).toHaveLength(2);
+    expect(batchCalls()[1]![1]).toEqual({
+      stageId: stageState.activeStageId,
+      times: codes.slice(31, 31 + 12),
+    });
   });
 });
 

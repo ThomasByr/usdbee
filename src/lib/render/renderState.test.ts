@@ -13,11 +13,14 @@ import { invoke } from "@tauri-apps/api/core";
 import * as THREE from "three";
 import {
   advanceStageTime,
+  prefetchPoses,
   renderState,
   snapToTimeCodes,
   toAbsoluteTime,
   toPlayheadOffset,
 } from "./renderState.svelte";
+import { poseCoverage, invalidatePoseBuffer } from "./posePrefetch";
+import * as frameDiag from "../perf/frameDiag";
 import { disposeScene, GEOMETRY_BATCH_SIZE } from "./sceneBuilder";
 import type { MaterialInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
@@ -197,6 +200,11 @@ function mockIpc(manifest: () => RenderNode[] | Promise<RenderNode[]>) {
       const nodes = await manifest();
       return poseFrame(nodes, packedBatchGeometry(1, animatedPaths(nodes).length));
     }
+    if (cmd === "get_animated_pose_batch") {
+      const nodes = await manifest();
+      const frame = poseFrame(nodes, packedBatchGeometry(1, animatedPaths(nodes).length));
+      return poseBatch(args.times.map(() => frame));
+    }
     if (cmd === "get_time_codes") return [];
     if (cmd === "get_geometry_data") return packedGeometry();
     if (cmd === "get_geometry_batch") return packedBatchGeometry(1, args.paths.length);
@@ -249,6 +257,20 @@ function poseFrame(nodes: RenderNode[], batch: ArrayBuffer, paths = animatedPath
     offset += 4 + path.length;
   }
   bytes.set(new Uint8Array(batch), head);
+  return buffer;
+}
+
+// The batch pose response (stage.rs::frame_poses): u32 frame count then the
+// frames back to back.
+function poseBatch(frames: ArrayBuffer[]): ArrayBuffer {
+  const buffer = new ArrayBuffer(4 + frames.reduce((sum, frame) => sum + frame.byteLength, 0));
+  const view = new DataView(buffer);
+  view.setUint32(0, frames.length, true);
+  let offset = 4;
+  for (const frame of frames) {
+    new Uint8Array(buffer, offset, frame.byteLength).set(new Uint8Array(frame));
+    offset += frame.byteLength;
+  }
   return buffer;
 }
 
@@ -1555,5 +1577,157 @@ describe("playhead offset conversion", () => {
     expect(toAbsoluteTime(toPlayheadOffset(17, 10), 10)).toBe(17);
     // A zero-start stage is unaffected by the convention.
     expect(toAbsoluteTime(5, 0)).toBe(5);
+  });
+});
+
+// --- Round 4 Task 2: pose batch prefetch --------------------------------
+
+describe("renderState pose prefetch", () => {
+  const codes = Array.from({ length: 20 }, (_, i) => i);
+
+  function wobbleAt(x: number): RenderNode {
+    return node({
+      path: "/Scene/Wobble",
+      name: "Wobble",
+      type_name: "Mesh",
+      has_geometry: true,
+      animated: true,
+      geometry_animated: true,
+      transform: translate(x),
+    });
+  }
+
+  async function loadedScene() {
+    const group = await loadScene(() => [wobbleAt(1)]);
+    // The code list is cached by a detached fetch: let it land, then author it.
+    await Promise.resolve();
+    renderState.timeCodes = codes;
+    return group;
+  }
+
+  beforeEach(() => {
+    invalidatePoseBuffer();
+    frameDiag.reset();
+  });
+
+  it("applies a prefetched pose with no invoke and a zero dispatch", async () => {
+    const group = await loadedScene();
+    let poseX = 3;
+    mockIpc(() => [wobbleAt(poseX)]);
+    mockedInvoke.mockClear();
+
+    await prefetchPoses(1);
+
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose_batch", {
+      stageId: stageState.activeStageId,
+      times: codes.slice(2, 2 + 12),
+    });
+
+    poseX = 7; // a live fetch would carry this pose: the buffer's must win
+    mockedInvoke.mockClear();
+    frameDiag.reset();
+    await renderState.setStageTime(5);
+
+    const wrapper = group.children.find((child) => child.name === "/Scene/Wobble")!;
+    expect(wrapper.matrix.elements[12]).toBe(3);
+    expect(mockedInvoke).not.toHaveBeenCalled();
+    const diag = frameDiag.snapshot();
+    expect(diag.applyN).toBe(1);
+    expect(diag.dispatchN).toBe(1);
+    expect(diag.dispatchP50).toBe(0);
+  });
+
+  it("steps the single-pose path for a code the batch did not cover", async () => {
+    const group = await loadedScene();
+    mockIpc(() => [wobbleAt(4)]);
+    await prefetchPoses(1);
+    mockedInvoke.mockClear();
+
+    await renderState.setStageTime(19); // outside the looked-ahead window
+
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose", {
+      stageId: stageState.activeStageId,
+      time: 19,
+    });
+    const wrapper = group.children.find((child) => child.name === "/Scene/Wobble")!;
+    expect(wrapper.matrix.elements[12]).toBe(4);
+  });
+
+  it("drops the look-ahead on a stage load", async () => {
+    await loadedScene();
+    mockIpc(() => [wobbleAt(3)]);
+    await prefetchPoses(1);
+    expect(poseCoverage(1)).toBe(12);
+
+    mockIpc(() => [wobbleAt(2)]);
+    await renderState.loadRenderScene();
+    await Promise.resolve();
+
+    expect(poseCoverage(1)).toBe(0);
+    mockedInvoke.mockClear();
+    await renderState.setStageTime(5);
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose", {
+      stageId: stageState.activeStageId,
+      time: 5,
+    });
+  });
+
+  it("drops the look-ahead on an edit refresh", async () => {
+    await loadedScene();
+    mockIpc(() => [wobbleAt(3)]);
+    await prefetchPoses(1);
+    expect(poseCoverage(1)).toBe(12);
+
+    await renderState.refreshAfterEdit(["/Scene/Wobble"]);
+
+    expect(poseCoverage(1)).toBe(0);
+    mockedInvoke.mockClear();
+    await renderState.setStageTime(5);
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose", {
+      stageId: stageState.activeStageId,
+      time: 5,
+    });
+  });
+
+  it("drops a batch that lands after a load (never mis-slots it)", async () => {
+    await loadedScene();
+    const pending = deferred<ArrayBuffer>();
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_animated_pose_batch") return pending.promise;
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    const batch = prefetchPoses(1);
+    mockIpc(() => [wobbleAt(2)]);
+    await renderState.loadRenderScene();
+    pending.resolve(
+      poseBatch(codes.slice(2, 14).map(() => poseFrame([wobbleAt(9)], packedBatchGeometry(1, 1)))),
+    );
+    await batch;
+
+    expect(poseCoverage(1)).toBe(0);
+    expect(renderState.error).toBeNull();
+  });
+
+  it("falls back to per-pose stepping when the batch fails", async () => {
+    const group = await loadedScene();
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_animated_pose_batch") throw "batch blew up";
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    await prefetchPoses(1);
+
+    expect(poseCoverage(1)).toBe(0);
+    mockIpc(() => [wobbleAt(4)]);
+    mockedInvoke.mockClear();
+    await renderState.setStageTime(5);
+
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose", {
+      stageId: stageState.activeStageId,
+      time: 5,
+    });
+    const wrapper = group.children.find((child) => child.name === "/Scene/Wobble")!;
+    expect(wrapper.matrix.elements[12]).toBe(4);
   });
 });

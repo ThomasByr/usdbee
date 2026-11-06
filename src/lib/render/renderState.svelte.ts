@@ -14,6 +14,8 @@ import * as THREE from "three";
 import type { MaterialInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
 import { decodeGeometryBatch, decodeMaterialBatch } from "./geometryDecoder";
+import { decodeAnimatedPose, decodeAnimatedPoseBatch } from "./poseDecoder";
+import { claimPoseBatch, invalidatePoseBuffer, settlePoseBatch, takePose } from "./posePrefetch";
 import { loadCachedTexture, clearTextureCache } from "./textureCache";
 import * as frameDiag from "../perf/frameDiag";
 import { requestShadowUpdate } from "../three/shadowMapUpdate";
@@ -83,41 +85,7 @@ export function getTimeCodes(stageId: number): Promise<number[]> {
 
 // One pose response (stage.rs::frame_pose): u32 manifest length + JSON, u32
 // path count + length-prefixed paths (slot order), then the geometry batch
-// frame. Prefixes carry the true byte lengths and the padding is implicit,
-// so decode with a cursor rather than typed-array views.
-const poseText = new TextDecoder();
-
-// shortcut: the merged pose batches ALL geometry_animated prims with no slot cap (the old 32-slice batching is gone), upgrade to a capped batch + per-prim fallback when a stage with more than ~32 deforming prims appears.
-function decodeAnimatedPose(payload: ArrayBuffer): AnimatedPose {
-  const view = new DataView(payload);
-  let offset = 0;
-  const u32 = () => {
-    const value = view.getUint32(offset, true);
-    offset += 4;
-    return value;
-  };
-  const bytes = (length: number) => {
-    const slice = new Uint8Array(payload, offset, length);
-    offset += length;
-    return slice;
-  };
-  const align = () => {
-    offset = (offset + 3) & ~3;
-  };
-  const manifest = JSON.parse(poseText.decode(bytes(u32()))) as RenderNode[];
-  align();
-  const paths: string[] = [];
-  for (let count = u32(); count > 0; count--) paths.push(poseText.decode(bytes(u32())));
-  align();
-  const slots = decodeGeometryBatch(new Uint8Array(payload, offset));
-  if (slots.length !== paths.length) {
-    throw new Error(`pose slot count ${slots.length} does not match path count ${paths.length}`);
-  }
-  const prefetched: AnimatedPose["prefetched"] = new Map();
-  paths.forEach((path, slot) => prefetched.set(path, slots[slot] ?? null));
-  return { manifest, prefetched };
-}
-
+// frame. Decoded by poseDecoder (pure, unit-tested apart from the invoke).
 const fetchers: SceneFetchers = {
   getGeometry: (path: string, time = renderState.time) =>
     invoke<ArrayBuffer>("get_geometry_data", {
@@ -141,6 +109,17 @@ const fetchers: SceneFetchers = {
   getAnimatedPose: async (time: number) =>
     decodeAnimatedPose(
       await invoke<ArrayBuffer>("get_animated_pose", { stageId: stageState.activeStageId, time }),
+    ),
+  // Playback prefetch: K poses in ONE invoke, each frame the exact bytes the
+  // single command returns for that code. The backend omits out-of-stage
+  // times, so the decoder asserts frame_count === times.length.
+  getAnimatedPoseBatch: async (times: number[]) =>
+    decodeAnimatedPoseBatch(
+      await invoke<ArrayBuffer>("get_animated_pose_batch", {
+        stageId: stageState.activeStageId,
+        times,
+      }),
+      times,
     ),
   getMaterial: (path: string) =>
     invoke<MaterialInfo>("get_material_data", {
@@ -198,6 +177,23 @@ export function advanceStageTime(
   const next = current + deltaSeconds * timeCodesPerSecond;
   const wrapped = next > end ? start + ((next - start) % span) : next;
   return Math.min(Math.max(snapToTimeCodes(wrapped, codes), start), end);
+}
+
+// Playback look-ahead (round 4): with fewer than half the K looked-ahead poses
+// still buffered ahead of `code`, ONE background batch fetches the next K
+// authored codes. Detached on purpose — the frame is stepped either way and
+// the fill lands later; a stale or failed batch is simply dropped.
+export function prefetchPoses(code: number): Promise<void> {
+  const claimed = claimPoseBatch(renderState.timeCodes, code);
+  if (!claimed) return Promise.resolve();
+  return (async () => {
+    try {
+      settlePoseBatch(claimed, await fetchers.getAnimatedPoseBatch!(claimed.times));
+    } catch (e) {
+      settlePoseBatch(claimed, null);
+      console.warn("usdbee: pose prefetch failed; stepping one pose at a time:", e);
+    }
+  })();
 }
 
 // Playhead-unit convention (review fix): the UI layer — timeline slider,
@@ -551,6 +547,9 @@ export const renderState = $state({
     // disposed by whoever dropped it, so the images they shared go too
     // before the new build repopulates the memo.
     clearTextureCache();
+    // A new scene invalidates every looked-ahead pose (other stage, other
+    // codes): an in-flight batch lands stale and is dropped.
+    invalidatePoseBuffer();
     sceneLoading = true;
     queuedTime = null;
     // A rebuild supersedes any queued edit refresh (the load re-fetches
@@ -661,10 +660,24 @@ export const renderState = $state({
         // grow the timeline.
         performance.mark?.("usdbee:pose:issued");
         const poseStartedAt = performance.now();
-        const { manifest, prefetched } = await fetchers.getAnimatedPose!(time);
-        // Dispatch half of the span: the bytes are in hand, decode+apply follow.
-        frameDiag.onPoseDispatched(performance.now() - poseStartedAt);
-        if (generation !== loadGeneration || currentGroup !== group) return;
+        // A prefetched pose is already decoded: this step only applies it, so
+        // the pose costs decode+apply (< 1 ms) instead of a transport round
+        // trip. A miss takes the single-pose path below, unchanged.
+        const buffered = takePose(time);
+        let manifest: RenderNode[];
+        let prefetched: AnimatedPose["prefetched"] | null = null;
+        if (buffered) {
+          frameDiag.onPoseDispatched(0);
+          manifest = buffered.manifest;
+          prefetched = buffered.prefetched;
+        } else {
+          const pose = await fetchers.getAnimatedPose!(time);
+          // Dispatch half of the span: the bytes are in hand, decode+apply follow.
+          frameDiag.onPoseDispatched(performance.now() - poseStartedAt);
+          if (generation !== loadGeneration || currentGroup !== group) return;
+          manifest = pose.manifest;
+          prefetched = pose.prefetched;
+        }
         const isStale = () => generation !== loadGeneration || currentGroup !== group;
         await updateSceneDelta(manifest, time, isStale, prefetched);
         performance.measure?.("usdbee:pose", "usdbee:pose:issued");
@@ -722,6 +735,8 @@ export const renderState = $state({
     const generation = ++loadGeneration;
     const group = currentGroup;
     if (!group) return Promise.resolve(false);
+    // An edit changes geometry: buffered poses carry the pre-edit prims.
+    invalidatePoseBuffer();
     timeStepInFlight = true;
     activeTimeStep = (async (): Promise<boolean> => {
       try {
