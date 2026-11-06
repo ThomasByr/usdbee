@@ -208,6 +208,16 @@ async function handleGizmoCommit(commit: GizmoCommit) {
     await stageState.refreshSelectedDetails();
     const details = stageState.details;
     if (!details?.local_transform || !details.world_transform) return;
+    // Defense in depth against a stale details payload: the commit math
+    // must run on the same stack the drag started from, or the op writes
+    // could delete ops from xformOpOrder (the rotate-revert bug). The
+    // fresh world matrix must still match the drag-start pose.
+    const freshWorld = gizmoWorldMatrix(viewer);
+    if (!freshWorld || !matricesClose(freshWorld.toArray() as number[], commit.startWorld.toArray())) {
+      gizmoPolicy.error = "selection changed during the drag; edit not applied";
+      if (gizmo) reattach(gizmo, viewer, commit.endWorld);
+      return;
+    }
     const local = new THREE.Matrix4().fromArray(details.local_transform);
     const target = local
       .clone()

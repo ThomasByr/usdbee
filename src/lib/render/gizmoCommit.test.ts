@@ -228,6 +228,38 @@ describe("syncGizmoAnchor", () => {
   });
 });
 
+describe("stale stack guard", () => {
+  it("refuses a commit whose details went stale mid-drag", async () => {
+    // The drag started at world 5, but the details still describe the
+    // pre-drag pose (a superseded refresh): authoring from them would
+    // write ops computed against the wrong stack. No writes may land.
+    const viewer = makeViewer(new THREE.Object3D());
+    stage.details = detailsAt(1);
+    initGizmo(viewer, () => "translate");
+
+    await commit(5, 8);
+
+    expect(stage.setAttributeValue).not.toHaveBeenCalled();
+    expect(stage.refreshAfterEdit).not.toHaveBeenCalled();
+    expect(gizmoPolicy.error).toContain("selection changed during the drag");
+  });
+
+  it("commits when the fresh details match the drag-start pose", async () => {
+    const viewer = makeViewer(new THREE.Object3D());
+    stage.details = detailsAt(5);
+    initGizmo(viewer, () => "translate");
+
+    await commit(5, 8);
+
+    expect(gizmoPolicy.error).toBeNull();
+    expect(stage.setAttributeValue).toHaveBeenCalledWith(
+      "xformOp:translate",
+      { type: "double3", data: [8, 0, 0] },
+      undefined,
+    );
+  });
+});
+
 describe("pause on gizmo drag start", () => {
   it("pauses playback and commits from fresh details", async () => {
     const viewer = makeViewer(new THREE.Object3D());
