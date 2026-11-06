@@ -11,6 +11,7 @@ import {
   onPoseApplied,
   onRaf,
   onRender,
+  onPoseResync,
   onThrottled,
   percentile,
   reset,
@@ -137,6 +138,18 @@ describe("pose pacing", () => {
     expect(snapshot().droppedCodes).toBe(0);
   });
 
+  it("does not record a pause as a pose gap", () => {
+    onPose(0, 0);
+    onPose(41.7, 1);
+    // 3 s paused, then playback resumes: the present after the resume must
+    // not inherit the pause as one inter-pose interval.
+    onPoseResync();
+    onPose(3041.7, 2);
+    const s = snapshot();
+    expect(s.poseN).toBe(1);
+    expect(s.poseMax).toBe(41.7);
+  });
+
   it("keeps the gap but judges no codes when the stage has none", () => {
     onPose(0, -1);
     onPose(41.7, -1);
@@ -187,7 +200,6 @@ describe("snapshot", () => {
     expect(Object.keys(empty).sort()).toEqual(KEYS);
     expect(empty.rafN).toBe(0);
     expect(empty.rafP50).toBe(0);
-    expect(empty.expectedPoseMs).toBe(0);
 
     onRaf(1);
     onRaf(17);
@@ -205,7 +217,6 @@ describe("snapshot", () => {
     onPose(0, 0);
     onPose(41.7, 3);
     onPoseApplied(4);
-    setRate(24);
     reset();
     const s = snapshot();
     expect(s.rafN).toBe(0);
@@ -213,6 +224,17 @@ describe("snapshot", () => {
     expect(s.poseN).toBe(0);
     expect(s.droppedCodes).toBe(0);
     expect(s.applyN).toBe(0);
-    expect(s.tcps).toBe(0);
+  });
+
+  it("keeps the stage rate across a reset, so a reset while paused still reports it", () => {
+    // The rate is a stage property, not a measurement: reset happens
+    // mid-session (a reset-then-play run never resyncs the driver).
+    setRate(24);
+    onPose(0, 0);
+    reset();
+    const s = snapshot();
+    expect(s.tcps).toBe(24);
+    expect(s.expectedPoseMs).toBeCloseTo(41.67, 2);
+    expect(s.poseN).toBe(0);
   });
 });

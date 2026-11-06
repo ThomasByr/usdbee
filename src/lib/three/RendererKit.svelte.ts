@@ -191,10 +191,12 @@ export class RendererKit {
 
     frameDiag.onRender(time);
 
-    // Play -> pause is the only place the numbers get printed.
+    // Play -> pause prints; pause -> play drops the paused span so it is
+    // not recorded as one giant pose interval.
     if (this.wasPlaying !== this.isPlayingAnim) {
       this.wasPlaying = this.isPlayingAnim;
-      if (!this.isPlayingAnim) console.table(frameDiag.snapshot());
+      if (this.isPlayingAnim) frameDiag.onPoseResync();
+      else console.table(frameDiag.snapshot());
     }
 
     if (this.onAdvanceTime && !this.isDraggingAnim) {

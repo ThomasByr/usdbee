@@ -11,6 +11,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 
 import * as THREE from "three";
 import { RendererKit } from "./RendererKit.svelte";
+import * as frameDiag from "$lib/perf/frameDiag";
 
 function makeKit(playing: boolean) {
   const kit = new RendererKit();
@@ -89,6 +90,26 @@ describe("selection box during playback", () => {
 
     expect(setFromObject).toHaveBeenCalledTimes(1);
     expect(boxOf(kit).min.x).toBeCloseTo(-3.5, 6);
+  });
+
+  it("starts a fresh pose chain on the frame where playback resumes", () => {
+    const { kit } = makeKit(true);
+    const table = vi.spyOn(console, "table").mockImplementation(() => {});
+    frameDiag.reset();
+    frameDiag.onPose(0, 0);
+
+    kit.isPlayingAnim = false;
+    frame(kit); // play -> pause: the dump, not a chain reset
+    kit.isPlayingAnim = true;
+    frame(kit); // pause -> play: the resume must not inherit the pause
+
+    frameDiag.onPose(3000, 1); // first present after a 3 s pause
+    frameDiag.onPose(3041.7, 2);
+
+    const diag = frameDiag.snapshot();
+    expect(diag.poseN).toBe(1);
+    expect(diag.poseMax).toBe(41.7);
+    table.mockRestore();
   });
 
   it("rescans once when the selection changes during playback", () => {

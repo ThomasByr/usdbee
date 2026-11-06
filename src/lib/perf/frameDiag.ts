@@ -145,9 +145,10 @@ export function setRate(tcps: number) {
   rate = tcps;
 }
 
-/** The playhead jumped (scrub, load, edit): the next code starts a new chain. */
+/** The playhead jumped (scrub, load, pause): the next present starts a new chain. */
 export function onPoseResync() {
   lastCodeIdx = -1;
+  lastPoseAt = -1;
 }
 
 export function reset() {
@@ -161,7 +162,7 @@ export function reset() {
   lastCodeIdx = -1;
   throttled = 0;
   dropped = 0;
-  rate = 0;
+  // `rate` is a stage property, not a measurement: keep it.
 }
 
 // Two decimals keeps a pasted snapshot readable without losing a ms.
