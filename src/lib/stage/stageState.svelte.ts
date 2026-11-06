@@ -4,6 +4,10 @@ import { renderState } from "../render/renderState.svelte";
 
 let loadGeneration = 0;
 let selectionGeneration = 0;
+// The load generation the cached `tree` belongs to (-1 = not fetched yet) and
+// the one ensureTree fetch in flight, so concurrent panel mounts share it.
+let treeEpoch = -1;
+let treeInFlight: { generation: number; promise: Promise<void> } | null = null;
 // In-flight guard for refreshSelectedDetails: one details refresh runs
 // at a time; triggers landing mid-flight re-run once with the latest
 // state instead of piling IPC requests onto the stage actor. The promise
@@ -18,6 +22,9 @@ export const stageState = $state({
   // command invoke carries it.
   activeStageId: 0,
   tree: [] as PrimNode[],
+  // A failed get_stage_tree, surfaced by the panel without touching the
+  // stage's own status: the viewport does not depend on the tree.
+  treeError: null as string | null,
   selectedPath: null as string | null,
   details: null as PrimDetails | null,
   status: "idle" as "idle" | "loading" | "ready" | "error",
@@ -30,21 +37,20 @@ export const stageState = $state({
     this.error = null;
     this.selectedPath = null;
     this.details = null;
+    this.tree = [];
+    this.treeError = null;
     try {
       const stageInfo = await invoke<StageInfo>("open_usd_path", { path });
       if (generation !== loadGeneration) return;
       this.activeStageId = stageInfo.stage_id;
       this.stageInfo = stageInfo;
-      const tree = await invoke<PrimNode[]>("get_stage_tree", {
-        stageId: this.activeStageId,
-      });
-      if (generation !== loadGeneration) return;
-      this.tree = tree;
+      // The prim tree is lazy (ensureTree): opening must not pay the walk.
       this.status = "ready";
     } catch (e) {
       if (generation !== loadGeneration) return;
       this.stageInfo = null;
       this.tree = [];
+      this.treeError = null;
       this.status = "error";
       this.error = typeof e === "string" ? e : String(e);
     }
@@ -59,6 +65,7 @@ export const stageState = $state({
     this.activeStageId = 0;
     this.stageInfo = null;
     this.tree = [];
+    this.treeError = null;
     this.selectedPath = null;
     this.details = null;
     this.status = "idle";
@@ -66,28 +73,48 @@ export const stageState = $state({
   },
 
   async adoptOpenedStage(stageInfo: StageInfo): Promise<void> {
-    const generation = ++loadGeneration;
+    // The epoch bump invalidates the previous stage's lazily-cached tree.
+    ++loadGeneration;
     selectionGeneration += 1;
     this.activeStageId = stageInfo.stage_id;
     this.stageInfo = stageInfo;
     this.tree = [];
+    this.treeError = null;
     this.selectedPath = null;
     this.details = null;
-    this.status = "loading";
+    this.status = "ready";
     this.error = null;
-    try {
-      const tree = await invoke<PrimNode[]>("get_stage_tree", {
-        stageId: this.activeStageId,
-      });
-      if (generation !== loadGeneration) return;
-      this.tree = tree;
-      this.status = "ready";
-    } catch (e) {
-      if (generation !== loadGeneration) return;
-      this.tree = [];
-      this.status = "error";
-      this.error = typeof e === "string" ? e : String(e);
-    }
+  },
+
+  // Lazy prim tree: the open flow never walks the stage for it. The panel
+  // that renders `tree` asks for it here — one fetch per stage epoch, shared
+  // by concurrent callers, dropped when the epoch moved on meanwhile.
+  async ensureTree(): Promise<void> {
+    if (this.status !== "ready") return;
+    const generation = loadGeneration;
+    if (treeEpoch === generation) return;
+    if (treeInFlight?.generation === generation) return treeInFlight.promise;
+    const stageId = this.activeStageId;
+    const inFlight = { generation, promise: Promise.resolve() };
+    treeInFlight = inFlight;
+    inFlight.promise = (async () => {
+      try {
+        const tree = await invoke<PrimNode[]>("get_stage_tree", { stageId });
+        if (generation !== loadGeneration) return;
+        this.tree = tree;
+        this.treeError = null;
+        treeEpoch = generation;
+      } catch (e) {
+        if (generation !== loadGeneration) return;
+        // Fail-soft: the viewport does not depend on the tree, and the next
+        // call retries (treeEpoch stays unset).
+        console.warn("usdbee: get_stage_tree failed:", e);
+        this.treeError = typeof e === "string" ? e : String(e);
+      } finally {
+        if (treeInFlight === inFlight) treeInFlight = null;
+      }
+    })();
+    return inFlight.promise;
   },
 
   // The previous prim's details stay visible (no `details = null`) until the
@@ -178,24 +205,26 @@ export const stageState = $state({
   },
 
   // The usd-stage-changed refresh: an edit can reshape the composed tree
-  // (metadata, variants), so the tree refetches and the current prim
-  // re-selects for fresh details. The viewport manifest rebuild lives in
-  // the page (it owns scene integration).
+  // (metadata, variants), so a tree the panel already has is refetched and
+  // the current prim re-selects for fresh details. A stage whose tree was
+  // never opened stays lazy — an edit must not drag it into the prim walk.
+  // The viewport manifest rebuild lives in the page (it owns scene
+  // integration).
   async refreshAfterEdit(): Promise<void> {
     if (this.status !== "ready") return;
     const generation = loadGeneration;
     const stageId = this.activeStageId;
     const selectedPath = this.selectedPath;
-    const isCurrent = () =>
-      generation === loadGeneration && stageId === this.activeStageId && this.status === "ready";
-    try {
-      const tree = await invoke<PrimNode[]>("get_stage_tree", { stageId });
-      if (!isCurrent()) return;
-      this.tree = tree;
-    } catch {
-      // The tree refetch is best-effort; details still refresh below.
-      if (!isCurrent()) return;
+    // A fetch already in flight caches the PRE-edit tree under its epoch,
+    // so let it land first, then invalidate that epoch and walk again.
+    const inFlight = treeInFlight;
+    const fetched = treeEpoch === generation || inFlight?.generation === generation;
+    if (inFlight?.generation === generation) await inFlight.promise;
+    if (fetched && generation === loadGeneration) {
+      treeEpoch = -1;
+      await this.ensureTree();
     }
+    if (stageId !== this.activeStageId) return;
     if (selectedPath && this.selectedPath === selectedPath) await this.selectPrim(selectedPath);
   },
 

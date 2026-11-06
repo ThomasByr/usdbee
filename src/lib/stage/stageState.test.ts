@@ -25,7 +25,7 @@ beforeEach(() => {
 
 describe("stageState", () => {
   it("clears the previous selection before the second load, even if it rejects", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]).mockResolvedValueOnce(details);
+    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce(details);
     await stageState.loadStage("/a.usda");
     await stageState.selectPrim("/A");
 
@@ -43,7 +43,7 @@ describe("stageState", () => {
   });
 
   it("passes the current render time when fetching selected prim details", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     renderState.time = 12.5;
     mockedInvoke.mockResolvedValueOnce(details);
@@ -54,7 +54,7 @@ describe("stageState", () => {
   });
 
   it("refreshes the current selection at a newer render time", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     renderState.time = 1;
     mockedInvoke.mockResolvedValueOnce(details);
@@ -74,7 +74,7 @@ describe("stageState", () => {
     // work; while the playhead auto-advances it must not run at all, and
     // pausing refreshes exactly once. Values go stale during playback
     // by design.
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     mockedInvoke.mockResolvedValueOnce(details);
     await stageState.selectPrim("/A");
@@ -95,7 +95,7 @@ describe("stageState", () => {
   });
 
   it("refreshes on selection change even while the per-step refresh is suppressed", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     stageState.onStageTimeChanged(true); // playback suppression on
     mockedInvoke.mockClear();
@@ -114,7 +114,7 @@ describe("stageState", () => {
     // In-flight guard: rapid triggers (scrub storms while paused) must not
     // pile get_prim_details requests onto the stage actor; the last
     // dropped trigger re-runs once the active refresh lands.
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     mockedInvoke.mockResolvedValueOnce(details);
     await stageState.selectPrim("/A");
@@ -138,7 +138,7 @@ describe("stageState", () => {
     // still resolved — the gizmo commit then authored from stale details
     // (the rotate-reverted-the-move bug). The refresh must re-run until
     // an assignment actually applies.
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     const old = { path: "/A", marker: "old" } as never;
     mockedInvoke.mockResolvedValueOnce(old);
@@ -173,7 +173,7 @@ describe("stageState", () => {
     // The gizmo commit awaits this refresh before reading the local
     // transform: a caller landing mid-flight must not get the promise of a
     // dedupe no-op, or it authors its delta from the stale payload.
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     const stale = { path: "/A", marker: "stale" } as never;
     mockedInvoke.mockResolvedValueOnce(stale);
@@ -196,25 +196,24 @@ describe("stageState", () => {
     expect(stageState.details).toEqual(fresh);
   });
 
-  it("adopts a backend-opened stage without composing it again", async () => {
-    mockedInvoke.mockResolvedValueOnce([]);
-
+  it("adopts a backend-opened stage without any backend call (lazy tree)", async () => {
     await stageState.adoptOpenedStage(info as never);
 
     expect(stageState.stageInfo).toEqual(info);
     expect(stageState.status).toBe("ready");
-    expect(mockedInvoke.mock.calls.map(([command]) => command)).toEqual(["get_stage_tree"]);
+    expect(stageState.tree).toEqual([]);
+    expect(mockedInvoke).not.toHaveBeenCalled();
   });
 
   it("does not let a stale selection repopulate details after a newer load", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
 
     const staleDetails = deferred<never>();
     mockedInvoke.mockReturnValueOnce(staleDetails.promise);
     const selection = stageState.selectPrim("/Old");
 
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/b.usda");
     staleDetails.resolve(details);
     await selection;
@@ -229,11 +228,10 @@ describe("stageState", () => {
     const staleLoad = stageState.loadStage("/old.usda");
 
     const currentInfo = { path: "/new.usda", stage_id: 8 };
-    mockedInvoke.mockResolvedValueOnce(currentInfo).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(currentInfo);
     await stageState.loadStage("/new.usda");
 
     staleInfo.resolve(info as never);
-    mockedInvoke.mockResolvedValueOnce([]);
     await staleLoad;
 
     expect(stageState.stageInfo).toEqual(currentInfo);
@@ -241,7 +239,7 @@ describe("stageState", () => {
   });
 
   it("setVariantSelection invokes the backend and passes null for a clear", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     await stageState.selectPrim("/A");
     mockedInvoke.mockResolvedValue(undefined);
@@ -266,7 +264,7 @@ describe("stageState", () => {
   });
 
   it("setVariantSelection surfaces backend errors", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     await stageState.selectPrim("/A");
     mockedInvoke.mockRejectedValueOnce("prim not found: /A");
@@ -277,7 +275,7 @@ describe("stageState", () => {
   });
 
   it("setPrimTexture invokes the backend per path and passes null for a clear", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     mockedInvoke.mockResolvedValue(undefined);
 
@@ -299,7 +297,7 @@ describe("stageState", () => {
   });
 
   it("setPrimTexture surfaces backend errors", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     mockedInvoke.mockRejectedValueOnce("prim not found: /A");
 
@@ -309,7 +307,7 @@ describe("stageState", () => {
   });
 
   it("setAttributeValue forwards the time argument, including null", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     await stageState.selectPrim("/A");
     mockedInvoke.mockResolvedValue(undefined);
@@ -350,7 +348,7 @@ describe("stageState", () => {
   });
 
   it("setAttributeValue authors an explicit path without touching the selection", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     await stageState.selectPrim("/A");
     mockedInvoke.mockResolvedValue(undefined);
@@ -370,7 +368,7 @@ describe("stageState", () => {
   });
 
   it("setPrimMetadata authors an explicit path and surfaces backend errors", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     mockedInvoke.mockResolvedValue(undefined);
 
@@ -391,7 +389,7 @@ describe("stageState", () => {
   });
 
   it("fetchPrimDetails reads an arbitrary prim without changing the selection", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     await stageState.selectPrim("/A");
     renderState.time = 5;
@@ -407,7 +405,7 @@ describe("stageState", () => {
   });
 
   it("fetchPrimDetails returns null instead of throwing", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     mockedInvoke.mockRejectedValueOnce("prim not found: /B");
 
@@ -415,7 +413,7 @@ describe("stageState", () => {
   });
 
   it("getMaterialInfo returns the material data and null on error", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     const bound = { name: "Mat", surface: null };
 
@@ -428,7 +426,7 @@ describe("stageState", () => {
   });
 
   it("clear resets the whole stage state for the no-stage empty view", async () => {
-    mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
+    mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");
     await stageState.selectPrim("/A");
 
@@ -443,28 +441,92 @@ describe("stageState", () => {
     expect(stageState.error).toBeNull();
   });
 
-  it("clear invalidates an in-flight adopt", async () => {
+  it("clear invalidates an in-flight tree fetch", async () => {
+    mockedInvoke.mockResolvedValueOnce(info);
+    await stageState.loadStage("/a.usda");
     const staleTree = deferred<never>();
     mockedInvoke.mockReturnValueOnce(staleTree.promise);
-    const adopt = stageState.adoptOpenedStage(info as never);
+    const fetch = stageState.ensureTree();
 
     stageState.clear();
     staleTree.resolve([] as never);
-    await adopt;
+    await fetch;
 
     expect(stageState.stageInfo).toBeNull();
     expect(stageState.tree).toEqual([]);
     expect(stageState.status).toBe("idle");
   });
 
+  it("ensureTree fetches once per stage epoch and shares the in-flight call", async () => {
+    mockedInvoke.mockResolvedValueOnce(info);
+    await stageState.loadStage("/a.usda");
+    mockedInvoke.mockClear();
+    const tree = [{ path: "/World" }];
+    mockedInvoke.mockResolvedValueOnce(tree as never);
+
+    await Promise.all([stageState.ensureTree(), stageState.ensureTree()]);
+
+    expect(mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_stage_tree")).toHaveLength(1);
+    expect(stageState.tree).toEqual(tree);
+
+    // Cached for the epoch: a later panel mount is free.
+    await stageState.ensureTree();
+    expect(mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_stage_tree")).toHaveLength(1);
+  });
+
+  it("a tree failure surfaces on treeError without failing the stage", async () => {
+    mockedInvoke.mockResolvedValueOnce(info);
+    await stageState.loadStage("/a.usda");
+    mockedInvoke.mockRejectedValueOnce("walk failed");
+
+    await stageState.ensureTree();
+
+    expect(stageState.treeError).toBe("walk failed");
+    expect(stageState.status).toBe("ready");
+
+    mockedInvoke.mockResolvedValueOnce([{ path: "/World" }] as never);
+    await stageState.ensureTree();
+
+    expect(stageState.treeError).toBeNull();
+    expect(stageState.tree).toEqual([{ path: "/World" }]);
+  });
+
+  it("an edit landing mid-fetch refetches after the in-flight tree lands", async () => {
+    mockedInvoke.mockResolvedValueOnce(info);
+    await stageState.loadStage("/a.usda");
+    mockedInvoke.mockClear();
+    const preEdit = deferred<never>();
+    mockedInvoke.mockReturnValueOnce(preEdit.promise);
+    const initial = stageState.ensureTree();
+    const postEdit = [{ path: "/World/New" }];
+    mockedInvoke.mockResolvedValueOnce(postEdit as never);
+
+    const refresh = stageState.refreshAfterEdit();
+    preEdit.resolve([{ path: "/World" }] as never);
+    await Promise.all([initial, refresh]);
+
+    expect(mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_stage_tree")).toHaveLength(2);
+    expect(stageState.tree).toEqual(postEdit);
+  });
+
+  it("a stage edit leaves a never-opened tree alone", async () => {
+    mockedInvoke.mockResolvedValueOnce(info);
+    await stageState.loadStage("/a.usda");
+    mockedInvoke.mockClear();
+
+    await stageState.refreshAfterEdit();
+
+    expect(mockedInvoke).not.toHaveBeenCalledWith("get_stage_tree", expect.anything());
+  });
+
   it("drops a stale edit refresh after the active stage changes", async () => {
     mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
     await stageState.loadStage("/a.usda");
+    await stageState.ensureTree();
     const staleTree = deferred<never>();
     mockedInvoke.mockReturnValueOnce(staleTree.promise);
 
     const refresh = stageState.refreshAfterEdit();
-    mockedInvoke.mockResolvedValueOnce([]);
     await stageState.adoptOpenedStage({ ...info, stage_id: 8 } as never);
     staleTree.resolve([{ path: "/Old" }] as never);
     await refresh;
@@ -473,9 +535,10 @@ describe("stageState", () => {
     expect(stageState.tree).toEqual([]);
   });
 
-  it("refreshAfterEdit refetches the tree and re-selects the prim", async () => {
+  it("refreshAfterEdit refetches a loaded tree and re-selects the prim", async () => {
     mockedInvoke.mockResolvedValueOnce(info).mockResolvedValueOnce([]);
     await stageState.loadStage("/a.usda");
+    await stageState.ensureTree();
     renderState.time = 3;
     mockedInvoke.mockResolvedValueOnce(details);
     await stageState.selectPrim("/A");

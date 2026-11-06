@@ -353,6 +353,19 @@ describe("openTab", () => {
     expect(loadOrchestrator.rootFile).toBe("/scene/a.usda");
   });
 
+  it("opens a tab without the prim-tree walk, which the panel fetches once", async () => {
+    // Opening used to fire get_stage_tree twice (the orchestrator's adopt
+    // and the tab activation's); the tree is lazy now, so opening fires it
+    // zero times and the first panel mount exactly once.
+    await openTab("/scene/a.usda");
+    expect(mockedInvoke).not.toHaveBeenCalledWith("get_stage_tree", expect.anything());
+
+    await stageState.ensureTree();
+    await stageState.ensureTree();
+
+    expect(mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_stage_tree")).toHaveLength(1);
+  });
+
   it("records the opened file in recent files", async () => {
     await openTab("/scene/a.usda");
 
@@ -388,7 +401,7 @@ describe("openTab", () => {
 });
 
 describe("setActive", () => {
-  it("refetches tree, edit state and scene for the switched-to stage", async () => {
+  it("refetches edit state and scene for the switched-to stage, without the prim tree", async () => {
     await openTab("/scene/a.usda");
     await openTab("/scene/b.usda");
     mockedInvoke.mockClear();
@@ -396,7 +409,8 @@ describe("setActive", () => {
 
     await tabsState.setActive(1);
 
-    expect(mockedInvoke).toHaveBeenCalledWith("get_stage_tree", { stageId: 1 });
+    // The tree stays lazy: only the panel component asks for it.
+    expect(mockedInvoke).not.toHaveBeenCalledWith("get_stage_tree", expect.anything());
     expect(mockedInvoke).toHaveBeenCalledWith("get_edit_target", { stageId: 1 });
     expect(tabsState.loadScene).toHaveBeenCalledTimes(1);
     expect(tabsState.activeId).toBe(1);
@@ -409,18 +423,9 @@ describe("setActive", () => {
     await openTab("/scene/a.usda");
     await openTab("/scene/b.usda");
     (tabsState.loadScene as ReturnType<typeof vi.fn>).mockClear();
-    const staleTree = deferred<unknown[]>();
-    mockedInvoke.mockImplementation((cmd, args) => {
-      if (cmd === "get_stage_tree" && (args as Record<string, unknown> | undefined)?.stageId === 1) {
-        return staleTree.promise;
-      }
-      return Promise.resolve(commands(cmd, (args ?? {}) as Record<string, unknown>));
-    });
 
     const staleActivation = tabsState.setActive(1);
-    await vi.waitFor(() => expect(stageState.activeStageId).toBe(1));
     await tabsState.setActive(2);
-    staleTree.resolve([]);
     await staleActivation;
 
     expect(tabsState.activeId).toBe(2);
@@ -466,9 +471,10 @@ describe("closeTab", () => {
     expect(mockedInvoke).toHaveBeenCalledWith("close_stage", { stageId: 2 });
     expect(tabsState.pendingCloseId).toBeNull();
     expect(tabsState.stages.map((tab) => tab.stage_id)).toEqual([1]);
-    // The neighbor becomes the active tab with a fresh refetch.
+    // The neighbor becomes the active tab with a fresh scene; its tree
+    // stays lazy until the hierarchy panel asks for it.
     expect(tabsState.activeId).toBe(1);
-    expect(mockedInvoke).toHaveBeenCalledWith("get_stage_tree", { stageId: 1 });
+    expect(mockedInvoke).not.toHaveBeenCalledWith("get_stage_tree", expect.anything());
     expect(tabsState.loadScene).toHaveBeenCalled();
   });
 

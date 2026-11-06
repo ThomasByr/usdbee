@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   selectPrim: vi.fn(),
   fetchPrimDetails: vi.fn(),
   setPrimMetadata: vi.fn().mockResolvedValue(null),
+  ensureTree: vi.fn(),
   tree: [] as PrimNode[],
   selectedPath: null as string | null,
 }));
@@ -19,6 +20,7 @@ vi.mock("$lib/stage/stageState.svelte", () => ({
     selectPrim: mocks.selectPrim,
     fetchPrimDetails: mocks.fetchPrimDetails,
     setPrimMetadata: mocks.setPrimMetadata,
+    ensureTree: mocks.ensureTree,
     get tree() {
       return mocks.tree;
     },

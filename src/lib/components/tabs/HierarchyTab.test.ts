@@ -8,12 +8,14 @@ import HierarchyTab from "./HierarchyTab.svelte";
 
 const mocks = vi.hoisted(() => ({
   selectPrim: vi.fn(),
+  ensureTree: vi.fn(),
   tree: [] as PrimNode[],
 }));
 
 vi.mock("$lib/stage/stageState.svelte", () => ({
   stageState: {
     selectPrim: mocks.selectPrim,
+    ensureTree: mocks.ensureTree,
     fetchPrimDetails: vi.fn(),
     setPrimMetadata: vi.fn(),
     get tree() {

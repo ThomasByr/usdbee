@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { editState } from "./editState.svelte";
 import { stageState } from "../stage/stageState.svelte";
 import type { StageInfo } from "../stage/types";
 
@@ -274,10 +273,9 @@ export const loadOrchestrator = $state({
           void invoke("close_stage", { stageId: info.stage_id }).catch(() => {});
           return;
         }
-        stageState.adoptOpenedStage(info);
-        // Re-query the edit target + dirty layers: the previous stage's
-        // dirty set must not survive into the new open.
-        void editState.refresh();
+        // Adoption belongs to the tab store (tabsState.adoptOpened ->
+        // setActive), which re-queries the edit target + dirty layers once
+        // the new stage is active.
       }),
       listen<{ root_file: string; dependencies: DependencyMap }>("usd-scene-loaded", (event) => {
         const rootFile = event.payload.root_file;

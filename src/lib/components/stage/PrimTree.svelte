@@ -24,6 +24,13 @@
   const filteredTree = $derived(filterTree(stageState.tree, filterText));
   const filtering = $derived(filterText.trim().length > 0);
 
+  // Lazy stage tree: opening a stage no longer walks it for the prim tree,
+  // so the panel that renders `tree` asks for it. Re-runs when `status`
+  // flips (a new stage), and stage edits refresh a tree already fetched.
+  $effect(() => {
+    void stageState.ensureTree();
+  });
+
   // The windowed render list — the scroll container stays mounted across
   // `usd-stage-changed` tree rebuilds, so its scrollTop (and therefore the
   // visible window) survives structural edits unless the selection moves it.
@@ -156,6 +163,11 @@
     onkeydown={onScrollKey}
   >
     {#if stageState.status === "ready"}
+      {#if stageState.treeError}
+        <p style="color: var(--danger-faint); text-align: center;">
+          Failed to load stage tree: {stageState.treeError}
+        </p>
+      {/if}
       <div style="position: relative; height: {rows.length * ROW_HEIGHT}px;">
         {#each rows.slice(range.start, range.end) as row, i (row.node.path)}
           <div class="tree-row" style="top: {(range.start + i) * ROW_HEIGHT}px; height: {ROW_HEIGHT}px;">

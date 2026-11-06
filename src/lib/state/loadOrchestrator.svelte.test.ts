@@ -227,15 +227,19 @@ describe("init event subscriptions", () => {
     expect(loadOrchestrator.dependencies).toEqual(deps);
   });
 
-  it("usd-stage-opened adopts the stage info and refreshes the edit state", async () => {
+  it("usd-stage-opened leaves adoption and the edit refresh to the tab store", async () => {
     await loadOrchestrator.init(noHooks);
-    mockedInvoke.mockResolvedValueOnce([]);
 
     handlerFor["usd-stage-opened"]({ payload: stageInfo });
-    await vi.waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith("get_stage_tree", { stageId: 3 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(stageState.stageInfo).toEqual(stageInfo);
-    expect(stageState.status).toBe("ready");
+    // Adoption (and the lazy prim tree) is tabsState.adoptOpened's job:
+    // adopting here too reset and refetched the active stage twice per
+    // open. The edit-state refresh rides on tabsState.setActive too — a
+    // refresh here would query the PREVIOUS stage id.
+    expect(stageState.stageInfo?.stage_id).not.toBe(stageInfo.stage_id);
+    expect(mockedInvoke).not.toHaveBeenCalledWith("get_stage_tree", expect.anything());
+    expect(mockedInvoke).not.toHaveBeenCalledWith("get_edit_target", expect.anything());
   });
 
   it("drops a gate refusal arriving on the load-error channel without failing the open", async () => {
@@ -261,13 +265,15 @@ describe("init event subscriptions", () => {
     handlerFor["usd-stage-opened"]({
       payload: { ...stageInfo, root_layer: "/tmp/usdbee/extracted/root.usda" },
     });
-    await vi.waitFor(() => expect(stageState.stageInfo?.root_layer).toBe("/tmp/usdbee/extracted/root.usda"));
+    // The first open's stream still completes with its own root: the
+    // stage-opened is accepted, never closed as an orphan.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockedInvoke).not.toHaveBeenCalledWith("close_stage", expect.anything());
   });
 
   it("closes a refused stream's orphan stage after the first open finishes", async () => {
     await loadOrchestrator.init(noHooks);
     mockedInvoke.mockResolvedValue([]);
-    stageState.stageInfo = null;
 
     handlerFor["usd-load-start"]({ payload: "/scene/a.usda" });
     // A second dialog open is refused while the first is in flight.
@@ -278,7 +284,6 @@ describe("init event subscriptions", () => {
     handlerFor["usd-scene-loaded"]({ payload: { root_file: "/scene/a.usda", dependencies: deps } });
     handlerFor["usd-stage-opened"]({ payload: { ...stageInfo, root_layer: "/scene/a.usda" } });
     loadOrchestrator.finishOpen();
-    await vi.waitFor(() => expect(stageState.stageInfo?.root_layer).toBe("/scene/a.usda"));
 
     // The refused stream completes backend-side AFTER the first finished:
     // it must adopt nothing and its stage must be closed, not orphaned.
@@ -292,8 +297,6 @@ describe("init event subscriptions", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(mockedInvoke).toHaveBeenCalledWith("close_stage", { stageId: 9 });
-    const adopted = stageState.stageInfo as { root_layer: string } | null;
-    expect(adopted?.root_layer).toBe("/scene/a.usda");
     expect(loadOrchestrator.dependencies).toEqual(deps);
     expect(loadOrchestrator.loadingProgress).toBeNull();
   });
