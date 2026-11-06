@@ -105,6 +105,7 @@ pub fn run() {
             stage::get_time_codes,
             stage::get_geometry_data,
             stage::get_geometry_batch,
+            stage::get_animated_pose,
             stage::get_material_data,
             stage::get_material_batch,
             stage::set_attribute_value,

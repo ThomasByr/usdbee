@@ -93,6 +93,14 @@ pub enum StageRequest {
         time: Option<f64>,
         reply: mpsc::Sender<Result<Vec<u8>, String>>,
     },
+    // One playback pose in one owner turn: the time-delta manifest as JSON
+    // bytes plus the geometry batch over its `geometry_animated` paths,
+    // framed by `frame_pose`. Two serial invokes cost a dev-mode pose more
+    // latency than the backend work; this is the same work, one hop.
+    GetAnimatedPose {
+        time: Option<f64>,
+        reply: mpsc::Sender<Result<Vec<u8>, String>>,
+    },
     GetMaterial {
         path: String,
         reply: mpsc::Sender<Result<MaterialInfo, String>>,
@@ -795,6 +803,49 @@ fn spawn_stage_owner_for(
                                 })
                                 .collect();
                             Ok(frame_batch(slots))
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::GetAnimatedPose { time, reply } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            if manifest_skeleton.is_none() {
+                                manifest_skeleton = Some(ManifestSkeleton::build(stage)?);
+                            }
+                            let skeleton = manifest_skeleton
+                                .as_ref()
+                                .ok_or_else(|| "manifest skeleton build failed".to_string())?;
+                            let nodes = {
+                                let mut ctx = WalkCtx::new(&mut transform_memo);
+                                delta_children(
+                                    skeleton,
+                                    &skeleton.root_children,
+                                    time,
+                                    false,
+                                    &mut ctx,
+                                    false,
+                                    false,
+                                )?
+                            };
+                            let paths = animated_geometry_paths(&nodes);
+                            let manifest = serde_json::to_vec(&nodes)
+                                .map_err(|e| format!("manifest serialization failed: {}", e))?;
+                            let slots = paths
+                                .iter()
+                                .map(|path| {
+                                    geometry_bytes(
+                                        stage,
+                                        &mut mesh_cache,
+                                        &mut resolve_memo,
+                                        path,
+                                        time,
+                                    )
+                                })
+                                .collect();
+                            Ok(frame_pose(manifest, frame_batch(slots)))
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -3666,12 +3717,17 @@ fn node_transform(
     if let Some(matrix) = facts.static_transform {
         return Ok(matrix);
     }
-    let key = (facts.prim.path().to_string(), time);
-    if let Some(matrix) = transforms.get(&key) {
+    let path = facts.prim.path();
+    if let Some(matrix) = transforms.get(path.as_str(), time) {
         return Ok(*matrix);
     }
     let matrix = local_transform(&facts.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
-    transforms.insert(key, matrix, std::mem::size_of::<gf::Matrix4d>());
+    transforms.insert(
+        path.to_string(),
+        time,
+        matrix,
+        std::mem::size_of::<gf::Matrix4d>(),
+    );
     Ok(matrix)
 }
 
@@ -3707,22 +3763,21 @@ pub fn serialize_animated_manifest(
     )
 }
 
-// `Option<f64>` is not `Hash` (and NaN keys would be ambiguous), so the
-// public API takes the queried `Option<f64>` and stores its bits.
-fn cache_key(key: (String, Option<f64>)) -> (String, Option<u64>) {
-    (key.0, key.1.map(f64::to_bits))
-}
-
-/// Owner-thread cache keyed by (prim path, queried time bits), evicted oldest
+/// Owner-thread cache keyed by (prim path, queried time), evicted oldest
 /// first, under a byte budget and an entry ceiling. Both users are fed in
 /// authored-time order by playback, where insertion order is as good as
 /// least-recently-used and costs nothing per hit, so a hit does not refresh
 /// an entry's position: re-insertion on write already does.
+///
+/// The time bits bucket first (`Option<f64>` is not `Hash`, and NaN keys
+/// would be ambiguous), so a hit resolves the path through `&str` and the
+/// memo's hot read (`node_transform`) allocates nothing.
 struct KeyedCache<V> {
     // Each entry carries its own charge, so a refresh can credit the old one.
-    entries: HashMap<(String, Option<u64>), (V, usize)>,
+    time_buckets: HashMap<Option<u64>, HashMap<String, (V, usize)>>,
     order: VecDeque<(String, Option<u64>)>,
     bytes: usize,
+    len: usize,
     byte_budget: usize,
     entry_ceiling: usize,
 }
@@ -3730,57 +3785,70 @@ struct KeyedCache<V> {
 impl<V> KeyedCache<V> {
     fn with_limits(byte_budget: usize, entry_ceiling: usize) -> Self {
         Self {
-            entries: HashMap::new(),
+            time_buckets: HashMap::new(),
             order: VecDeque::new(),
             bytes: 0,
+            len: 0,
             byte_budget,
             entry_ceiling,
         }
     }
 
-    fn get(&self, key: &(String, Option<f64>)) -> Option<&V> {
-        self.entries
-            .get(&cache_key(key.clone()))
+    fn get(&self, path: &str, time: Option<f64>) -> Option<&V> {
+        self.time_buckets
+            .get(&time.map(f64::to_bits))?
+            .get(path)
             .map(|(value, _)| value)
     }
 
     /// Insert (or refresh) one entry charged `bytes`, then evict the oldest
     /// entries until both limits hold again. The newest entry always stays,
     /// even when it alone exceeds the budget: the caller just asked for it.
-    fn insert(&mut self, key: (String, Option<f64>), value: V, bytes: usize) {
-        let key = cache_key(key);
-        match self.entries.insert(key.clone(), (value, bytes)) {
-            // A refresh keeps its place in the queue.
-            Some((_, previous)) => self.bytes = self.bytes - previous + bytes,
-            None => {
-                self.order.push_back(key);
-                self.bytes += bytes;
-            }
-        }
-        while self.order.len() > 1
-            && (self.bytes > self.byte_budget || self.entries.len() > self.entry_ceiling)
+    fn insert(&mut self, path: String, time: Option<f64>, value: V, bytes: usize) {
+        let bits = time.map(f64::to_bits);
+        if let Some((_, previous)) = self
+            .time_buckets
+            .entry(bits)
+            .or_default()
+            .insert(path.clone(), (value, bytes))
         {
-            let Some(oldest) = self.order.pop_front() else {
+            // A refresh keeps its place in the queue.
+            self.bytes = self.bytes - previous + bytes;
+        } else {
+            self.order.push_back((path, bits));
+            self.bytes += bytes;
+            self.len += 1;
+        }
+        while self.len > 1 && (self.bytes > self.byte_budget || self.len > self.entry_ceiling) {
+            let Some((path, bits)) = self.order.pop_front() else {
                 break;
             };
-            if let Some((_, freed)) = self.entries.remove(&oldest) {
+            let Some(bucket) = self.time_buckets.get_mut(&bits) else {
+                continue;
+            };
+            if let Some((_, freed)) = bucket.remove(&path) {
                 self.bytes -= freed;
+                self.len -= 1;
+            }
+            if bucket.is_empty() {
+                self.time_buckets.remove(&bits);
             }
         }
     }
 
     fn clear(&mut self) {
-        self.entries.clear();
+        self.time_buckets.clear();
         self.order.clear();
         self.bytes = 0;
+        self.len = 0;
     }
 
     fn len(&self) -> usize {
-        self.entries.len()
+        self.len
     }
 
     fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len == 0
     }
 }
 
@@ -3821,14 +3889,14 @@ impl MeshCache {
         }
     }
 
-    pub fn get(&self, key: &(String, Option<f64>)) -> Option<Arc<MeshData>> {
-        self.entries.get(key).cloned()
+    pub fn get(&self, path: &str, time: Option<f64>) -> Option<Arc<MeshData>> {
+        self.entries.get(path, time).cloned()
     }
 
-    pub fn insert(&mut self, key: (String, Option<f64>), mesh: Arc<MeshData>) {
+    pub fn insert(&mut self, path: String, time: Option<f64>, mesh: Arc<MeshData>) {
         self.tessellations.fetch_add(1, Ordering::Relaxed);
         let bytes = mesh.size_bytes();
-        self.entries.insert(key, mesh, bytes);
+        self.entries.insert(path, time, mesh, bytes);
     }
 
     pub fn clear(&mut self) {
@@ -4026,6 +4094,35 @@ fn frame_batch(slots: Vec<Result<Vec<u8>, String>>) -> Vec<u8> {
     out
 }
 
+/// The delta's geometry slots: pre-order walk, `has_geometry &&
+/// geometry_animated`, deduped (a shared prototype subtree can repeat a
+/// path). Slot order is the order the frontend maps slots back to paths.
+fn animated_geometry_paths(nodes: &[RenderNode]) -> Vec<String> {
+    fn walk(nodes: &[RenderNode], paths: &mut Vec<String>, seen: &mut HashSet<String>) {
+        for node in nodes {
+            if node.has_geometry && node.geometry_animated && !seen.contains(&node.path) {
+                seen.insert(node.path.clone());
+                paths.push(node.path.clone());
+            }
+            walk(&node.children, paths, seen);
+        }
+    }
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    walk(nodes, &mut paths, &mut seen);
+    paths
+}
+
+/// The merged pose response: `[u32 LE manifest JSON length][manifest JSON
+/// utf8][geometry batch payload]`, so one invoke carries a whole pose.
+fn frame_pose(manifest: Vec<u8>, batch: Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + manifest.len() + batch.len());
+    out.extend((manifest.len() as u32).to_le_bytes());
+    out.extend(manifest);
+    out.extend(batch);
+    out
+}
+
 /// The material data one prim reads (GetMaterial and GetMaterialBatch):
 /// synthetic prototype children resolve their material through the real
 /// prototype prim (memoized per stage-open like the geometry arms).
@@ -4051,10 +4148,10 @@ fn geometry_bytes(
     time: Option<f64>,
 ) -> Result<Vec<u8>, String> {
     let prim_path = resolved_render_path(stage, memo, path)?;
-    let key = (prim_path.to_string(), time);
-    if let Some(mesh) = cache.get(&key) {
+    if let Some(mesh) = cache.get(prim_path.as_str(), time) {
         return Ok(pack_geometry(&mesh));
     }
+    let key = prim_path.to_string();
     let prim = stage
         .prim(prim_path)
         .map_err(|e| format!("invalid prim path '{}': {}", path, e))?;
@@ -4064,7 +4161,7 @@ fn geometry_bytes(
     match tessellate_prim(&prim, time)? {
         Some(mesh) => {
             let mesh = Arc::new(mesh);
-            cache.insert(key, mesh.clone());
+            cache.insert(key, time, mesh.clone());
             Ok(pack_geometry(&mesh))
         }
         None => Err(format!("no geometry at {}", path)),
@@ -4248,6 +4345,32 @@ pub fn request_geometry_batch(
             time,
             reply,
         })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// One invoke per playback pose: the delta manifest JSON plus the geometry
+// batch for its `geometry_animated` paths, framed by `frame_pose` into one
+// raw response. Loads / structure rebuilds / `refreshAfterEdit` keep the
+// two commands above.
+#[tauri::command]
+pub async fn get_animated_pose(
+    stage_id: u64,
+    time: Option<f64>,
+    state: tauri::State<'_, StageState>,
+) -> Result<tauri::ipc::Response, String> {
+    request_animated_pose(&state.sender(stage_id)?, time).map(tauri::ipc::Response::new)
+}
+
+pub fn request_animated_pose(
+    sender: &mpsc::Sender<StageRequest>,
+    time: Option<f64>,
+) -> Result<Vec<u8>, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::GetAnimatedPose { time, reply })
         .map_err(|_| "stage service unavailable".to_string())?;
     response
         .recv()
@@ -4778,8 +4901,8 @@ mod edit_emission_tests {
 mod keyed_cache_tests {
     use super::KeyedCache;
 
-    fn key(name: &str) -> (String, Option<f64>) {
-        (name.to_string(), None)
+    fn key(name: &str) -> String {
+        name.to_string()
     }
 
     // Synthetic per-entry charges: the byte budget, not the entry ceiling,
@@ -4789,17 +4912,17 @@ mod keyed_cache_tests {
     fn byte_budget_evicts_oldest_and_keeps_newest() {
         let mut cache = KeyedCache::with_limits(1000, 100);
         for name in ["a", "b", "c"] {
-            cache.insert(key(name), name.to_string(), 400);
+            cache.insert(key(name), None, name.to_string(), 400);
         }
-        assert!(cache.get(&key("a")).is_none(), "oldest evicted by bytes");
+        assert!(cache.get("a", None).is_none(), "oldest evicted by bytes");
         assert_eq!(cache.len(), 2, "far below the 100-entry ceiling");
         assert_eq!(cache.bytes, 800);
         // Eviction trimmed the oldest entries only, never cleared the cache.
-        assert_eq!(cache.get(&key("b")), Some(&"b".to_string()));
-        assert_eq!(cache.get(&key("c")), Some(&"c".to_string()));
+        assert_eq!(cache.get("b", None), Some(&"b".to_string()));
+        assert_eq!(cache.get("c", None), Some(&"c".to_string()));
 
-        cache.insert(key("huge"), "huge".to_string(), 4096);
-        assert_eq!(cache.get(&key("huge")), Some(&"huge".to_string()));
+        cache.insert(key("huge"), None, "huge".to_string(), 4096);
+        assert_eq!(cache.get("huge", None), Some(&"huge".to_string()));
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.bytes, 4096);
 

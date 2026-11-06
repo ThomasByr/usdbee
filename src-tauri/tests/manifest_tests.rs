@@ -13,9 +13,9 @@ use common::spawn_stage_owner;
 use openusd::gf;
 
 use usdbee_lib::stage::{
-    open_stage, request_animated_manifest, request_geometry_data, request_material_data,
-    request_redo, request_scene_manifest, request_set_attribute_value, request_undo,
-    serialize_render_manifest, RenderNode,
+    open_stage, request_animated_manifest, request_animated_pose, request_geometry_batch,
+    request_geometry_data, request_material_data, request_redo, request_scene_manifest,
+    request_set_attribute_value, request_undo, serialize_render_manifest, RenderNode,
 };
 use usdbee_lib::values::{local_transform, ValuePayload};
 
@@ -820,4 +820,70 @@ fn undo_and_redo_of_a_sampled_xform_edit_reach_the_manifest() {
     let node = expect(&redone, "/Scene/Mover").transform;
     assert_eq!(node[12], 0.0, "redo reapplies the edit");
     assert_eq!(node[13], 7.0, "redo reapplies the edit");
+}
+
+// Merged pose (one invoke per playback step): the single response must carry
+// the same manifest JSON and the same geometry slots, in the same order, as
+// the two commands it replaces — otherwise a playback step would apply a
+// different pose on the two paths.
+
+fn animated_geometry_paths(nodes: &[RenderNode], paths: &mut Vec<String>) {
+    for node in nodes {
+        if node.has_geometry && node.geometry_animated && !paths.contains(&node.path) {
+            paths.push(node.path.clone());
+        }
+        animated_geometry_paths(&node.children, paths);
+    }
+}
+
+#[test]
+fn merged_pose_matches_the_two_command_path() {
+    for (name, times) in [
+        ("animated.usda", [0.0, 10.0].as_slice()),
+        ("cross_mode.usda", [1.0, 2.0].as_slice()),
+    ] {
+        let state = spawn_stage_owner();
+        open_via_owner(&state, name);
+
+        for &time in times {
+            let nodes = request_animated_manifest(&state.sender(), Some(time))
+                .expect("delta manifest should serialize");
+            let mut paths = Vec::new();
+            animated_geometry_paths(&nodes, &mut paths);
+            assert!(
+                !paths.is_empty(),
+                "{} at {time} must carry deforming geometry for this pin",
+                name
+            );
+            let batch = request_geometry_batch(&state.sender(), &paths, Some(time))
+                .expect("geometry batch should serialize");
+
+            let merged = request_animated_pose(&state.sender(), Some(time))
+                .expect("merged pose should serialize");
+            let json_len = u32::from_le_bytes(merged[0..4].try_into().unwrap()) as usize;
+            assert_eq!(
+                &merged[4..4 + json_len],
+                serde_json::to_vec(&nodes).unwrap().as_slice(),
+                "{} manifest JSON must be byte-identical",
+                name
+            );
+
+            let slots = &merged[4 + json_len..];
+            assert_eq!(
+                u32::from_le_bytes(slots[0..4].try_into().unwrap()),
+                0x5553_4247,
+                "the tail is the batch framing"
+            );
+            assert_eq!(
+                slots, batch,
+                "{} geometry batch must be byte-identical",
+                name
+            );
+            assert_eq!(
+                u32::from_le_bytes(slots[8..12].try_into().unwrap()) as usize,
+                paths.len(),
+                "one slot per geometry_animated path"
+            );
+        }
+    }
 }
