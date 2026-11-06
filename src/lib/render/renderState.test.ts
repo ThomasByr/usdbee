@@ -1779,6 +1779,83 @@ describe("renderState pose prefetch", () => {
     expect(renderState.error).toBeNull();
   });
 
+  it("holds a playback step while a batch is in flight instead of single-fetching", async () => {
+    const group = await loadedScene();
+    const pending = deferred<ArrayBuffer>();
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_animated_pose_batch") return pending.promise;
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    renderState.time = 0;
+    frameDiag.reset();
+    const batch = prefetchPoses(1); // in flight, nothing buffered yet
+    mockedInvoke.mockClear();
+
+    await renderState.setStageTime(5, true);
+
+    // No invoke: a single fetch would queue in FRONT of the batch on the
+    // serial dev transport. Nothing applied either — the last pose stands.
+    expect(mockedInvoke).not.toHaveBeenCalled();
+    const diag = frameDiag.snapshot();
+    expect(diag.applyN).toBe(0);
+    expect(diag.dispatchN).toBe(0);
+    expect(renderState.error).toBeNull();
+    const wrapper = group.children.find((child) => child.name === "/Scene/Wobble")!;
+    expect(wrapper.matrix.elements[12]).toBe(1); // the load pose
+
+    // The batch lands; the driver's next request consumes from the buffer.
+    pending.resolve(
+      poseBatch(codes.slice(2, 14).map(() => poseFrame([wobbleAt(9)], packedBatchGeometry(1, 1)))),
+    );
+    await batch;
+    mockedInvoke.mockClear();
+    await renderState.setStageTime(6, true);
+
+    expect(mockedInvoke).not.toHaveBeenCalled();
+    expect(wrapper.matrix.elements[12]).toBe(9);
+  });
+
+  it("single-fetches a playback miss once the batch path is dead", async () => {
+    const group = await loadedScene();
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_animated_pose_batch") throw "batch blew up";
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    await prefetchPoses(1);
+
+    mockIpc(() => [wobbleAt(4)]);
+    mockedInvoke.mockClear();
+    await renderState.setStageTime(5, true);
+
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose", {
+      stageId: stageState.activeStageId,
+      time: 5,
+    });
+    const wrapper = group.children.find((child) => child.name === "/Scene/Wobble")!;
+    expect(wrapper.matrix.elements[12]).toBe(4);
+  });
+
+  it("still single-fetches a paused scrub: nothing would retry a hold", async () => {
+    const group = await loadedScene();
+    const pending = deferred<ArrayBuffer>();
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_animated_pose_batch") return pending.promise;
+      if (cmd === "get_animated_pose") return poseFrame([wobbleAt(7)], packedBatchGeometry(1, 1));
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    void prefetchPoses(1); // a batch IS in flight: the hold condition holds
+    mockedInvoke.mockClear();
+
+    await renderState.setStageTime(5); // paused scrub: no hold flag
+
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose", {
+      stageId: stageState.activeStageId,
+      time: 5,
+    });
+    const wrapper = group.children.find((child) => child.name === "/Scene/Wobble")!;
+    expect(wrapper.matrix.elements[12]).toBe(7);
+  });
+
   it("falls back to per-pose stepping when the batch fails", async () => {
     const group = await loadedScene();
     mockedInvoke.mockImplementation(async (cmd: string) => {

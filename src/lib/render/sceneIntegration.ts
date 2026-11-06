@@ -218,11 +218,12 @@ export function installPlaybackDriver(viewer: RendererKit) {
     if (next !== lastEmitted)
       frameDiag.onPose(performance.now(), frameDiag.codeIndex(renderState.timeCodes, next));
     lastEmitted = next;
-    void renderState.setStageTime(next);
-    // Look ahead while playing: below K/2 buffered poses, one background batch
-    // of the next K authored codes. The frame itself is already stepped above,
-    // so a cold buffer costs a few single-pose steps, never a stall. Only a
-    // live scene looks ahead — a failed load has nothing to fill.
+    void renderState.setStageTime(next, true);
+    // Look ahead while playing: one background batch of the next K authored
+    // codes stays in transit for the whole of playback (any consumed pose
+    // re-claims). The frame itself is already stepped above, so a cold buffer
+    // costs a wait for that batch, never a stall. Only a live scene looks
+    // ahead — a failed load has nothing to fill.
     if (renderState.status === "ready") void prefetchPoses(next);
   };
 }

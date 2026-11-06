@@ -57,19 +57,39 @@ export function poseCoverage(code: number): number {
 
 /**
  * The next K authored codes after `code` to fetch in ONE background batch, or
- * null while a batch runs, when the window is still half full, or when the
- * playhead is not on an authored code. Clamped at the stage's last code (the
- * request never wraps; the batch after the wrap refills).
+ * null while a batch runs or when the playhead is not on an authored code.
+ * Clamped at the stage's last code (the request never wraps; the batch after
+ * the wrap refills).
  */
 export function claimPoseBatch(codes: readonly number[], code: number): ClaimedPoseBatch | null {
   if (inFlightEpoch === epoch || failedEpoch === epoch) return null;
-  if (poseCoverage(code) >= POSE_PREFETCH / 2) return null;
+  // Continuous top-up: any consumed pose re-claims, so a batch is in transit
+  // for the whole of playback. A half-full window was shorter than the batch's
+  // own wall time (~190 ms of buffer against a ~260 ms invoke), which dried
+  // the buffer out every cycle.
+  if (poseCoverage(code) >= POSE_PREFETCH) return null;
   const index = codeIndex(codes, code);
   if (index < 0) return null;
   const times = codes.slice(index + 1, index + 1 + POSE_PREFETCH);
-  if (times.length === 0) return null;
+  // A short window at the stage's tail is worth one fetch, not one per frame
+  // that lands: nothing new means the buffer already holds it.
+  if (times.length === 0 || times.every((time) => buffered.has(time))) return null;
   inFlightEpoch = epoch;
   return { epoch, times };
+}
+
+/**
+ * True when a playback step must WAIT for the prefetch instead of fetching
+ * that one pose: the pipeline is alive (authored codes, no failure in this
+ * generation) and either a batch is in flight or the missed code is one a
+ * claim can still cover. The ipc transport serializes requests, so a single
+ * fetch queues in front of the batch that would have delivered the pose
+ * (measured: 260 ms -> > 2 s per batch).
+ */
+export function holdsPoseStep(codes: readonly number[], code: number): boolean {
+  if (buffered.has(code)) return false;
+  if (codes.length === 0 || failedEpoch === epoch) return false;
+  return inFlightEpoch === epoch || codeIndex(codes, code) >= 0;
 }
 
 /**

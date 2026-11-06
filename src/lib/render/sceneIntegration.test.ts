@@ -277,37 +277,38 @@ describe("installPlaybackDriver pose prefetch", () => {
     await flush(); // the batch lands and fills the buffer
     for (let i = 0; i < 5; i++) v.onAdvanceTime!(1 / 24);
 
-    expect(batchCalls()).toHaveLength(1);
+    // No frame paid a single-pose invoke, and the top-up stays one batch in
+    // flight: claimed once, no second claim while it is pending.
+    expect(mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_animated_pose")).toHaveLength(0);
+    expect(batchCalls()).toHaveLength(2);
     expect(batchCalls()[0]![1]).toEqual({
       stageId: stageState.activeStageId,
       times: codes.slice(2, 2 + 12),
     });
   });
 
-  it("refills only once the window drops below half", async () => {
+  it("tops up as soon as one pose of the window is consumed", async () => {
     const v = viewer();
     installPlaybackDriver(v);
     v.onAdvanceTime!(1 / 24); // presents code 1: cold look-ahead, one batch
     await flush(); // ...which lands and fills 2..13
     expect(batchCalls()).toHaveLength(1);
 
-    // The playhead consumes the window (a loaded scene takes these); at half
-    // full the look-ahead is still enough.
-    for (let code = 2; code <= 7; code++) {
-      takePose(code);
-      v.onAdvanceTime!(1 / 24);
-    }
-    expect(poseCoverage(7)).toBe(6);
-    expect(batchCalls()).toHaveLength(1);
+    // One pose consumed: the window is one short, so the next frame claims
+    // again — the refill margin is no longer shorter than the batch itself.
+    takePose(2);
+    v.onAdvanceTime!(1 / 24);
 
-    takePose(8);
-    v.onAdvanceTime!(1 / 24); // coverage 5: exactly one refill
-
+    expect(poseCoverage(2)).toBe(11);
     expect(batchCalls()).toHaveLength(2);
     expect(batchCalls()[1]![1]).toEqual({
       stageId: stageState.activeStageId,
-      times: codes.slice(9, 9 + 12),
+      times: codes.slice(3, 3 + 12),
     });
+
+    // The top-up is still in flight: no third claim, however many frames run.
+    for (let i = 0; i < 3; i++) v.onAdvanceTime!(1 / 24);
+    expect(batchCalls()).toHaveLength(2);
   });
 
   it("drops the look-ahead when the playhead is written externally", async () => {

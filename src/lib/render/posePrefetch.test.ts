@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   POSE_PREFETCH,
   claimPoseBatch,
+  holdsPoseStep,
   invalidatePoseBuffer,
   poseCoverage,
   settlePoseBatch,
@@ -87,14 +88,32 @@ describe("the look-ahead buffer", () => {
     expect(claimPoseBatch(CODES, 0)).not.toBeNull();
   });
 
-  it("refills only below half the look-ahead", () => {
+  it("tops up as soon as one pose of the window is consumed", () => {
     fillAt(0); // 1..12 buffered, playhead 0
-    for (let code = 1; code <= 6; code++) takePose(code); // coverage(6) = 6
-    expect(poseCoverage(6)).toBe(POSE_PREFETCH / 2);
-    expect(claimPoseBatch(CODES, 6)).toBeNull();
+    expect(claimPoseBatch(CODES, 0)).toBeNull(); // full: nothing to fetch
 
-    takePose(7); // coverage(7) = 5
-    expect(claimPoseBatch(CODES, 7)).not.toBeNull();
+    takePose(1);
+    expect(poseCoverage(1)).toBe(POSE_PREFETCH - 1);
+    expect(claimPoseBatch(CODES, 1)).not.toBeNull();
+  });
+
+  it("claims nothing while the top-up batch is in flight", () => {
+    fillAt(0);
+    takePose(1);
+    const topUp = claimPoseBatch(CODES, 1);
+    expect(topUp).not.toBeNull();
+
+    takePose(2);
+    expect(claimPoseBatch(CODES, 2)).toBeNull();
+
+    settlePoseBatch(topUp!, poses(topUp!.times.length));
+  });
+
+  it("stops re-claiming a tail window the buffer already holds", () => {
+    fillAt(37); // 38,39 — a short window at the stage's end
+    expect(poseCoverage(37)).toBe(2);
+
+    expect(claimPoseBatch(CODES, 37)).toBeNull();
   });
 
   it("replaces the window on fill so nothing behind the playhead lingers", () => {
@@ -148,5 +167,41 @@ describe("the look-ahead buffer", () => {
 
     for (let code = 1; code <= 7; code++) takePose(code); // coverage 5
     expect(claimPoseBatch(CODES, 7)).not.toBeNull();
+  });
+});
+
+describe("holding a playback step on a miss", () => {
+  it("holds while a batch is in flight", () => {
+    claimPoseBatch(CODES, 0); // in flight, nothing buffered yet
+    expect(holdsPoseStep(CODES, 5)).toBe(true);
+  });
+
+  it("holds for a code a fresh claim can still cover", () => {
+    // No batch in flight: the driver claims on this very frame.
+    expect(holdsPoseStep(CODES, 20)).toBe(true);
+  });
+
+  it("does not hold for a pose already in hand", () => {
+    fillAt(0);
+    expect(holdsPoseStep(CODES, 5)).toBe(false);
+  });
+
+  it("does not hold without authored codes (nothing to claim)", () => {
+    expect(holdsPoseStep([], 5)).toBe(false);
+  });
+
+  it("does not hold once the batch path failed for this generation", () => {
+    const claimed = claimPoseBatch(CODES, 0)!;
+    settlePoseBatch(claimed, null);
+
+    expect(holdsPoseStep(CODES, 5)).toBe(false);
+  });
+
+  it("does not hold for an unauthored code, and re-arms after an invalidation", () => {
+    expect(holdsPoseStep(CODES, 1.5)).toBe(false);
+
+    fillAt(0);
+    invalidatePoseBuffer();
+    expect(holdsPoseStep(CODES, 5)).toBe(true);
   });
 });

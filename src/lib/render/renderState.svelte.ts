@@ -15,7 +15,13 @@ import type { MaterialInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
 import { decodeGeometryBatch, decodeMaterialBatch } from "./geometryDecoder";
 import { decodeAnimatedPose, decodeAnimatedPoseBatch } from "./poseDecoder";
-import { claimPoseBatch, invalidatePoseBuffer, settlePoseBatch, takePose } from "./posePrefetch";
+import {
+  claimPoseBatch,
+  holdsPoseStep,
+  invalidatePoseBuffer,
+  settlePoseBatch,
+  takePose,
+} from "./posePrefetch";
 import { loadCachedTexture, clearTextureCache } from "./textureCache";
 import * as frameDiag from "../perf/frameDiag";
 import { requestShadowUpdate } from "../three/shadowMapUpdate";
@@ -51,13 +57,26 @@ let activeTimeStep: Promise<unknown> | null = null;
 // Promise covering the whole in-flight load (including its queued refresh);
 // resolves even on failure so waiting time steps never hang.
 let loadPromise: Promise<void> | null = null;
-let queuedTime: number | null = null;
+// A time step coalesced behind a load or an active step, with the policy it
+// was requested under (a replay of the queue must hold the same way).
+interface QueuedStep {
+  time: number;
+  holdOnMiss: boolean;
+}
+let queuedTime: QueuedStep | null = null;
 // An edit refresh queued behind a load or an active step (Phase 3 Task 4).
 let queuedRefresh: string[] | null = null;
 // Coalesced edit-refresh callers await the drain's verdict instead of a
 // conservative rebuild: a transform-only second event no longer vanishes
 // the whole scene. Plain, like the other queue state — never rendered.
 let queuedVerdict: ReturnType<typeof Promise.withResolvers<boolean>> | null = null;
+
+// Reads and clears the queued step in one go: every drain does exactly this.
+function takeQueuedTime(): QueuedStep | null {
+  const pending = queuedTime;
+  queuedTime = null;
+  return pending;
+}
 
 // Superseded or failed work drops the queued refresh and hands its
 // coalesced callers the rebuild they would have asked for.
@@ -184,10 +203,10 @@ export function advanceStageTime(
   return Math.min(Math.max(snapToTimeCodes(wrapped, codes), start), end);
 }
 
-// Playback look-ahead (round 4): with fewer than half the K looked-ahead poses
-// still buffered ahead of `code`, ONE background batch fetches the next K
-// authored codes. Detached on purpose — the frame is stepped either way and
-// the fill lands later; a stale or failed batch is simply dropped.
+// Playback look-ahead (round 4): while any of the K looked-ahead poses is
+// missing, ONE background batch fetches the next K authored codes. Detached
+// on purpose — the frame is stepped either way and the fill lands later; a
+// stale or failed batch is simply dropped.
 export function prefetchPoses(code: number): Promise<void> {
   const claimed = claimPoseBatch(renderState.timeCodes, code);
   if (!claimed) return Promise.resolve();
@@ -607,12 +626,11 @@ export const renderState = $state({
         }
       })();
       sceneLoading = false;
-      const pendingTime = queuedTime;
-      queuedTime = null;
-      if (pendingTime !== null) {
+      const pending = takeQueuedTime();
+      if (pending !== null) {
         drainingQueue = true;
         try {
-          await this.setStageTime(pendingTime);
+          await this.setStageTime(pending.time, pending.holdOnMiss);
         } finally {
           drainingQueue = false;
         }
@@ -643,7 +661,12 @@ export const renderState = $state({
   // then updateNodes applies them. One step runs at a time; rapid requests
   // coalesce to the latest queued time. Loads still supersede active work
   // via loadGeneration.
-  setStageTime(time: number): Promise<void> {
+  //
+  // `holdOnMiss` is the playback driver's policy: a buffer miss waits for
+  // the batch in transit instead of injecting a single-pose fetch (see
+  // holdsPoseStep). Every other caller — paused scrub, export frame, edit
+  // refresh — fetches, because nothing would retry it.
+  setStageTime(time: number, holdOnMiss = false): Promise<void> {
     // Same-time dedupe: with time-code snapping the driver re-requests the
     // identical time on most frames (each a full manifest fetch); skip
     // when the state already sits at the requested time.
@@ -651,17 +674,22 @@ export const renderState = $state({
     this.time = time;
     this.onTimeChange?.(time);
     if (sceneLoading) {
-      queuedTime = time;
+      queuedTime = { time, holdOnMiss };
       // Resolve only once the load (and its queued refresh) has run.
       return (loadPromise ?? activeTimeStep ?? Promise.resolve()) as Promise<void>;
     }
     if (timeStepInFlight) {
-      queuedTime = time;
+      queuedTime = { time, holdOnMiss };
       return (activeTimeStep as Promise<void>) ?? Promise.resolve();
     }
-    const generation = ++loadGeneration;
     const group = currentGroup;
     if (!group) return Promise.resolve();
+    // Hold on a buffer miss while the prefetch is alive. Resolved before the
+    // step is even considered in flight, exactly like the dedupe above: no
+    // fetch, no apply, nothing to release. The scene keeps its last pose
+    // until the batch lands and the next driver request hits the buffer.
+    if (holdOnMiss && holdsPoseStep(this.timeCodes, time)) return Promise.resolve();
+    const generation = ++loadGeneration;
     timeStepInFlight = true;
     activeTimeStep = (async () => {
       try {
@@ -706,18 +734,17 @@ export const renderState = $state({
         timeStepInFlight = false;
         activeTimeStep = null;
         if (!sceneLoading) {
-          const pendingTime = queuedTime;
-          queuedTime = null;
+          const pending = takeQueuedTime();
           // Detached: awaiting this would extend the caller's promise chain
           // past our own refresh — with a sustained playback driver that
           // chain never ends and loads hung forever. The next step runs on
           // its own; the load's single in-line drain (loadWork) stays
           // awaited so a queued-completion caller still resolves after the
           // load's refresh applied.
-          if (pendingTime !== null) {
+          if (pending !== null) {
             drainingQueue = true;
             try {
-              void this.setStageTime(pendingTime);
+              void this.setStageTime(pending.time, pending.holdOnMiss);
             } finally {
               drainingQueue = false;
             }
@@ -778,12 +805,11 @@ export const renderState = $state({
         timeStepInFlight = false;
         activeTimeStep = null;
         if (!sceneLoading) {
-          const pendingTime = queuedTime;
-          queuedTime = null;
-          if (pendingTime !== null) {
+          const pending = takeQueuedTime();
+          if (pending !== null) {
             drainingQueue = true;
             try {
-              void this.setStageTime(pendingTime);
+              void this.setStageTime(pending.time, pending.holdOnMiss);
             } finally {
               drainingQueue = false;
             }
