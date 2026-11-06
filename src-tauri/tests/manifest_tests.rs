@@ -13,9 +13,10 @@ use common::spawn_stage_owner;
 use openusd::gf;
 
 use usdbee_lib::stage::{
-    open_stage, request_animated_manifest, request_animated_pose, request_geometry_batch,
-    request_geometry_data, request_material_data, request_redo, request_scene_manifest,
-    request_set_attribute_value, request_undo, serialize_render_manifest, RenderNode,
+    open_stage, request_animated_manifest, request_animated_pose, request_animated_pose_batch,
+    request_geometry_batch, request_geometry_data, request_material_data, request_redo,
+    request_scene_manifest, request_set_attribute_value, request_time_codes, request_undo,
+    serialize_render_manifest, RenderNode,
 };
 use usdbee_lib::values::{local_transform, ValuePayload};
 
@@ -929,4 +930,151 @@ fn merged_pose_matches_the_two_command_path() {
             );
         }
     }
+}
+
+/// A batch pose payload's frames, split the way the frontend must: the u32
+/// frame count, then each frame self-delimited by its own prefixes (manifest
+/// length, path lengths, batch slot lengths). Every frame stays 4-byte aligned
+/// inside the payload, so the splits need no extra padding.
+fn decode_pose_frames(payload: &[u8]) -> Vec<&[u8]> {
+    let u32_at = |at: usize| u32::from_le_bytes(payload[at..at + 4].try_into().unwrap()) as usize;
+    let count = u32_at(0);
+    let mut cursor = 4;
+    let mut frames = Vec::with_capacity(count);
+    for _ in 0..count {
+        let json_len = u32_at(cursor);
+        let mut at = align4(cursor + 4 + json_len);
+        let paths = u32_at(at);
+        at += 4;
+        for _ in 0..paths {
+            let len = u32_at(at);
+            at += 4 + len;
+        }
+        at = align4(at);
+        assert_eq!(u32_at(at), 0x5553_4247, "the tail is the batch framing");
+        let slots = u32_at(at + 8);
+        let mut slot_at = at + 12;
+        for _ in 0..slots {
+            let len = u32_at(slot_at + 4);
+            slot_at = align4(slot_at + 8 + len);
+        }
+        assert_eq!(slot_at % 4, 0, "frames stay 4-byte aligned in the payload");
+        frames.push(&payload[cursor..slot_at]);
+        cursor = slot_at;
+    }
+    assert_eq!(
+        cursor,
+        payload.len(),
+        "no trailing bytes after the last frame"
+    );
+    frames
+}
+
+#[test]
+fn batch_pose_frames_match_single_pose_calls() {
+    for (name, times) in [
+        ("animated.usda", [0.0, 10.0, 24.0].as_slice()),
+        // Distinct per-slot payloads, so a swapped frame order changes bytes.
+        ("two_deforming_meshes.usda", [1.0, 2.0, 1.0].as_slice()),
+    ] {
+        let state = spawn_stage_owner();
+        open_via_owner(&state, name);
+
+        let batch = request_animated_pose_batch(&state.sender(), times)
+            .expect("batch pose should serialize");
+        let frames = decode_pose_frames(&batch);
+        assert_eq!(frames.len(), times.len(), "{} one frame per time", name);
+
+        for (frame, &time) in frames.iter().zip(times) {
+            let single = request_animated_pose(&state.sender(), Some(time))
+                .expect("merged pose should serialize");
+            assert_eq!(*frame, single.as_slice(), "{} frame at {time}", name);
+            decode_pose(frame);
+        }
+    }
+}
+
+#[test]
+fn batch_pose_frames_are_decodable_by_the_frontend() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+    let codes = request_time_codes(&state.sender()).expect("time codes should serialize");
+    let times = [codes[0], codes[codes.len() / 2], codes[codes.len() - 1]];
+
+    let batch =
+        request_animated_pose_batch(&state.sender(), &times).expect("batch pose should serialize");
+    let frames = decode_pose_frames(&batch);
+    assert_eq!(frames.len(), times.len(), "one frame per authored code");
+    for (frame, &time) in frames.iter().zip(&times) {
+        let (manifest, paths, slots) = decode_pose(frame);
+        assert!(!manifest.is_empty(), "frame at {time} carries a manifest");
+        assert!(!paths.is_empty(), "frame at {time} names its slots");
+        assert_eq!(
+            slots,
+            request_geometry_batch(&state.sender(), &paths, Some(time))
+                .expect("geometry batch should serialize")
+                .as_slice(),
+            "frame at {time} carries the same geometry batch"
+        );
+    }
+}
+
+#[test]
+fn batch_pose_omits_times_outside_the_authored_codes() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+    let codes = request_time_codes(&state.sender()).expect("time codes should serialize");
+    let (first, last) = (codes[0], codes[codes.len() - 1]);
+
+    // Past the last authored code: dropped, the count reflects the actual.
+    let batch = request_animated_pose_batch(&state.sender(), &[first, last + 1.0])
+        .expect("batch pose should serialize");
+    let frames = decode_pose_frames(&batch);
+    assert_eq!(frames.len(), 1, "the out-of-range time is omitted");
+    assert_eq!(
+        frames[0],
+        request_animated_pose(&state.sender(), Some(first))
+            .expect("merged pose should serialize")
+            .as_slice(),
+        "the in-range frame survives byte-identical"
+    );
+
+    // A time before the first authored code is out of range too.
+    let early = request_animated_pose_batch(&state.sender(), &[first - 1.0])
+        .expect("batch pose should serialize");
+    assert_eq!(decode_pose_frames(&early).len(), 0, "early time is omitted");
+
+    // An empty slice is an empty payload, not an error.
+    let none = request_animated_pose_batch(&state.sender(), &[]).expect("empty batch is valid");
+    assert_eq!(none, 0u32.to_le_bytes(), "empty times -> frame_count 0");
+}
+
+#[test]
+fn batch_pose_of_one_time_equals_the_single_pose_command() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+    let codes = request_time_codes(&state.sender()).expect("time codes should serialize");
+    let time = codes[codes.len() / 2];
+
+    let single =
+        request_animated_pose(&state.sender(), Some(time)).expect("merged pose should serialize");
+    let batch =
+        request_animated_pose_batch(&state.sender(), &[time]).expect("batch pose should serialize");
+    let mut expected = 1u32.to_le_bytes().to_vec();
+    expected.extend(single);
+    assert_eq!(batch, expected, "a one-element batch is the single frame");
+}
+
+#[test]
+fn batch_pose_keeps_duplicate_times() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+    let codes = request_time_codes(&state.sender()).expect("time codes should serialize");
+    let time = codes[0];
+
+    let batch = request_animated_pose_batch(&state.sender(), &[time, time])
+        .expect("batch pose should serialize");
+    let frames = decode_pose_frames(&batch);
+    assert_eq!(frames.len(), 2, "duplicate times are the caller's contract");
+    assert_eq!(frames[0], frames[1], "both duplicates carry the same frame");
 }

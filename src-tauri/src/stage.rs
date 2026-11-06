@@ -4146,6 +4146,19 @@ fn frame_pose(manifest: Vec<u8>, paths: Vec<String>, mut batch: Vec<u8>) -> Vec<
     out
 }
 
+/// A batch pose response: `[u32 LE frame count][frame_count x frame_pose
+/// layout]`. Every `frame_pose` ends with its (padded) geometry batch, so each
+/// frame is a multiple of 4 bytes long and the next one stays 4-byte aligned.
+fn frame_poses(frames: Vec<Vec<u8>>) -> Vec<u8> {
+    let frames_len: usize = frames.iter().map(Vec::len).sum();
+    let mut out = Vec::with_capacity(4 + frames_len);
+    out.extend((frames.len() as u32).to_le_bytes());
+    for mut frame in frames {
+        out.append(&mut frame);
+    }
+    out
+}
+
 /// The material data one prim reads (GetMaterial and GetMaterialBatch):
 /// synthetic prototype children resolve their material through the real
 /// prototype prim (memoized per stage-open like the geometry arms).
@@ -4390,6 +4403,44 @@ pub fn request_animated_pose(
     response
         .recv()
         .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Playback prefetch: K poses in one invoke instead of K invokes, each pose still
+// its own owner turn (the owner serializes anyway) and each frame the exact
+// bytes `get_animated_pose` returns for that time. Times outside the stage's
+// authored code range are dropped rather than fetched (a pre-roll/loop-wrap
+// time has no authored pose), so the frame count is the number of frames
+// actually returned. Duplicate times are kept: deduping is the caller's call.
+#[tauri::command]
+pub async fn get_animated_pose_batch(
+    stage_id: u64,
+    times: Vec<f64>,
+    state: tauri::State<'_, StageState>,
+) -> Result<tauri::ipc::Response, String> {
+    request_animated_pose_batch(&state.sender(stage_id)?, &times).map(tauri::ipc::Response::new)
+}
+
+pub fn request_animated_pose_batch(
+    sender: &mpsc::Sender<StageRequest>,
+    times: &[f64],
+) -> Result<Vec<u8>, String> {
+    if times.is_empty() {
+        return Ok(frame_poses(Vec::new()));
+    }
+    // The authored codes are the same list the frontend prefetches from; a
+    // stage with no sampled attribute has no range, so every time is kept.
+    let codes = request_time_codes(sender)?;
+    let (first, last) = match (codes.first(), codes.last()) {
+        (Some(first), Some(last)) => (*first, *last),
+        _ => (f64::NEG_INFINITY, f64::INFINITY),
+    };
+    let mut frames = Vec::with_capacity(times.len());
+    for &time in times {
+        if (first..=last).contains(&time) {
+            frames.push(request_animated_pose(sender, Some(time))?);
+        }
+    }
+    Ok(frame_poses(frames))
 }
 
 // Material binding data for one prim (Task 3): the prim may be the mesh
