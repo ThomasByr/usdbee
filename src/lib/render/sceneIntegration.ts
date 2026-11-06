@@ -194,7 +194,8 @@ export function installPlaybackDriver(viewer: RendererKit) {
     // Resync: any external write of renderState.time (scrub slider, new
     // load, edit refresh) adopts on the next frame so the continuous
     // playhead never diverges from the stage.
-    if (renderState.time !== lastEmitted) {
+    const resynced = renderState.time !== lastEmitted;
+    if (resynced) {
       continuous = renderState.time ?? start;
       frameDiag.setRate(tcps);
       frameDiag.onPoseResync();
@@ -206,6 +207,13 @@ export function installPlaybackDriver(viewer: RendererKit) {
     // (wrap past end, clamp at start); the query snaps and clamps itself.
     continuous = advanceStageTime(continuous ?? start, delta, tcps, start, end);
     const next = Math.min(Math.max(snapToTimeCodes(continuous, renderState.timeCodes), start), end);
+    // A forward wrap (playback past the end) drops the playhead back to the
+    // start while end-of-loop poses are still buffered. They can never be
+    // consumed (the playhead already passed them) but they still count as
+    // coverage, so the window would never fall below half and prefetch would
+    // stay dormant for the rest of the loop pass. A scrub is not a wrap and
+    // is already covered by the resync branch above.
+    if (!resynced && lastEmitted !== null && next < lastEmitted) invalidatePoseBuffer();
     viewer.animationProgress = toPlayheadOffset(next, start);
     if (next !== lastEmitted)
       frameDiag.onPose(performance.now(), frameDiag.codeIndex(renderState.timeCodes, next));

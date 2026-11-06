@@ -332,6 +332,60 @@ describe("installPlaybackDriver pose prefetch", () => {
       times: codes.slice(31, 31 + 12),
     });
   });
+
+  it("drops the look-ahead on a backwards scrub too", async () => {
+    // The resync branch must not care which way the external write went: a
+    // rewind leaves the forward window just as unusable as a forward scrub.
+    const v = viewer();
+    installPlaybackDriver(v);
+    renderState.time = 30;
+    v.onAdvanceTime!(0); // resyncs to 30 and claims 31..42
+    await flush();
+    expect(poseCoverage(30)).toBe(12);
+
+    renderState.time = 5; // simulated rewind
+    v.onAdvanceTime!(0);
+
+    expect(poseCoverage(30)).toBe(0);
+    expect(takePose(31)).toBeNull();
+    expect(batchCalls()).toHaveLength(2);
+    expect(batchCalls()[1]![1]).toEqual({
+      stageId: stageState.activeStageId,
+      times: codes.slice(6, 6 + 12),
+    });
+  });
+
+  it("clears the look-ahead at the loop wrap so prefetch keeps claiming", async () => {
+    // Wrapping past the end drops the playhead back to the start while
+    // end-of-loop poses are still buffered. They can never be consumed from
+    // there but still count as coverage, so with K/2 of them left no batch is
+    // ever claimed again and every step pays the single-pose invoke.
+    const loop = Array.from({ length: 40 }, (_, i) => i);
+    renderState.timeCodes = loop;
+    stageState.stageInfo = {
+      start_time_code: 0,
+      end_time_code: 39,
+      time_codes_per_second: 60,
+    } as any;
+    renderState.time = 33;
+    const v = viewer();
+    installPlaybackDriver(v);
+
+    v.onAdvanceTime!(0); // presents 33 and claims the clamped tail 34..39
+    await flush();
+    expect(poseCoverage(33)).toBe(6);
+
+    v.onAdvanceTime!(0.1); // 6 codes: presents 39, skipping the buffered tail
+    v.onAdvanceTime!(0.1); // wraps to code 6
+    expect(renderState.time).toBe(6);
+
+    expect(poseCoverage(6)).toBe(0);
+    expect(batchCalls()).toHaveLength(2);
+    expect(batchCalls()[1]![1]).toEqual({
+      stageId: stageState.activeStageId,
+      times: loop.slice(7, 7 + 12),
+    });
+  });
 });
 
 describe("resetLoadedScene", () => {
