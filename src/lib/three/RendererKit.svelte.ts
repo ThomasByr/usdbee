@@ -8,6 +8,7 @@ import { controlsState } from "$lib/state/controlsState.svelte";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as frameDiag from "$lib/perf/frameDiag";
 import { initOnDemandShadows, renderWithShadowUpdate } from "$lib/three/shadowMapUpdate";
+import { nextFrameTime, shouldRenderFrame } from "$lib/three/fpsLimiter";
 
 export class RendererKit {
   canvas: HTMLCanvasElement | null = null;
@@ -166,28 +167,29 @@ export class RendererKit {
 
   private animate = (time: DOMHighResTimeStamp = 0) => {
     this.animationFrameId = requestAnimationFrame(this.animate);
+    // Read at callback start instead of trusting the rAF argument: the webview
+    // reports its own clock there, and gating on it turns timestamp jitter into
+    // render-cadence wobble.
+    const now = performance.now();
     frameDiag.onRaf(time);
 
     if (this.showExportModal) {
-      this.lastFrameTime = time;
-      this.lastNavTime = performance.now();
+      this.lastFrameTime = now;
+      this.lastNavTime = now;
       this.clock.getDelta(); // Drain accumulated time so playback doesn't jump
       return;
     }
 
-    if (viewerSettings.maxFps > 0 && time > 0) {
-      const interval = 1000 / viewerSettings.maxFps;
-      const elapsed = time - this.lastFrameTime;
-
-      // 1 ms tolerance: rAF timestamps jitter, and a frame landing a hair
-      // below the interval would push the render a whole frame later.
-      if (elapsed < interval - 1) {
+    const maxFps = viewerSettings.maxFps;
+    if (maxFps > 0) {
+      const interval = 1000 / maxFps;
+      if (!shouldRenderFrame(now, this.lastFrameTime, interval)) {
         frameDiag.onThrottled();
         return;
       }
-      this.lastFrameTime = time - (elapsed % interval);
-    } else if (viewerSettings.maxFps === 0) {
-      this.lastFrameTime = time;
+      this.lastFrameTime = nextFrameTime(now, this.lastFrameTime, interval);
+    } else {
+      this.lastFrameTime = now;
     }
 
     frameDiag.onRender(time);

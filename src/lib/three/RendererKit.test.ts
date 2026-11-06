@@ -12,6 +12,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 import * as THREE from "three";
 import { RendererKit } from "./RendererKit.svelte";
 import * as frameDiag from "$lib/perf/frameDiag";
+import { viewerSettings } from "$lib/state/viewerSettings.svelte";
 import { consumeShadowUpdate, requestShadowUpdate } from "./shadowMapUpdate";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -40,9 +41,13 @@ function makeKit(playing: boolean) {
   return { kit, node, shadowDraws };
 }
 
-// One render-loop tick (time 0 skips the max-fps throttle).
-function frame(kit: RendererKit) {
-  (kit as any).animate(0);
+// The loop samples performance.now() itself, so the test drives that clock and
+// passes an independent rAF timestamp, as the webview does.
+let clockMs = 0;
+
+function frame(kit: RendererKit, stepMs = 20, rafJitterMs = 0) {
+  clockMs += stepMs;
+  (kit as any).animate(clockMs + rafJitterMs);
 }
 
 function boxOf(kit: RendererKit): THREE.Box3 {
@@ -52,11 +57,47 @@ function boxOf(kit: RendererKit): THREE.Box3 {
 beforeEach(() => {
   // No recursive rAF ticks: the test drives every frame itself.
   vi.stubGlobal("requestAnimationFrame", () => 0);
+  clockMs = 1000;
+  vi.spyOn(performance, "now").mockImplementation(() => clockMs);
 });
 
 afterEach(() => {
+  viewerSettings.maxFps = 60;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe("fps limiter", () => {
+  it("gates on the sampled clock, not on the raf timestamp", () => {
+    // The webview's rAF argument is its own clock, so it can wobble around the
+    // time the callback actually ran; the gate must not read it.
+    const { kit, shadowDraws } = makeKit(true);
+    for (let i = 0; i < 6; i++) frame(kit, 20, i % 2 === 0 ? -9 : 9);
+    expect(shadowDraws).toHaveLength(6);
+  });
+
+  it("renders every callback when uncapped", () => {
+    const { kit, shadowDraws } = makeKit(true);
+    viewerSettings.maxFps = 0;
+    for (let i = 0; i < 5; i++) frame(kit, 3);
+    expect(shadowDraws).toHaveLength(5);
+  });
+
+  it("leaves the skipped time to the next rendered frame", () => {
+    const { kit, shadowDraws } = makeKit(true);
+    const deltas: number[] = [];
+    frameDiag.reset();
+    kit.onAdvanceTime = (delta) => deltas.push(delta);
+    frame(kit); // starts the playback clock
+    frame(kit);
+    frame(kit, 8); // under the max-fps interval: skipped
+    frame(kit, 12); // renders and pays the skipped 8 ms too
+
+    expect(shadowDraws).toHaveLength(3);
+    expect(frameDiag.snapshot().throttled).toBe(1);
+    expect(deltas).toHaveLength(3);
+    expect(deltas[2]).toBeCloseTo(0.02, 4);
+  });
 });
 
 describe("selection box during playback", () => {
