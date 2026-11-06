@@ -76,6 +76,16 @@ describe("fps limiter", () => {
     expect(shadowDraws).toHaveLength(6);
   });
 
+  it("stamps the render ring with the clock the gate decided on", () => {
+    // The gate no longer trusts the rAF stamp, so the render ring must not
+    // either: renderFps is the number the whole round is judged by.
+    const { kit } = makeKit(true);
+    for (let i = 0; i < 4; i++) frame(kit, 20, i % 2 === 0 ? -9 : 9);
+    const diag = frameDiag.snapshot();
+    expect(diag.renderP50).toBeCloseTo(20, 5);
+    expect(diag.renderFps).toBeCloseTo(50, 5);
+  });
+
   it("renders every callback when uncapped", () => {
     const { kit, shadowDraws } = makeKit(true);
     viewerSettings.maxFps = 0;
@@ -90,6 +100,20 @@ describe("fps limiter", () => {
     clockMs = 2;
     frame(kit, 0);
     expect(shadowDraws).toHaveLength(1);
+  });
+
+  it("drops the export frames' records while the loop is parked", () => {
+    // An export poses once per frame through setStageTime, so its records
+    // would fill the 10 s rings and pollute the snapshot the user reads next.
+    const { kit, shadowDraws } = makeKit(true);
+    kit.showExportModal = true;
+    frameDiag.reset();
+    frameDiag.onPoseApplied(40);
+    frame(kit);
+    frame(kit);
+
+    expect(shadowDraws).toHaveLength(0);
+    expect(frameDiag.snapshot().applyN).toBe(0);
   });
 
   it("leaves the skipped time to the next rendered frame", () => {

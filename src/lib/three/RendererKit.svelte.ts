@@ -174,6 +174,9 @@ export class RendererKit {
     frameDiag.onRaf(time);
 
     if (this.showExportModal) {
+      // The exporter poses and draws on its own; those frames would outlive
+      // the export in the 10 s rings. Parked is the seam to drop them.
+      frameDiag.reset();
       this.lastFrameTime = now;
       this.lastNavTime = now;
       this.clock.getDelta(); // Drain accumulated time so playback doesn't jump
@@ -195,9 +198,11 @@ export class RendererKit {
       this.lastFrameTime = now;
     }
 
-    // The diag records the rAF timestamp (scheduler jitter), the gate above
-    // records the sampled clock: the decision needs a monotonic one.
-    frameDiag.onRender(time);
+    // The diag keeps two clocks on purpose. onRaf above stamps the rAF
+    // timestamp (scheduler jitter); the render ring takes the same sample the
+    // gate decided on, so renderFps measures the cadence the cap produces
+    // rather than the clock the gate stopped trusting.
+    frameDiag.onRender(now);
 
     // Play -> pause prints; pause -> play drops the paused span so it is
     // not recorded as one giant pose interval.

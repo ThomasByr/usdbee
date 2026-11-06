@@ -120,7 +120,10 @@ export function onThrottled() {
   throttled++;
 }
 
-/** One frame that reached the renderer. */
+/**
+ * One frame that reached the renderer. Takes the loop's gate clock, not the
+ * rAF stamp: the fps cap paces on it, so the ring must too.
+ */
 export function onRender(t: number) {
   if (t <= 0) return;
   if (lastRender > 0) push(renderRing, t - lastRender);
