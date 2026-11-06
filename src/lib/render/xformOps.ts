@@ -50,6 +50,25 @@ function fail(error: string): { ok: false; error: string } {
   return { ok: false, error };
 }
 
+// List-order product (first-listed op most global), three.js terms.
+function multiplyAll(mats: THREE.Matrix4[]): THREE.Matrix4 {
+  const out = new THREE.Matrix4();
+  for (const m of mats) out.multiply(m);
+  return out;
+}
+
+// True when the matrix is a translation only (identity linear part), so
+// the gizmo can absorb it into an xformOp:translate value.
+function isPureTranslation(m: THREE.Matrix4): boolean {
+  const e = m.elements;
+  for (let i = 0; i < 16; i++) {
+    if (i === 12 || i === 13 || i === 14 || i === 15) continue;
+    const identity = i % 5 === 0 ? 1 : 0;
+    if (Math.abs(e[i] - identity) > 1e-6) return false;
+  }
+  return true;
+}
+
 function number3(data: unknown, type: string): [number, number, number] | null {
   if (!Array.isArray(data) || data.length !== 3) return null;
   const out: [number, number, number] = [0, 0, 0];
@@ -250,12 +269,13 @@ export function composeOpUpdate(input: {
     // only the translation component of the recomputed op is authored.
     data = [e[12], e[13], e[14]];
   } else if (input.mode === "scale") {
-    // shortcut: basis-column lengths assume no rotation leaked into the
-    // recomputed op (true for the usual SRT stacks).
+    // Basis-column lengths; any rotation/translation the recomputed op
+    // leaked is checked against the recomposition invariant below.
     data = [Math.hypot(e[0], e[1], e[2]), Math.hypot(e[4], e[5], e[6]), Math.hypot(e[8], e[9], e[10])];
   } else {
-    // shortcut: Euler-order fidelity beyond default XYZ — the gizmo only
-    // authors rotateXYZ; sheared stacks lose their shear here.
+    // Euler extraction from the normalized basis; the pivot residual is
+    // handled below (a sheared stack cannot be captured by rotateXYZ and
+    // refuses there instead of silently losing its shear).
     const c0 = Math.hypot(e[0], e[1], e[2]);
     const c1 = Math.hypot(e[4], e[5], e[6]);
     const c2 = Math.hypot(e[8], e[9], e[10]);
@@ -288,8 +308,105 @@ export function composeOpUpdate(input: {
   }
 
   const writes: OpWrite[] = [{ name: target, type, data }];
-  if (!exists) {
-    writes.push({ name: "xformOpOrder", type: "token_array", data: [...input.order, target] });
+  // The order the emitted writes leave behind (the created target op is
+  // appended most-local, per the authoring ruling).
+  let finalOrder = exists ? input.order : [...input.order, target];
+
+  if (input.mode !== "translate") {
+    // The authored value reproduces only the mode op's own matrix, but the
+    // recomputed newOp is exact: an off-origin drag leaves a pivot
+    // translation in it. Absorb that residual into the stack's
+    // xformOp:translate (created most-global when absent) so the emitted
+    // writes recompose to exactly targetLocalMatrix; refuse when the
+    // residual is not a pure translation (shear/rotation residue) — no
+    // data beats wrong data.
+    const modeOp =
+      input.mode === "scale"
+        ? new THREE.Matrix4().makeScale(data[0], data[1], data[2])
+        : axisRotation("Z", data[2])
+            .multiply(axisRotation("Y", data[1]))
+            .multiply(axisRotation("X", data[0]));
+    if (Math.abs(modeOp.determinant()) < 1e-12) return fail("op value collapsed; refusing");
+    const opsWithMode = ops.map((m) => m.clone());
+    if (exists) opsWithMode[opIndex] = modeOp;
+    else opsWithMode.push(modeOp);
+
+    let tNew: THREE.Matrix4;
+    const translateIndex = finalOrder.indexOf("xformOp:translate");
+    if (translateIndex !== -1) {
+      // Solve the translate's new value from the invariant: the product
+      // around its slot must equal the target local matrix.
+      const tOpsIndex = finalOrder.slice(0, translateIndex).filter((entry) => entry !== RESET_TOKEN).length;
+      const tBefore = multiplyAll(opsWithMode.slice(0, tOpsIndex));
+      const tAfter = multiplyAll(opsWithMode.slice(tOpsIndex + 1));
+      if (Math.abs(tBefore.determinant()) < 1e-12 || Math.abs(tAfter.determinant()) < 1e-12) {
+        return fail("transform stack is singular; cannot author a gizmo edit");
+      }
+      tNew = tBefore
+        .clone()
+        .invert()
+        .multiply(new THREE.Matrix4().fromArray(input.targetLocalMatrix))
+        .multiply(tAfter.clone().invert());
+      if (!isPureTranslation(tNew)) {
+        return fail("off-pivot residual is not a pure translation; refusing to author");
+      }
+      if (!matricesClose(tNew.toArray() as number[], ops[tOpsIndex].toArray() as number[])) {
+        const attr = input.attrs.find((x) => x.name === "xformOp:translate");
+        writes.push({
+          name: "xformOp:translate",
+          type:
+            attr && attr.type_name
+              ? attr.type_name
+              : attr && attr.value.type === "vec3d"
+                ? "double3"
+                : "float3",
+          data: [snap(tNew.elements[12]), snap(tNew.elements[13]), snap(tNew.elements[14])],
+        });
+      }
+    } else {
+      // No translate op: create one at the FRONT (most-global) so the
+      // authored mode value stays valid and only the leading translation
+      // carries the pivot residual.
+      const rest = multiplyAll(opsWithMode);
+      if (Math.abs(rest.determinant()) < 1e-12) {
+        return fail("transform stack is singular; cannot author a gizmo edit");
+      }
+      tNew = new THREE.Matrix4().fromArray(input.targetLocalMatrix).multiply(rest.clone().invert());
+      if (!isPureTranslation(tNew)) {
+        return fail("off-pivot residual is not a pure translation; refusing to author");
+      }
+      const tData = [snap(tNew.elements[12]), snap(tNew.elements[13]), snap(tNew.elements[14])];
+      if (tData.some((v) => v !== 0)) {
+        writes.push({ name: "xformOp:translate", type: "double3", data: tData });
+        // Most-global slot — after a leading reset token, whose USD
+        // semantics would otherwise ignore everything authored before it.
+        const insertAt = finalOrder[0] === RESET_TOKEN ? 1 : 0;
+        finalOrder = [...finalOrder.slice(0, insertAt), "xformOp:translate", ...finalOrder.slice(insertAt)];
+      }
+    }
+
+    // Invariant check, not an assumption: whatever writes were emitted
+    // must recompose to the desired local matrix, or refuse.
+    const recomposition = new THREE.Matrix4();
+    for (const entry of finalOrder) {
+      if (entry === RESET_TOKEN) continue;
+      let m: THREE.Matrix4;
+      if (entry === target) m = modeOp;
+      else if (entry === "xformOp:translate" && writes.some((w) => w.name === "xformOp:translate")) m = tNew;
+      else {
+        const built = opMatrix(entry, input.attrs);
+        if ("error" in built) return fail(built.error);
+        m = built.matrix;
+      }
+      recomposition.multiply(m);
+    }
+    if (!matricesClose(recomposition.toArray() as number[], input.targetLocalMatrix)) {
+      return fail("emitted writes disagree with the target transform; refusing to author");
+    }
+  }
+
+  if (finalOrder !== input.order) {
+    writes.push({ name: "xformOpOrder", type: "token_array", data: [...finalOrder] });
   }
   return { ok: true, writes };
 }

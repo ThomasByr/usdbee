@@ -49,6 +49,29 @@ function vec(data: number[]): number[] {
   return data;
 }
 
+// The matrix one emitted op write recomposes to (mirrors opMatrix for the
+// ops the gizmo authors: translate, rotateXYZ = Rz·Ry·Rx, scale).
+function writeMatrix(name: string, data: number[]): THREE.Matrix4 {
+  if (name === "xformOp:translate") return translation(data[0], data[1], data[2]);
+  if (name === "xformOp:scale") return scaleOf(data[0], data[1], data[2]);
+  return new THREE.Matrix4()
+    .makeRotationZ(rad(data[2]))
+    .multiply(new THREE.Matrix4().makeRotationY(rad(data[1])))
+    .multiply(new THREE.Matrix4().makeRotationX(rad(data[0])));
+}
+
+// Recomposition of a composeOpUpdate result: list-order product of the
+// writes' values in the emitted xformOpOrder.
+function recomposed(result: { writes: { name: string; data: number[] | string[] }[] }): number[] {
+  const known = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"];
+  const order =
+    (result.writes.find((w) => w.name === "xformOpOrder")?.data as string[] | undefined) ??
+    known.filter((op) => result.writes.some((w) => w.name === op));
+  return compose(
+    order.map((entry) => writeMatrix(entry, result.writes.find((w) => w.name === entry)!.data as number[])),
+  );
+}
+
 describe("composeOpUpdate", () => {
   it("returns the unchanged op value for a zero-delta drag", () => {
     const local = compose([translation(10, 0, 0)]);
@@ -238,6 +261,119 @@ describe("composeOpUpdate", () => {
       type: "token_array",
       data: ["xformOp:rotateZYX", "xformOp:translate"],
     });
+  });
+
+  it("authors the pivot translation for an off-origin rotate drag", () => {
+    // Lens 5's worked case: translate (10,0,0) authored, the prim rotated
+    // 90° about the anchor (12,1,0) — its origin (10,0,0) must land at
+    // (13,-1,0). Pre-fix the rotate branch dropped the pivot translation
+    // and the prim jumped back toward its old position.
+    const local = compose([translation(10, 0, 0)]);
+    const target = compose([translation(13, -1, 0), rotZ(90)]);
+    const result = composeOpUpdate({
+      mode: "rotate",
+      order: ["xformOp:translate"],
+      attrs: [attr("xformOp:translate", "double3", "vec3d", vec([10, 0, 0]))],
+      localMatrix: local,
+      targetLocalMatrix: target,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.writes).toEqual([
+      { name: "xformOp:rotateXYZ", type: "float3", data: [0, 0, 90] },
+      { name: "xformOp:translate", type: "double3", data: [13, -1, 0] },
+      { name: "xformOpOrder", type: "token_array", data: ["xformOp:translate", "xformOp:rotateXYZ"] },
+    ]);
+    expect(matricesClose(recomposed(result), target)).toBe(true);
+  });
+
+  it("re-authors the translate for a rotate about an off-origin anchor", () => {
+    // Lens 2's case: translate (10,0,0), anchor (10,2,0), Rz90 — the
+    // authored translate must become (12,2,0), not stay (10,0,0).
+    const local = compose([translation(10, 0, 0)]);
+    const target = compose([translation(12, 2, 0), rotZ(90)]);
+    const result = composeOpUpdate({
+      mode: "rotate",
+      order: ["xformOp:translate"],
+      attrs: [attr("xformOp:translate", "double3", "vec3d", vec([10, 0, 0]))],
+      localMatrix: local,
+      targetLocalMatrix: target,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.writes).toEqual([
+      { name: "xformOp:rotateXYZ", type: "float3", data: [0, 0, 90] },
+      { name: "xformOp:translate", type: "double3", data: [12, 2, 0] },
+      { name: "xformOpOrder", type: "token_array", data: ["xformOp:translate", "xformOp:rotateXYZ"] },
+    ]);
+    expect(matricesClose(recomposed(result), target)).toBe(true);
+  });
+
+  it("creates a translate op at the front of the order for an off-origin rotate on an op-less prim", () => {
+    // No authored ops: the pivot residual must be split into a leading
+    // translate (most-global) plus the new rotateXYZ, both listed in the
+    // authored xformOpOrder.
+    const target = compose([translation(3, -1, 0), rotZ(90)]);
+    const result = composeOpUpdate({
+      mode: "rotate",
+      order: [],
+      attrs: [],
+      localMatrix: IDENTITY,
+      targetLocalMatrix: target,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.writes).toEqual([
+      { name: "xformOp:rotateXYZ", type: "float3", data: [0, 0, 90] },
+      { name: "xformOp:translate", type: "double3", data: [3, -1, 0] },
+      { name: "xformOpOrder", type: "token_array", data: ["xformOp:translate", "xformOp:rotateXYZ"] },
+    ]);
+    expect(matricesClose(recomposed(result), target)).toBe(true);
+  });
+
+  it("authors the pivot translation for an off-origin scale drag", () => {
+    // Scale 3x about the anchor (1,1,0): the desired local matrix is
+    // T(a)·S(3)·T(-a), which recomposes as translate (-2,-2,0) then
+    // scale (3,3,3).
+    const local = compose([scaleOf(2, 2, 2)]);
+    const target = compose([translation(1, 1, 0), scaleOf(3, 3, 3), translation(-1, -1, 0)]);
+    const result = composeOpUpdate({
+      mode: "scale",
+      order: ["xformOp:scale"],
+      attrs: [attr("xformOp:scale", "float3", "vec3f", vec([2, 2, 2]))],
+      localMatrix: local,
+      targetLocalMatrix: target,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.writes).toEqual([
+      { name: "xformOp:scale", type: "float3", data: [3, 3, 3] },
+      { name: "xformOp:translate", type: "double3", data: [-2, -2, 0] },
+      { name: "xformOpOrder", type: "token_array", data: ["xformOp:translate", "xformOp:scale"] },
+    ]);
+    expect(matricesClose(recomposed(result), target)).toBe(true);
+  });
+
+  it("refuses an off-origin drag whose residual is not a pure translation", () => {
+    // A rotate target with shear in it: the pivot residual carries a
+    // linear part no translate op can absorb — refuse rather than guess.
+    const local = compose([rotZ(90)]);
+    const target = compose([rotZ(90), scaleOf(2, 1, 1)]);
+    const result = composeOpUpdate({
+      mode: "rotate",
+      order: ["xformOp:rotateXYZ"],
+      attrs: [attr("xformOp:rotateXYZ", "float3", "vec3f", vec([0, 0, 90]))],
+      localMatrix: local,
+      targetLocalMatrix: target,
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    if (result.ok) return;
+    expect(result.error).toContain("pure translation");
   });
 
   it("refuses stacks it cannot evaluate (orient, missing values, mid-stack reset, mismatch)", () => {
