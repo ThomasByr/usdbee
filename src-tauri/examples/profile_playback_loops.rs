@@ -14,13 +14,14 @@
 //             i.e. walk + `serde_json::to_vec` of the delta + the app's
 //             `geometry_animated` paths + one batch + `frame_pose`'s copies.
 //             This is the per-pose backend cost the app actually sees.
-//   step avg  the pose avg: the app's per-pose backend cost and its fps
+//   step avg  same as the pose avg (kept for continuity with the published
+//             tables): the app's per-pose backend cost and its fps
 //             ceiling (the frontend decode and GPU upload are not measured).
 //   tessell.  MeshCache insert count for the stage: 3,934 after loop 1 and
 //             unchanged after, since a warm pose must tessellate nothing.
 //
-// The pose row runs after the two rows above, so loop 1's cold tessellation is
-// charged to `geometry`; loops 2-3 `pose` is the warm app turn. Every pose
+// The pose row runs after the two rows above, so every loop's `pose` is warm:
+// loop 1's cold tessellation is charged to `geometry`. Every pose
 // frame is sanity-parsed (JSON decodes, path list matches the batch slots) so a
 // corrupted payload cannot pass as a fast one.
 //
@@ -80,7 +81,10 @@ fn check_pose_frame(bytes: &[u8]) -> Result<usize, String> {
         std::str::from_utf8(path).map_err(|error| format!("pose path: {}", error))?;
     }
     at = (at + 3) & !3;
-    take_u32(bytes, &mut at)?; // batch magic
+    let magic = take_u32(bytes, &mut at)?;
+    if magic != 0x5553_4247 {
+        return Err(format!("pose frame: bad batch magic {:#x}", magic));
+    }
     take_u32(bytes, &mut at)?; // batch version
     let slots = take_u32(bytes, &mut at)? as usize;
     if slots != count {
@@ -90,7 +94,10 @@ fn check_pose_frame(bytes: &[u8]) -> Result<usize, String> {
         ));
     }
     for _ in 0..slots {
-        take_u32(bytes, &mut at)?; // slot status
+        let status = take_u32(bytes, &mut at)?;
+        if status != 0 {
+            return Err(format!("pose frame: slot status {}", status));
+        }
         let len = take_u32(bytes, &mut at)? as usize;
         take(bytes, &mut at, len)?;
         at = (at + 3) & !3;
