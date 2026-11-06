@@ -61,10 +61,10 @@ describe("shouldRenderFrame", () => {
   });
 
   it("renders the next tick after a single late callback", () => {
-    // One 33 ms gap must not cost a second render: a late frame already paid
+    // One 33.4 ms gap must not cost a second render: a late frame already paid
     // the interval, and the following tick starts a fresh one.
-    const { renders } = simulate([16.7, 33.4, 50.1, 66.8, 83.5], INTERVAL_60);
-    expect(renders).toEqual([16.7, 33.4, 50.1, 66.8, 83.5]);
+    const { renders } = simulate([16.7, 50.1, 66.8, 83.5], INTERVAL_60);
+    expect(renders).toEqual([16.7, 50.1, 66.8, 83.5]);
   });
 
   it("tolerates a callback landing just under the interval", () => {

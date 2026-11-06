@@ -183,15 +183,20 @@ export class RendererKit {
     const maxFps = viewerSettings.maxFps;
     if (maxFps > 0) {
       const interval = 1000 / maxFps;
-      if (!shouldRenderFrame(now, this.lastFrameTime, interval)) {
+      // The first tick is init's synchronous call, on a clock that has not run
+      // yet: with no anchor to pace against, gating it would drop the frame.
+      const noAnchorYet = this.lastFrameTime === 0;
+      if (!noAnchorYet && !shouldRenderFrame(now, this.lastFrameTime, interval)) {
         frameDiag.onThrottled();
         return;
       }
-      this.lastFrameTime = nextFrameTime(now, this.lastFrameTime, interval);
+      this.lastFrameTime = noAnchorYet ? now : nextFrameTime(now, this.lastFrameTime, interval);
     } else {
       this.lastFrameTime = now;
     }
 
+    // The diag records the rAF timestamp (scheduler jitter), the gate above
+    // records the sampled clock: the decision needs a monotonic one.
     frameDiag.onRender(time);
 
     // Play -> pause prints; pause -> play drops the paused span so it is

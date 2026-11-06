@@ -83,6 +83,15 @@ describe("fps limiter", () => {
     expect(shadowDraws).toHaveLength(5);
   });
 
+  it("renders the first frame on a clock that has not ticked yet", () => {
+    // init calls animate() synchronously, so the first decision sees a clock
+    // near zero and no anchor: pacing it against 0 drops the first frame.
+    const { kit, shadowDraws } = makeKit(true);
+    clockMs = 2;
+    frame(kit, 0);
+    expect(shadowDraws).toHaveLength(1);
+  });
+
   it("leaves the skipped time to the next rendered frame", () => {
     const { kit, shadowDraws } = makeKit(true);
     const deltas: number[] = [];
