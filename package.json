@@ -19,7 +19,7 @@
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",
     "validate": "npm run format:check && npm run test:rust && npm test && npm run check && npm run clippy",
-    "probe:edit": "cargo run --manifest-path src-tauri/Cargo.toml --example profile_edit_commit",
+    "probe": "cargo run --manifest-path src-tauri/Cargo.toml --example",
     "clean": "cargo clean --manifest-path src-tauri/Cargo.toml && rimraf dist node_modules"
   },
   "license": "MIT",
