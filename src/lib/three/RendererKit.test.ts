@@ -12,17 +12,28 @@ vi.mock("@tauri-apps/api/window", () => ({
 import * as THREE from "three";
 import { RendererKit } from "./RendererKit.svelte";
 import * as frameDiag from "$lib/perf/frameDiag";
+import { requestShadowUpdate } from "./shadowMapUpdate";
 
 function makeKit(playing: boolean) {
   const kit = new RendererKit();
   const node = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1));
   kit.scene = new THREE.Scene();
-  kit.renderer = { render: vi.fn() } as unknown as THREE.WebGLRenderer;
+  // `shadowDraws` records what the shadow pass saw at each render: three.js
+  // clears needsUpdate itself once it has drawn the map.
+  const shadowDraws: boolean[] = [];
+  const shadowMap = { autoUpdate: false, needsUpdate: false };
+  kit.renderer = {
+    render: vi.fn(() => {
+      shadowDraws.push(shadowMap.needsUpdate);
+      shadowMap.needsUpdate = false;
+    }),
+    shadowMap,
+  } as unknown as THREE.WebGLRenderer;
   kit.controls = { update: vi.fn() } as unknown as RendererKit["controls"];
   kit.selectedNode = node;
   kit.selectionHelper = new THREE.Box3Helper(new THREE.Box3(), new THREE.Color(0xffffff));
   kit.isPlayingAnim = playing;
-  return { kit, node };
+  return { kit, node, shadowDraws };
 }
 
 // One render-loop tick (time 0 skips the max-fps throttle).
@@ -143,5 +154,47 @@ describe("selection box during playback", () => {
     frame(kit);
 
     expect(kit.selectionHelper!.visible).toBe(false);
+  });
+});
+
+describe("shadow map updates", () => {
+  it("draws the map on the first frame, then leaves it alone on plain frames", () => {
+    const { kit, shadowDraws } = makeKit(false);
+    requestShadowUpdate();
+
+    frame(kit);
+    frame(kit);
+    frame(kit);
+
+    expect(shadowDraws).toEqual([true, false, false]);
+  });
+
+  it("does not redraw while a paused scene is orbited", () => {
+    const { kit, shadowDraws } = makeKit(true);
+    kit.isPlayingAnim = false;
+    kit.camera = new THREE.PerspectiveCamera();
+    // OrbitControls motion moves the camera only: no caster moves.
+    kit.controls = {
+      update: vi.fn(() => kit.camera.position.set(kit.camera.position.x + 1, 0, 3)),
+    } as unknown as RendererKit["controls"];
+    requestShadowUpdate();
+
+    frame(kit);
+    frame(kit);
+    frame(kit);
+
+    expect(shadowDraws).toEqual([true, false, false]);
+  });
+
+  it("redraws the frame after a request, once", () => {
+    const { kit, shadowDraws } = makeKit(true);
+    requestShadowUpdate();
+    frame(kit);
+
+    requestShadowUpdate(); // a pose, an edit refresh or a load landed
+    frame(kit);
+    frame(kit);
+
+    expect(shadowDraws).toEqual([true, true, false]);
   });
 });

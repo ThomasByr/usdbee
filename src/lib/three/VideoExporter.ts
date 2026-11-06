@@ -3,6 +3,7 @@ import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { toBlobURL } from "@ffmpeg/util";
 import { save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { renderWithShadowUpdate } from "$lib/three/shadowMapUpdate";
 
 export interface ExportContext {
   renderer: THREE.WebGLRenderer;
@@ -73,12 +74,16 @@ export async function runExport(
     }
   }
 
+  // The viewport loop is parked while the export modal is open, so the
+  // export draws the per-pose shadow map itself.
+  const drawFrame = () => renderWithShadowUpdate(renderer, scene, camera);
+
   try {
     if (format === "jpg" || format === "png") {
       if (config.timestamp !== undefined && onBeforeFrame) {
         await onBeforeFrame(config.timestamp);
       }
-      renderer.render(scene, camera);
+      drawFrame();
 
       const mimeType = format === "jpg" ? "image/jpeg" : "image/png";
       const dataUrl = renderer.domElement.toDataURL(mimeType, format === "jpg" ? quality : undefined);
@@ -145,7 +150,7 @@ export async function runExport(
         for (let i = 0; i < totalFrames; i++) {
           const t = startTime + (i * rate) / fps;
           if (onBeforeFrame) await onBeforeFrame(t);
-          renderer.render(scene, camera);
+          drawFrame();
 
           const dataUrl = renderer.domElement.toDataURL("image/jpeg", 0.95);
           const base64Data = dataUrl.split(",")[1];

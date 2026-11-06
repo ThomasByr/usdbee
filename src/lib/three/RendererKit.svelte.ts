@@ -7,6 +7,7 @@ import { viewerSettings } from "$lib/state/viewerSettings.svelte";
 import { controlsState } from "$lib/state/controlsState.svelte";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as frameDiag from "$lib/perf/frameDiag";
+import { initOnDemandShadows, renderWithShadowUpdate } from "$lib/three/shadowMapUpdate";
 
 export class RendererKit {
   canvas: HTMLCanvasElement | null = null;
@@ -96,6 +97,7 @@ export class RendererKit {
 
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    initOnDemandShadows(this.renderer.shadowMap);
 
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
@@ -313,7 +315,7 @@ export class RendererKit {
     }
 
     if (!this.scene) return;
-    this.renderer.render(this.scene, renderCam as THREE.Camera);
+    renderWithShadowUpdate(this.renderer, this.scene, renderCam as THREE.Camera);
 
     if (!this.hasShownWindow) {
       this.hasShownWindow = true;

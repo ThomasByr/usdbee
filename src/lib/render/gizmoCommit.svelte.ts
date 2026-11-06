@@ -4,6 +4,7 @@ import { composeOpUpdate, evaluateGizmoGate, matricesClose, type GizmoMode } fro
 import { stageState } from "$lib/stage/stageState.svelte";
 import { renderState } from "$lib/render/renderState.svelte";
 import { refreshSceneAfterEdit } from "$lib/render/sceneIntegration";
+import { requestShadowUpdate } from "$lib/three/shadowMapUpdate";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
 
 // Transform gizmo editing policy (Phase 3 Task 4), moved out of the
@@ -243,6 +244,8 @@ export function initGizmo(viewer: RendererKit, getMode: () => GizmoMode) {
     node.matrixAutoUpdate = false;
     node.matrix.copy(previewLocalMatrix(node.parent.matrixWorld, endWorld));
     node.matrixWorldNeedsUpdate = true;
+    // The dragged prim is a caster moving under a paused playhead.
+    requestShadowUpdate();
   };
   viewer.onFrameGizmoSync = () => frameSyncGizmo(viewer);
   // Effects created here run inside the component's initialization

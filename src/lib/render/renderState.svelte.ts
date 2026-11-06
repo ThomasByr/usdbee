@@ -16,6 +16,7 @@ import { stageState } from "../stage/stageState.svelte";
 import { decodeGeometryBatch, decodeMaterialBatch } from "./geometryDecoder";
 import { loadCachedTexture, clearTextureCache } from "./textureCache";
 import * as frameDiag from "../perf/frameDiag";
+import { requestShadowUpdate } from "../three/shadowMapUpdate";
 import {
   applyPackedGeometryInPlace,
   applyTransform,
@@ -378,6 +379,7 @@ async function updateScene(
       object.parent!.visible = false;
     }
   }
+  requestShadowUpdate();
 }
 
 // Time-delta update (playback/scrub): the delta manifest carries ONLY
@@ -419,6 +421,8 @@ async function updateSceneDelta(
       if (isDirectWrapper && present.has(path.slice(0, slash))) object.parent!.visible = false;
     }
   }
+  // A pose moved casters: the shadow map follows the pose, not the frame.
+  requestShadowUpdate();
 }
 
 // Geometry for the edit-refreshed prims, fetched through the BATCH

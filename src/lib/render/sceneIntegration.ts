@@ -11,6 +11,7 @@ import { disposeScene } from "$lib/render/sceneBuilder";
 import { clearTextureCache } from "$lib/render/textureCache";
 import { upAxisRotation } from "$lib/stage/upAxis";
 import * as frameDiag from "$lib/perf/frameDiag";
+import { requestShadowUpdate } from "$lib/three/shadowMapUpdate";
 import { viewerSettings } from "$lib/state/viewerSettings.svelte";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
 
@@ -39,6 +40,8 @@ export function resetLoadedScene(viewer: RendererKit) {
 // meshes, no USD cameras).
 export function integrateScene(viewer: RendererKit, group: THREE.Group) {
   viewer.loadedGroup = group;
+  // New geometry in the scene: the shadow map still holds the old casters.
+  requestShadowUpdate();
   // A rebuild replaces every node: re-bind the selection to the new subtree
   // or the gizmo and selection box would track a detached node (the old
   // pre-rebind bug where clicking the tree row "fixed" them).
@@ -297,10 +300,15 @@ export function syncGraphicsSettings(viewer: RendererKit) {
       viewer.dirLight.shadow.map.dispose();
       viewer.dirLight.shadow.map = null as any;
     }
+    // A disposed map must be drawn again, or on-demand updates leave the
+    // scene with no shadows at all.
+    requestShadowUpdate();
   }
 }
 
 export function syncLightRig(viewer: RendererKit, lightAzimuth: number, lightElevation: number) {
+  // Any rig change moves the light: the casters' shadows all shift.
+  requestShadowUpdate();
   if (viewer.renderer) viewer.renderer.toneMappingExposure = viewerSettings.toneExposure;
   if (viewer.ambientLight) viewer.ambientLight.intensity = viewerSettings.ambientIntensity;
   if (viewer.dirLight) {

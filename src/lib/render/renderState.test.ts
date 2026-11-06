@@ -21,6 +21,7 @@ import {
 import { disposeScene, GEOMETRY_BATCH_SIZE } from "./sceneBuilder";
 import type { MaterialInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
+import { consumeShadowUpdate } from "../three/shadowMapUpdate";
 
 const mockedInvoke = vi.mocked(invoke);
 
@@ -36,6 +37,7 @@ beforeEach(() => {
   mockedInvoke.mockReset();
   renderState.time = null;
   renderState.timeCodes = [];
+  consumeShadowUpdate();
 });
 
 describe("renderState", () => {
@@ -724,6 +726,21 @@ describe("renderState.setStageTime", () => {
     expect(instanced.parent!.visible).toBe(false);
   });
 
+  it("requests a shadow redraw when a pose applies, not on a deduped frame", async () => {
+    // Playback moves casters: the map must follow the pose, once per pose,
+    // not once per render frame.
+    const wobble = node({ path: "/Scene/Wobble", name: "Wobble", animated: true });
+    await loadScene(() => [wobble]);
+    consumeShadowUpdate();
+
+    mockIpc(() => [node({ ...wobble, transform: translate(2) })]);
+    await renderState.setStageTime(5);
+    expect(consumeShadowUpdate()).toBe(true);
+
+    await renderState.setStageTime(5); // same snapped code: nothing moved
+    expect(consumeShadowUpdate()).toBe(false);
+  });
+
   it("dedupes a repeated same-time step into zero extra fetches", async () => {
     // Playback perf: with time-code snapping the driver re-requests the
     // IDENTICAL time on most frames (60 Hz/30 tcps = every other frame,
@@ -1262,6 +1279,23 @@ describe("renderState.refreshAfterEdit", () => {
 
     expect(await renderState.refreshAfterEdit(["/"])).toBe(true);
     expect(mockedInvoke).not.toHaveBeenCalled();
+  });
+
+  it("requests a shadow redraw when an edit patches the scene in place", async () => {
+    const shape = node({
+      path: "/Scene/Shape",
+      name: "Shape",
+      type_name: "Mesh",
+      has_geometry: true,
+      transform: translate(1),
+    });
+    await loadScene(() => [shape]);
+    consumeShadowUpdate();
+
+    mockIpc(() => [node({ ...shape, transform: translate(5) })]);
+    await renderState.refreshAfterEdit(["/Scene/Shape"]);
+
+    expect(consumeShadowUpdate()).toBe(true);
   });
 
   it("patches an edited prim in place through the batched geometry fetch", async () => {

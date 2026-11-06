@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { WebGLRenderer, PerspectiveCamera, Scene } from "three";
   import * as THREE from "three";
+  import { renderWithShadowUpdate } from "$lib/three/shadowMapUpdate";
   import Modal from "$lib/components/Modal.svelte";
 
   let {
@@ -104,7 +105,9 @@
       camera.aspect = res.width / res.height;
       camera.updateProjectionMatrix();
 
-      renderer.render(scene, camera);
+      // The viewport loop is parked while this modal is open: the preview
+      // draws the per-pose shadow map itself.
+      renderWithShadowUpdate(renderer, scene, camera);
 
       if (format === "jpg") {
         previewUrl = renderer.domElement.toDataURL("image/jpeg", quality);

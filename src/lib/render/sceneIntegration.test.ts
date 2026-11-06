@@ -11,12 +11,19 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import * as THREE from "three";
 import { invoke } from "@tauri-apps/api/core";
-import { installPlaybackDriver, integrateScene, loadRustScene, resetLoadedScene } from "./sceneIntegration";
+import {
+  installPlaybackDriver,
+  integrateScene,
+  loadRustScene,
+  resetLoadedScene,
+  syncLightRig,
+} from "./sceneIntegration";
 import { loadCachedTexture } from "./textureCache";
 import { renderState } from "./renderState.svelte";
 import * as frameDiag from "../perf/frameDiag";
 import { loadOrchestrator } from "../state/loadOrchestrator.svelte";
 import { stageState } from "../stage/stageState.svelte";
+import { consumeShadowUpdate } from "../three/shadowMapUpdate";
 import type { RendererKit } from "../three/RendererKit.svelte";
 
 const mockedInvoke = vi.mocked(invoke);
@@ -61,6 +68,7 @@ beforeEach(() => {
   renderState.status = "idle";
   renderState.timeCodes = [];
   stageState.selectedPath = null;
+  consumeShadowUpdate();
   stageState.stageInfo = {
     start_time_code: 0,
     end_time_code: 24,
@@ -273,6 +281,32 @@ describe("integrateScene", () => {
     integrateScene(kit, rebuilt.group);
 
     expect(kit.selectedNode).toBeNull();
+  });
+
+  it("requests a shadow redraw for the new geometry", () => {
+    // Load, rebuild and stage switch all land here: the map holds the old
+    // scene's casters until it is redrawn.
+    const kit = integrateKit();
+    consumeShadowUpdate();
+
+    integrateScene(kit, namedGroup("/Scene/Shape").group);
+
+    expect(consumeShadowUpdate()).toBe(true);
+  });
+});
+
+describe("syncLightRig", () => {
+  it("requests a shadow redraw when the light rig changes", () => {
+    const kit = integrateKit();
+    kit.renderer = { toneMappingExposure: 1 } as unknown as RendererKit["renderer"];
+    kit.dirLight = new THREE.DirectionalLight();
+    kit.sceneCenter = new THREE.Vector3();
+    kit.sceneSize = 10;
+    consumeShadowUpdate();
+
+    syncLightRig(kit, 45, 45);
+
+    expect(consumeShadowUpdate()).toBe(true);
   });
 });
 
