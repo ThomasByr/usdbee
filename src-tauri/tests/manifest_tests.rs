@@ -834,12 +834,14 @@ fn undo_and_redo_of_a_sampled_xform_edit_reach_the_manifest() {
 //
 // Pose frame layout (stage.rs::frame_pose), per pose:
 //   [u32 LE path count][per path: u32 LE len + utf8][pad to 4]
+//   [u32 LE material count][per material: u32 LE len + utf8][pad to 4]
 //   [u32 LE node count][node count x node, pre-order]
 //   [geometry batch]
 // and node =
 //   [u32 path id][u32 first child id (0xFFFF_FFFF for a leaf)][u16 child
 //   count][u8 flags (bit0 has_geometry, bit1 geometry_animated, bit2 has
-//   instances)][u8 visible][16 x f32 LE matrix]
+//   instances, bit3 is_points, bit4 animated)][u8 visible][u32 material id
+//   (0xFFFF_FFFF for none)][16 x f32 LE matrix]
 //   [u32 instance count][instance count x 16 f32 LE]   // only when bit2
 // The decoder below is the spec the frontend one has to match: it rebuilds the
 // exact tree from first_child_id + child_count.
@@ -857,9 +859,9 @@ fn align4(offset: usize) -> usize {
     offset + (4 - offset % 4) % 4
 }
 
-/// One node of a decoded pose frame, exactly as the frame carries it: no
-/// material, name, type name or `animated` flag (the pose path reads those
-/// only where a node first appears, and a delta node carries no material).
+/// One node of a decoded pose frame, exactly as the frame carries it: no name
+/// (the pose path names objects from the path), and `animated` is the raw
+/// motion flag, which the pose path gates the whole drawable update on.
 #[derive(Debug, Clone)]
 struct PoseNode {
     path: String,
@@ -867,13 +869,17 @@ struct PoseNode {
     child_count: u16,
     has_geometry: bool,
     geometry_animated: bool,
+    animated: bool,
+    is_points: bool,
     visible: bool,
+    material: Option<String>,
     matrix: [f32; 16],
     instances: Vec<[f32; 16]>,
 }
 
 struct DecodedPose<'a> {
     paths: Vec<String>,
+    materials: Vec<String>,
     /// Pre-order, flat.
     nodes: Vec<PoseNode>,
     /// The geometry batch tail, byte for byte.
@@ -881,9 +887,12 @@ struct DecodedPose<'a> {
 }
 
 const POSE_LEAF: u32 = u32::MAX;
+const POSE_NO_MATERIAL: u32 = u32::MAX;
 const POSE_FLAG_HAS_GEOMETRY: u8 = 1 << 0;
 const POSE_FLAG_GEOMETRY_ANIMATED: u8 = 1 << 1;
 const POSE_FLAG_INSTANCES: u8 = 1 << 2;
+const POSE_FLAG_IS_POINTS: u8 = 1 << 3;
+const POSE_FLAG_ANIMATED: u8 = 1 << 4;
 
 fn take_u32(bytes: &[u8], at: &mut usize) -> u32 {
     let value = u32::from_le_bytes(bytes[*at..*at + 4].try_into().unwrap());
@@ -916,6 +925,17 @@ fn decode_pose(frame: &[u8]) -> DecodedPose<'_> {
         at += len;
     }
     at = align4(at);
+    let material_count = take_u32(frame, &mut at) as usize;
+    let mut materials = Vec::with_capacity(material_count);
+    for _ in 0..material_count {
+        let len = take_u32(frame, &mut at) as usize;
+        materials.push(
+            std::str::from_utf8(&frame[at..at + len])
+                .expect("material binding must be utf8")
+                .to_string(),
+        );
+        at = align4(at + len);
+    }
     let node_count = take_u32(frame, &mut at) as usize;
     let mut nodes = Vec::with_capacity(node_count);
     for _ in 0..node_count {
@@ -926,6 +946,7 @@ fn decode_pose(frame: &[u8]) -> DecodedPose<'_> {
         let flags = frame[at];
         let visible = frame[at + 1];
         at += 2;
+        let material_id = take_u32(frame, &mut at) as usize;
         let matrix = take_f32s::<16>(frame, &mut at);
         let instances = if flags & POSE_FLAG_INSTANCES != 0 {
             let count = take_u32(frame, &mut at) as usize;
@@ -944,6 +965,18 @@ fn decode_pose(frame: &[u8]) -> DecodedPose<'_> {
             child_count,
             has_geometry: flags & POSE_FLAG_HAS_GEOMETRY != 0,
             geometry_animated: flags & POSE_FLAG_GEOMETRY_ANIMATED != 0,
+            animated: flags & POSE_FLAG_ANIMATED != 0,
+            is_points: flags & POSE_FLAG_IS_POINTS != 0,
+            material: if material_id == POSE_NO_MATERIAL as usize {
+                None
+            } else {
+                Some(
+                    materials
+                        .get(material_id)
+                        .unwrap_or_else(|| panic!("node material id {material_id} out of range"))
+                        .clone(),
+                )
+            },
             visible: match visible {
                 0 => false,
                 1 => true,
@@ -955,6 +988,7 @@ fn decode_pose(frame: &[u8]) -> DecodedPose<'_> {
     }
     DecodedPose {
         paths,
+        materials,
         nodes,
         slots: &frame[at..],
     }
@@ -1028,8 +1062,8 @@ fn assert_pose_matrix(json: &[f64; 16], bin: &[f32; 16], where_: &str) {
 }
 
 /// Deep compare of the decoded tree against the JSON delta manifest: paths,
-/// tree shape, matrices (1e-6 relative), visibility, flags and instance
-/// matrices. Any field drift fails here.
+/// tree shape, matrices (1e-6 relative), visibility, flags, material bindings
+/// and instance matrices. Any field drift fails here.
 fn assert_pose_matches(nodes: &[RenderNode], trees: &[PoseTree], where_: &str) {
     assert_eq!(nodes.len(), trees.len(), "{where_}: root count");
     for (node, tree) in nodes.iter().zip(trees) {
@@ -1045,6 +1079,18 @@ fn assert_pose_matches(nodes: &[RenderNode], trees: &[PoseTree], where_: &str) {
             "{}: geometry_animated",
             node.path
         );
+        assert_eq!(
+            node.type_name == "Points",
+            tree.node.is_points,
+            "{}: is_points follows type_name",
+            node.path
+        );
+        assert_eq!(node.material, tree.node.material, "{}: material", node.path);
+        assert_eq!(node.animated, tree.node.animated, "{}: animated", node.path);
+        // The frame drops `name`; the pose path names objects from the path.
+        if node.geometry_animated {
+            assert!(node.animated, "{}: geometry implies animated", node.path);
+        }
         // The frame drops `animated`; the pose path only reads it next to
         // `geometry_animated`, which is the tighter condition.
         if node.geometry_animated {
@@ -1071,6 +1117,19 @@ fn pose_path_table(nodes: &[RenderNode], table: &mut Vec<String>) {
             table.push(node.path.clone());
         }
         pose_path_table(&node.children, table);
+    }
+}
+
+/// The frame's material table: every distinct binding the frame's nodes carry
+/// once, in first-visit pre-order.
+fn pose_material_table(nodes: &[RenderNode], table: &mut Vec<String>) {
+    for node in nodes {
+        if let Some(binding) = node.material.as_ref() {
+            if !table.contains(binding) {
+                table.push(binding.clone());
+            }
+        }
+        pose_material_table(&node.children, table);
     }
 }
 
@@ -1121,6 +1180,8 @@ fn merged_pose_matches_the_two_command_path() {
         ("two_deforming_meshes.usda", [1.0, 2.0].as_slice()),
         // A deep tree with many deforming prims.
         ("skinned.usda", [0.0, 1.0].as_slice()),
+        // Deforming Points + Mesh with distinct material bindings.
+        ("posed_appearance.usda", [1.0, 2.0].as_slice()),
     ] {
         let state = spawn_stage_owner();
         open_via_owner(&state, name);
@@ -1141,6 +1202,16 @@ fn merged_pose_matches_the_two_command_path() {
             let merged = request_animated_pose(&state.sender(), Some(time))
                 .expect("merged pose should serialize");
             let decoded = decode_pose(&merged);
+            if name == "posed_appearance.usda" {
+                assert!(
+                    decoded.materials.len() >= 2,
+                    "the appearance fixture must bind at least two materials"
+                );
+                assert!(
+                    decoded.nodes.iter().any(|node| node.is_points),
+                    "the appearance fixture must carry a Points node"
+                );
+            }
 
             // The path table covers every node once, in first-visit pre-order.
             let mut table = Vec::new();
@@ -1152,6 +1223,25 @@ fn merged_pose_matches_the_two_command_path() {
                 "{} at {time}: one node per path (delta paths are unique)",
                 name
             );
+            // The material table covers every binding once, first visit first,
+            // and carries nothing the frame's nodes do not reference.
+            let mut materials = Vec::new();
+            pose_material_table(&nodes, &mut materials);
+            assert_eq!(
+                decoded.materials, materials,
+                "{} at {time}: material table",
+                name
+            );
+            for binding in &decoded.materials {
+                assert!(
+                    decoded
+                        .nodes
+                        .iter()
+                        .any(|node| node.material.as_deref() == Some(binding.as_str())),
+                    "{} at {time}: material {binding} is in the table but unbound",
+                    name
+                );
+            }
             // The rebuilt tree is the JSON delta manifest, field for field.
             assert_pose_matches(&nodes, &rebuild_pose_tree(&decoded.nodes), name);
 
@@ -1208,11 +1298,17 @@ fn decode_pose_frames(payload: &[u8]) -> Vec<&[u8]> {
             at += 4 + len;
         }
         at = align4(at);
+        let materials = u32_at(at);
+        at += 4;
+        for _ in 0..materials {
+            let len = u32_at(at);
+            at = align4(at + 4 + len);
+        }
         let nodes = u32_at(at);
         at += 4;
         for _ in 0..nodes {
             let flags = payload[at + 10];
-            at += 12 + 64; // header + 16 x f32 matrix
+            at += 16 + 64; // header (incl. material id) + 16 x f32 matrix
             if flags & POSE_FLAG_INSTANCES != 0 {
                 let instances = u32_at(at);
                 at += 4 + instances * 64;

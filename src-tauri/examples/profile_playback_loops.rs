@@ -64,11 +64,11 @@ fn take_u32(bytes: &[u8], at: &mut usize) -> Result<u32, String> {
 }
 
 /// Parse the merged pose frame far enough to prove it is intact:
-/// `[u32 path count][paths][pad][u32 node count][node records][batch]`. Every
-/// path must be UTF-8 and dense, every node's path id must resolve, every
-/// first child id must stay inside the node array, and the batch tail must
-/// hold exactly one slot per deforming, deduped node path with nothing left
-/// over.
+/// `[u32 path count][paths][pad][u32 material count][materials][pad][u32 node
+/// count][node records][batch]`. Every path and binding must be UTF-8, every
+/// node's path id and material id must resolve, every first child id must stay
+/// inside the node array, and the batch tail must hold exactly one slot per
+/// deforming, deduped node path with nothing left over.
 fn check_pose_frame(bytes: &[u8]) -> Result<usize, String> {
     let mut at = 0;
     let path_count = take_u32(bytes, &mut at)? as usize;
@@ -79,6 +79,16 @@ fn check_pose_frame(bytes: &[u8]) -> Result<usize, String> {
         paths.push(std::str::from_utf8(path).map_err(|error| format!("pose path: {}", error))?);
     }
     at = (at + 3) & !3;
+    let material_count = take_u32(bytes, &mut at)? as usize;
+    let mut materials: Vec<&str> = Vec::with_capacity(material_count);
+    for _ in 0..material_count {
+        let len = take_u32(bytes, &mut at)? as usize;
+        let binding = take(bytes, &mut at, len)?;
+        materials.push(
+            std::str::from_utf8(binding).map_err(|error| format!("pose material: {}", error))?,
+        );
+        at = (at + 3) & !3;
+    }
     let node_count = take_u32(bytes, &mut at)? as usize;
     let mut slots_expected = 0usize;
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -112,6 +122,13 @@ fn check_pose_frame(bytes: &[u8]) -> Result<usize, String> {
             .ok_or_else(|| format!("pose frame: node {} path id {}", index, path_id))?;
         if flags & 0b110 == 0b110 && seen.insert(path) {
             slots_expected += 1;
+        }
+        let material_id = take_u32(bytes, &mut at)? as usize;
+        if material_id != u32::MAX as usize && materials.get(material_id).is_none() {
+            return Err(format!(
+                "pose frame: node {} material id {}",
+                index, material_id
+            ));
         }
         take(bytes, &mut at, 64)?; // 16 x f32 matrix
         if flags & 0b100 != 0 {

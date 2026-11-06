@@ -4124,9 +4124,15 @@ fn animated_geometry_paths(nodes: &[RenderNode]) -> Vec<String> {
 /// Pose node record flags. The frontend decoder
 /// (src/lib/render/poseDecoder.ts) mirrors these.
 const POSE_LEAF: u32 = u32::MAX;
+const POSE_NO_MATERIAL: u32 = u32::MAX;
 const POSE_FLAG_HAS_GEOMETRY: u8 = 1 << 0;
 const POSE_FLAG_GEOMETRY_ANIMATED: u8 = 1 << 1;
 const POSE_FLAG_INSTANCES: u8 = 1 << 2;
+const POSE_FLAG_IS_POINTS: u8 = 1 << 3;
+/// The node carries any motion signal. It is not redundant with
+/// `geometry_animated`: the pose path gates its whole drawable update — the
+/// instance count and matrices included — on it.
+const POSE_FLAG_ANIMATED: u8 = 1 << 4;
 
 /// Pre-order flatten of the delta tree: a node's children sit directly after
 /// it, so `first_child_id` is always `index + 1` when it has any.
@@ -4138,13 +4144,14 @@ fn flatten_pose<'a>(nodes: &'a [RenderNode], flat: &mut Vec<&'a RenderNode>) {
 }
 
 /// `[u32 path id][u32 first child id][u16 child count][u8 flags][u8 visible]
-/// [16 x f32 matrix]`, then, when the node owns instances,
+/// [u32 material id][16 x f32 matrix]`, then, when the node owns instances,
 /// `[u32 count][count x 16 f32]`. Matrices go out as f32: display transforms
 /// tolerate the precision, and the matrix halves its per-node bytes.
 fn write_pose_node(
     out: &mut Vec<u8>,
     node: &RenderNode,
     path_id: u32,
+    material_id: u32,
     index: usize,
 ) -> Result<(), String> {
     let child_count = u16::try_from(node.children.len())
@@ -4159,6 +4166,12 @@ fn write_pose_node(
     if !node.instances.is_empty() {
         flags |= POSE_FLAG_INSTANCES;
     }
+    if node.type_name == "Points" {
+        flags |= POSE_FLAG_IS_POINTS;
+    }
+    if node.animated {
+        flags |= POSE_FLAG_ANIMATED;
+    }
     let first_child = if node.children.is_empty() {
         POSE_LEAF
     } else {
@@ -4168,6 +4181,7 @@ fn write_pose_node(
     out.extend(first_child.to_le_bytes());
     out.extend(child_count.to_le_bytes());
     out.extend([flags, u8::from(node.visible)]);
+    out.extend(material_id.to_le_bytes());
     for value in node.transform {
         out.extend((value as f32).to_le_bytes());
     }
@@ -4184,12 +4198,13 @@ fn write_pose_node(
 
 /// The merged pose response, one invoke per pose:
 /// `[u32 LE path count][per path: u32 LE length + utf8 bytes][4-byte pad]
-/// [u32 LE node count][pre-order node records][geometry batch payload]`.
+/// [u32 LE material count][per material: u32 LE length + utf8 bytes][4-byte
+/// pad][u32 LE node count][pre-order node records][geometry batch payload]`.
 /// Prefixes carry the true byte lengths and the padding is implicit
 /// (`align4`), so the batch tail — and every slot inside it — starts 4-byte
 /// aligned and the frontend can view it in place. The node table is the
-/// delta tree with paths deduplicated into the table, so a playback step
-/// ships no JSON and no repeated path strings.
+/// delta tree with paths and material bindings deduplicated into their
+/// tables, so a playback step ships no JSON and no repeated strings.
 /// shortcut: the merged pose batches ALL geometry_animated prims with no slot cap (the old 32-slice batching is gone), upgrade to a capped batch + per-prim fallback when a stage with more than ~32 deforming prims appears.
 fn frame_pose(nodes: &[RenderNode], mut batch: Vec<u8>) -> Result<Vec<u8>, String> {
     let mut flat = Vec::with_capacity(nodes.len());
@@ -4202,17 +4217,45 @@ fn frame_pose(nodes: &[RenderNode], mut batch: Vec<u8>) -> Result<Vec<u8>, Strin
             table.push(node.path.as_str());
         }
     }
+    // Only the bindings this frame's nodes actually carry reach the table: a
+    // delta ships the handful of prims it touches, not the stage's materials.
+    let mut binding_ids: HashMap<&str, u32> = HashMap::new();
+    let mut bindings: Vec<&str> = Vec::new();
+    for node in &flat {
+        if let Some(binding) = node.material.as_deref() {
+            if !binding_ids.contains_key(binding) {
+                binding_ids.insert(binding, bindings.len() as u32);
+                bindings.push(binding);
+            }
+        }
+    }
     let table_len: usize = table.iter().map(|path| 4 + path.len()).sum();
-    let mut out = Vec::with_capacity(8 + table_len + flat.len() * 76 + batch.len());
+    let align4 = |length: usize| (length + 3) & !3;
+    let binding_bytes: usize = bindings
+        .iter()
+        .map(|binding| align4(4 + binding.len()))
+        .sum();
+    let mut out =
+        Vec::with_capacity(12 + table_len + binding_bytes + flat.len() * 80 + batch.len());
     out.extend((table.len() as u32).to_le_bytes());
     for path in &table {
         out.extend((path.len() as u32).to_le_bytes());
         out.extend(path.as_bytes());
     }
     pad_to_4(&mut out);
+    out.extend((bindings.len() as u32).to_le_bytes());
+    for binding in &bindings {
+        out.extend((binding.len() as u32).to_le_bytes());
+        out.extend(binding.as_bytes());
+        pad_to_4(&mut out);
+    }
     out.extend((flat.len() as u32).to_le_bytes());
     for (index, node) in flat.iter().enumerate() {
-        write_pose_node(&mut out, node, ids[node.path.as_str()], index)?;
+        let material_id = node
+            .material
+            .as_deref()
+            .map_or(POSE_NO_MATERIAL, |binding| binding_ids[binding]);
+        write_pose_node(&mut out, node, ids[node.path.as_str()], material_id, index)?;
     }
     out.append(&mut batch);
     Ok(out)
@@ -5106,12 +5149,12 @@ mod pose_frame_tests {
         f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
     }
 
-    // An empty delta still frames a readable header: no paths, no nodes, just
-    // the geometry batch tail (here empty).
+    // An empty delta still frames a readable header: no paths, no materials,
+    // no nodes, just the geometry batch tail (here empty).
     #[test]
     fn frame_pose_emits_an_empty_table_for_an_empty_delta() {
         let frame = frame_pose(&[], Vec::new()).unwrap();
-        assert_eq!(frame, [0u8; 8], "empty path table + zero node count");
+        assert_eq!(frame, [0u8; 12], "empty path + material tables, zero nodes");
     }
 
     // The node record, field by field, at its documented offsets.
@@ -5121,6 +5164,8 @@ mod pose_frame_tests {
         root.transform[0] = 0.1; // not exactly representable in f32
         root.visible = false;
         root.geometry_animated = true;
+        root.type_name = "Points".to_string();
+        root.material = Some("/Looks/Mat".to_string());
         root.instances = vec![identity()];
         let frame = frame_pose(&[root], Vec::new()).unwrap();
 
@@ -5135,6 +5180,15 @@ mod pose_frame_tests {
             at += path.len();
         }
         at = (at + 3) & !3;
+
+        // Material table: only the distinct bindings the nodes carry, each
+        // entry padded to 4 so the node table stays aligned.
+        assert_eq!(u32_at(&frame, at), 1, "one distinct binding");
+        at += 4;
+        assert_eq!(u32_at(&frame, at) as usize, "/Looks/Mat".len());
+        assert_eq!(&frame[at + 4..at + 4 + 10], b"/Looks/Mat");
+        at = (at + 4 + 10 + 3) & !3;
+
         assert_eq!(u32_at(&frame, at), 2, "two nodes, pre-order");
         at += 4;
 
@@ -5148,15 +5202,20 @@ mod pose_frame_tests {
         );
         assert_eq!(
             frame[at + 10],
-            POSE_FLAG_HAS_GEOMETRY | POSE_FLAG_GEOMETRY_ANIMATED | POSE_FLAG_INSTANCES
+            POSE_FLAG_HAS_GEOMETRY
+                | POSE_FLAG_GEOMETRY_ANIMATED
+                | POSE_FLAG_INSTANCES
+                | POSE_FLAG_IS_POINTS
+                | POSE_FLAG_ANIMATED
         );
         assert_eq!(frame[at + 11], 0, "invisible root");
-        assert_eq!(f32_at(&frame, at + 12), 0.1f32, "matrix element 0 as f32");
-        let instances = at + 12 + 64;
+        assert_eq!(u32_at(&frame, at + 12), 0, "root material id");
+        assert_eq!(f32_at(&frame, at + 16), 0.1f32, "matrix element 0 as f32");
+        let instances = at + 16 + 64;
         assert_eq!(u32_at(&frame, instances), 1, "one instance matrix");
         assert_eq!(f32_at(&frame, instances + 4), 1.0, "identity element 0");
 
-        // Leaf: path id 1, the leaf sentinel, no children, would-be flags.
+        // Leaf: path id 1, the leaf sentinel, no children, no material.
         let leaf = instances + 4 + 64;
         assert_eq!(u32_at(&frame, leaf), 1, "leaf path id");
         assert_eq!(u32_at(&frame, leaf + 4), POSE_LEAF, "leaf first child");
@@ -5165,9 +5224,14 @@ mod pose_frame_tests {
             0,
             "leaf child count"
         );
-        assert_eq!(frame[leaf + 10], POSE_FLAG_HAS_GEOMETRY, "leaf flags");
+        assert_eq!(
+            frame[leaf + 10],
+            POSE_FLAG_HAS_GEOMETRY | POSE_FLAG_ANIMATED,
+            "leaf flags"
+        );
         assert_eq!(frame[leaf + 11], 1, "visible leaf");
-        assert_eq!(frame.len(), leaf + 12 + 64, "no trailing bytes");
+        assert_eq!(u32_at(&frame, leaf + 12), POSE_NO_MATERIAL, "no binding");
+        assert_eq!(frame.len(), leaf + 16 + 64, "no trailing bytes");
     }
 
     // A zero-child root list: as many roots as nodes, none pointing at a child.
@@ -5179,36 +5243,41 @@ mod pose_frame_tests {
         let frame = frame_pose(&roots, Vec::new()).unwrap();
         let table_end = 4 + roots.iter().map(|root| 4 + root.path.len()).sum::<usize>();
         let mut at = (table_end + 3) & !3;
+        assert_eq!(u32_at(&frame, at), 0, "no bindings on these roots");
+        at += 4;
         assert_eq!(u32_at(&frame, at), 3, "three roots");
         at += 4;
         for index in 0..3 {
             assert_eq!(u32_at(&frame, at), index as u32, "root {index} path id");
             assert_eq!(u32_at(&frame, at + 4), POSE_LEAF, "root {index} is a leaf");
-            at += 76;
+            at += 80;
         }
         assert_eq!(at, frame.len(), "no trailing bytes");
     }
 
-    // Payload budget: a bike pose is ~190 delta nodes with ~30-byte paths, so
-    // the frame is 200 nodes x 76 B + ~200 x 34 B of path table = ~22 KB. The
+    // Payload budget: a bike pose is ~190 delta nodes with ~30-byte paths, ~31
+    // distinct material bindings and no geometry slots. 200 nodes x 80 B +
+    // ~200 x 34 B of path table + 31 x ~44 B of material table = ~24 KB. The
     // JSON it replaces measured ~78 KB. (The plan's "16 KB" predates the
-    // 12-byte node header + 64-byte matrix arithmetic: 200 nodes alone are
-    // 15.2 KB, which leaves no room for paths.)
+    // 16-byte node header + 64-byte matrix arithmetic: 200 nodes alone are
+    // 15.2 KB, which leaves no room for paths or bindings.)
     #[test]
     fn frame_pose_keeps_a_realistic_pose_within_the_payload_budget() {
         let children: Vec<RenderNode> = (0..199)
             .map(|index| {
-                node(
+                let mut child = node(
                     &format!("/Hummingbird/Wing_L/Feather.{index:03}"),
                     Vec::new(),
-                )
+                );
+                child.material = Some(format!("/Hummingbird/Looks/Body_{:02}", index % 31));
+                child
             })
             .collect();
         let root = node("/Hummingbird", children);
         let frame = frame_pose(&[root], Vec::new()).unwrap();
         assert!(
-            frame.len() < 24 * 1024,
-            "200-node pose frame is {} B, over the ~22 KB budget",
+            frame.len() < 28 * 1024,
+            "200-node pose frame is {} B, over the ~24 KB budget",
             frame.len()
         );
         println!("200-node pose frame: {} B", frame.len());

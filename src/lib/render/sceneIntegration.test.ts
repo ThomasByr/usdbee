@@ -28,6 +28,7 @@ import { stageState } from "../stage/stageState.svelte";
 import { viewerSettings } from "../state/viewerSettings.svelte";
 import { consumeShadowUpdate } from "../three/shadowMapUpdate";
 import type { RendererKit } from "../three/RendererKit.svelte";
+import { encodePoseBatch, encodePoseFrame, emptyPoseBatch } from "./poseFrameFixture";
 
 const mockedInvoke = vi.mocked(invoke);
 
@@ -218,29 +219,11 @@ describe("installPlaybackDriver", () => {
   });
 });
 
-// One pose frame with no geometry slots (`[]` manifest, no paths), the
-// smallest legal frame for the batch decode.
-function emptyPoseFrame(): ArrayBuffer {
-  const manifest = new TextEncoder().encode("[]");
-  const buffer = new ArrayBuffer(24);
-  const view = new DataView(buffer);
-  view.setUint32(0, manifest.length, true);
-  new Uint8Array(buffer).set(manifest, 4);
-  view.setUint32(8, 0, true); // path count
-  view.setUint32(12, 0x55534247, true); // geometry batch magic
-  view.setUint32(16, 1, true); // batch version
-  view.setUint32(20, 0, true); // slot count
-  return buffer;
-}
-
+// The batch pose response with one empty pose frame per entry: the smallest
+// legal payload for the decode.
 function poseBatch(count: number): ArrayBuffer {
-  const frame = new Uint8Array(emptyPoseFrame());
-  const buffer = new ArrayBuffer(4 + count * frame.byteLength);
-  new DataView(buffer).setUint32(0, count, true);
-  for (let i = 0; i < count; i++) {
-    new Uint8Array(buffer, 4 + i * frame.byteLength, frame.byteLength).set(frame);
-  }
-  return buffer;
+  const frame = encodePoseFrame([], emptyPoseBatch());
+  return encodePoseBatch(Array.from({ length: count }, () => frame));
 }
 
 describe("installPlaybackDriver pose prefetch", () => {

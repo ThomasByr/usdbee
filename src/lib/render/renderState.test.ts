@@ -25,6 +25,7 @@ import { disposeScene, GEOMETRY_BATCH_SIZE } from "./sceneBuilder";
 import type { MaterialInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
 import { consumeShadowUpdate } from "../three/shadowMapUpdate";
+import { encodePoseBatch, encodePoseFrame, type PoseFixtureNode } from "./poseFrameFixture";
 
 const mockedInvoke = vi.mocked(invoke);
 
@@ -300,45 +301,34 @@ function animatedPaths(nodes: RenderNode[]): string[] {
   return paths;
 }
 
-// One merged pose response (layout: stage.rs::frame_pose): manifest length +
-// JSON, path count + length-prefixed paths, each block 4-byte padded, then the
-// geometry batch frame whose slot i belongs to path i.
-function poseFrame(nodes: RenderNode[], batch: ArrayBuffer, paths = animatedPaths(nodes)): ArrayBuffer {
-  const encoder = new TextEncoder();
-  const manifest = encoder.encode(JSON.stringify(nodes));
-  const encoded = paths.map((path) => encoder.encode(path));
-  const aligned = (length: number) => (length + 3) & ~3;
-  const pathsLength = encoded.reduce((sum, path) => sum + 4 + path.length, 0);
-  const head = 4 + aligned(manifest.length) + 4 + aligned(pathsLength);
-  const buffer = new ArrayBuffer(head + batch.byteLength);
-  const view = new DataView(buffer);
-  const bytes = new Uint8Array(buffer);
-  view.setUint32(0, manifest.length, true);
-  bytes.set(manifest, 4);
-  let offset = 4 + aligned(manifest.length);
-  view.setUint32(offset, encoded.length, true);
-  offset += 4;
-  for (const path of encoded) {
-    view.setUint32(offset, path.length, true);
-    bytes.set(path, offset + 4);
-    offset += 4 + path.length;
-  }
-  bytes.set(new Uint8Array(batch), head);
-  return buffer;
+// One merged pose response (layout: stage.rs::frame_pose): the path and
+// material tables, then the pre-order node table, then the geometry batch
+// frame whose slot i belongs to the i-th deforming path.
+function poseFrame(nodes: RenderNode[], batch: ArrayBuffer): ArrayBuffer {
+  return encodePoseFrame(asFixture(nodes), batch);
+}
+
+/// The manifest as the frame writer sees it: the two fields the frame drops
+/// (name, animated) are absent by construction.
+function asFixture(nodes: RenderNode[]): PoseFixtureNode[] {
+  return nodes.map((node) => ({
+    path: node.path,
+    children: asFixture(node.children),
+    transform: node.transform,
+    visible: node.visible,
+    has_geometry: node.has_geometry,
+    geometry_animated: node.geometry_animated,
+    animated: node.animated,
+    type_name: node.type_name,
+    material: node.material,
+    instances: node.instances,
+  }));
 }
 
 // The batch pose response (stage.rs::frame_poses): u32 frame count then the
 // frames back to back.
 function poseBatch(frames: ArrayBuffer[]): ArrayBuffer {
-  const buffer = new ArrayBuffer(4 + frames.reduce((sum, frame) => sum + frame.byteLength, 0));
-  const view = new DataView(buffer);
-  view.setUint32(0, frames.length, true);
-  let offset = 4;
-  for (const frame of frames) {
-    new Uint8Array(buffer, offset, frame.byteLength).set(new Uint8Array(frame));
-    offset += frame.byteLength;
-  }
-  return buffer;
+  return encodePoseBatch(frames);
 }
 
 // `count` ok slots carrying the default triangle frame (geometryDecoder
@@ -942,6 +932,37 @@ describe("renderState.setStageTime", () => {
     const appeared = findMesh(group) as THREE.InstancedMesh;
     expect(appeared).toBeTruthy();
     expect(appeared.count).toBe(1);
+  });
+
+  it("rebuilds an appearing prototype as points with its bound material", async () => {
+    // The pose frame has to carry the two facts buildScene reads on the
+    // delta-appearance branch: a Points prototype must not come back as a
+    // Mesh, and its material binding must survive the round trip (it is
+    // sticky — later frames find the object in byPath and never rebuild it).
+    const prototype = node({
+      path: "/Scene/Instancer/__proto_0",
+      name: "__proto_0",
+      type_name: "Points",
+      has_geometry: true,
+      animated: true,
+      material: "/Scene/Looks/Spark",
+      instances: [IDENTITY],
+    });
+    const instancer = (children: RenderNode[]) =>
+      node({ path: "/Scene/Instancer", name: "Instancer", type_name: "PointInstancer", children });
+    const group = await loadScene(() => [instancer([])]);
+
+    mockIpc(() => [instancer([prototype])]);
+    await renderState.setStageTime(1);
+
+    const appeared = group.getObjectByName("/Scene/Instancer/__proto_0") as THREE.Group | undefined;
+    expect(appeared?.children[0] && (appeared.children[0] as THREE.Points).isPoints).toBe(true);
+    // The binding survived the frame: buildScene prefetches one material slot
+    // per distinct binding path, so a dropped binding shows up as an empty list.
+    expect(mockedInvoke).toHaveBeenCalledWith(
+      "get_material_batch",
+      expect.objectContaining({ paths: ["/Scene/Looks/Spark"] }),
+    );
   });
 
   it("keeps an Xform-rooted prototype subtree alive across time ticks", async () => {

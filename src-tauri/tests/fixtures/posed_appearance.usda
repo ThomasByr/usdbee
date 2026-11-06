@@ -1,0 +1,61 @@
+#usda 1.0
+(
+    defaultPrim = "Scene",
+    startTimeCode = 1,
+    endTimeCode = 2
+)
+
+# A deforming Points prim and a deforming Mesh, each bound to a different
+# material: the pose frame has to carry both bindings and the Points type
+# through, so a node that first appears mid-playback rebuilds as a point cloud
+# with its bound material instead of a fallback-coloured mesh.
+def Xform "Scene"
+{
+    def Points "Sparks"
+    {
+        point3f[] points.timeSamples = {
+            1: [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+            2: [(0, 0, 1), (2, 0, 0), (0, 2, 0)],
+        }
+        float[] widths = [0.02]
+        rel material:binding = </Scene/Looks/Spark>
+    }
+
+    def Mesh "Shell"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points.timeSamples = {
+            1: [(-1, 0, 0), (1, 0, 0), (0, 1, 0)],
+            2: [(-1, 0, 0), (1, 0, 0), (0, 3, 0)],
+        }
+        rel material:binding = </Scene/Looks/Shell>
+    }
+
+    def Scope "Looks"
+    {
+        def Material "Spark"
+        {
+            token outputs:surface.connect = </Scene/Looks/Spark/PreviewSurface.outputs:surface>
+
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (1, 0.6, 0.1)
+                token outputs:surface
+            }
+        }
+
+        def Material "Shell"
+        {
+            token outputs:surface.connect = </Scene/Looks/Shell/PreviewSurface.outputs:surface>
+
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.2, 0.4, 0.9)
+                token outputs:surface
+            }
+        }
+    }
+}
