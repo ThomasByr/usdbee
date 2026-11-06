@@ -26,6 +26,7 @@ import {
   type FallbackDependencies,
   type InstanceContext,
   type SceneFetchers,
+  type AnimatedPose,
 } from "./sceneBuilder";
 
 let loadGeneration = 0;
@@ -78,6 +79,39 @@ export function getTimeCodes(stageId: number): Promise<number[]> {
   return invoke<number[]>("get_time_codes", { stageId });
 }
 
+// One pose response (stage.rs::frame_pose): u32 manifest length + JSON, u32
+// path count + length-prefixed paths (slot order), then the geometry batch
+// frame. Prefixes carry the true byte lengths and the padding is implicit,
+// so decode with a cursor rather than typed-array views.
+const poseText = new TextDecoder();
+
+function decodeAnimatedPose(payload: ArrayBuffer): AnimatedPose {
+  const view = new DataView(payload);
+  let offset = 0;
+  const u32 = () => {
+    const value = view.getUint32(offset, true);
+    offset += 4;
+    return value;
+  };
+  const bytes = (length: number) => {
+    const slice = new Uint8Array(payload, offset, length);
+    offset += length;
+    return slice;
+  };
+  const align = () => {
+    offset = (offset + 3) & ~3;
+  };
+  const manifest = JSON.parse(poseText.decode(bytes(u32()))) as RenderNode[];
+  align();
+  const paths: string[] = [];
+  for (let count = u32(); count > 0; count--) paths.push(poseText.decode(bytes(u32())));
+  align();
+  const slots = decodeGeometryBatch(new Uint8Array(payload, offset));
+  const prefetched: AnimatedPose["prefetched"] = new Map();
+  paths.forEach((path, slot) => prefetched.set(path, slots[slot] ?? null));
+  return { manifest, prefetched };
+}
+
 const fetchers: SceneFetchers = {
   getGeometry: (path: string, time = renderState.time) =>
     invoke<ArrayBuffer>("get_geometry_data", {
@@ -94,6 +128,13 @@ const fetchers: SceneFetchers = {
         paths,
         time,
       }),
+    ),
+  // Playback pose: one invoke carries the delta manifest AND its
+  // animated-geometry slots (two serial round trips per pose dropped frames
+  // in dev). Decoded here so the step only applies the result.
+  getAnimatedPose: async (time: number) =>
+    decodeAnimatedPose(
+      await invoke<ArrayBuffer>("get_animated_pose", { stageId: stageState.activeStageId, time }),
     ),
   getMaterial: (path: string) =>
     invoke<MaterialInfo>("get_material_data", {
@@ -375,43 +416,6 @@ async function updateSceneDelta(
   }
 }
 
-// Geometry for the animated prims of ONE pose (F5): fetched through the
-// BATCH command in bounded sequential slices, so a pose costs one round
-// trip per slice instead of one per prim. Deduped — a shared prototype
-// subtree can repeat a path. A failed batch command leaves the map
-// unfilled and updateNodes falls back to per-path fetches, fail-soft.
-async function prefetchAnimatedGeometry(
-  manifest: RenderNode[],
-  time: number,
-  isStale: () => boolean,
-): Promise<Map<string, ArrayBuffer | Uint8Array | null>> {
-  const prefetched = new Map<string, ArrayBuffer | Uint8Array | null>();
-  const paths: string[] = [];
-  const seen = new Set<string>();
-  const walk = (nodes: RenderNode[]) => {
-    for (const node of nodes) {
-      if (node.has_geometry && node.geometry_animated && !seen.has(node.path)) {
-        seen.add(node.path);
-        paths.push(node.path);
-      }
-      walk(node.children);
-    }
-  };
-  walk(manifest);
-  for (let start = 0; start < paths.length; start += GEOMETRY_BATCH_SIZE) {
-    const slice = paths.slice(start, start + GEOMETRY_BATCH_SIZE);
-    try {
-      const slots = await fetchers.getGeometryBatch!(slice, time);
-      if (isStale()) return prefetched;
-      slice.forEach((path, slot) => prefetched.set(path, slots[slot] ?? null));
-    } catch (e) {
-      console.warn("usdbee: playback geometry batch failed; fetching per path:", e);
-      break;
-    }
-  }
-  return prefetched;
-}
-
 // Geometry for the edit-refreshed prims, fetched through the BATCH
 // command (ruling: a single-path refresh is a 1-element batch) in
 // bounded sequential slices. A failed batch command leaves the map
@@ -615,10 +619,10 @@ export const renderState = $state({
   },
 
   // Steps the stage time (USD time codes) and updates the integrated
-  // scene in place: ONE time-delta manifest fetch (only the animated
-  // nodes), then per-animated-node geometry fetches. One step runs at a
-  // time; rapid requests coalesce to the latest queued time. Loads still
-  // supersede active work via loadGeneration.
+  // scene in place: ONE invoke per pose (delta manifest + geometry slots),
+  // then updateNodes applies them. One step runs at a time; rapid requests
+  // coalesce to the latest queued time. Loads still supersede active work
+  // via loadGeneration.
   setStageTime(time: number): Promise<void> {
     // Same-time dedupe: with time-code snapping the driver re-requests the
     // identical time on most frames (each a full manifest fetch); skip
@@ -641,17 +645,13 @@ export const renderState = $state({
     timeStepInFlight = true;
     activeTimeStep = (async () => {
       try {
-        const manifest = await invoke<RenderNode[]>("get_animated_manifest", {
-          stageId: stageState.activeStageId,
-          time,
-        });
+        // Frame-pacing diagnostics: how long one pose costs end to end.
+        performance.mark("usdbee:pose:issued");
+        const { manifest, prefetched } = await fetchers.getAnimatedPose!(time);
         if (generation !== loadGeneration || currentGroup !== group) return;
         const isStale = () => generation !== loadGeneration || currentGroup !== group;
-        // One batched prefetch per pose: updateNodes consumes these slots
-        // instead of paying a round trip per animated prim.
-        const prefetched = await prefetchAnimatedGeometry(manifest, time, isStale);
-        if (isStale()) return;
         await updateSceneDelta(manifest, time, isStale, prefetched);
+        performance.measure("usdbee:pose", "usdbee:pose:issued");
       } catch (e) {
         if (generation === loadGeneration) {
           // Keep the last good scene on screen; surface why.

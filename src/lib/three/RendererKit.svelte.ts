@@ -167,7 +167,9 @@ export class RendererKit {
       const interval = 1000 / viewerSettings.maxFps;
       const elapsed = time - this.lastFrameTime;
 
-      if (elapsed < interval) return;
+      // 1 ms tolerance: rAF timestamps jitter, and a frame landing a hair
+      // below the interval would push the render a whole frame later.
+      if (elapsed < interval - 1) return;
       this.lastFrameTime = time - (elapsed % interval);
     } else if (viewerSettings.maxFps === 0) {
       this.lastFrameTime = time;

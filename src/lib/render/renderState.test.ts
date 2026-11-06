@@ -186,11 +186,15 @@ function node(overrides: Partial<RenderNode>): RenderNode {
 }
 
 // Dispatches the IPC commands sceneBuilder drives; `manifest`
-// supplies the answer for get_scene_manifest AND get_animated_manifest
-// (the playback step fetches the same scene through the delta command).
+// supplies the answer for get_scene_manifest AND the playback pose
+// (the step fetches the delta through the merged pose command).
 function mockIpc(manifest: () => RenderNode[] | Promise<RenderNode[]>) {
   const dispatcher = async (cmd: string, args: any) => {
-    if (cmd === "get_scene_manifest" || cmd === "get_animated_manifest") return manifest();
+    if (cmd === "get_scene_manifest") return manifest();
+    if (cmd === "get_animated_pose") {
+      const nodes = await manifest();
+      return poseFrame(nodes, packedBatchGeometry(1, animatedPaths(nodes).length));
+    }
     if (cmd === "get_time_codes") return [];
     if (cmd === "get_geometry_data") return packedGeometry();
     if (cmd === "get_geometry_batch") return packedBatchGeometry(1, args.paths.length);
@@ -199,6 +203,51 @@ function mockIpc(manifest: () => RenderNode[] | Promise<RenderNode[]>) {
     throw new Error(`unexpected command: ${cmd}`);
   };
   mockedInvoke.mockImplementation(dispatcher as any);
+}
+
+// The pose's geometry slot order (stage.rs::animated_geometry_paths):
+// pre-order walk, has_geometry && geometry_animated, deduped.
+function animatedPaths(nodes: RenderNode[]): string[] {
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  const walk = (entries: RenderNode[]) => {
+    for (const entry of entries) {
+      if (entry.has_geometry && entry.geometry_animated && !seen.has(entry.path)) {
+        seen.add(entry.path);
+        paths.push(entry.path);
+      }
+      walk(entry.children);
+    }
+  };
+  walk(nodes);
+  return paths;
+}
+
+// One merged pose response (layout: stage.rs::frame_pose): manifest length +
+// JSON, path count + length-prefixed paths, each block 4-byte padded, then the
+// geometry batch frame whose slot i belongs to path i.
+function poseFrame(nodes: RenderNode[], batch: ArrayBuffer, paths = animatedPaths(nodes)): ArrayBuffer {
+  const encoder = new TextEncoder();
+  const manifest = encoder.encode(JSON.stringify(nodes));
+  const encoded = paths.map((path) => encoder.encode(path));
+  const aligned = (length: number) => (length + 3) & ~3;
+  const pathsLength = encoded.reduce((sum, path) => sum + 4 + path.length, 0);
+  const head = 4 + aligned(manifest.length) + 4 + aligned(pathsLength);
+  const buffer = new ArrayBuffer(head + batch.byteLength);
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  view.setUint32(0, manifest.length, true);
+  bytes.set(manifest, 4);
+  let offset = 4 + aligned(manifest.length);
+  view.setUint32(offset, encoded.length, true);
+  offset += 4;
+  for (const path of encoded) {
+    view.setUint32(offset, path.length, true);
+    bytes.set(path, offset + 4);
+    offset += 4 + path.length;
+  }
+  bytes.set(new Uint8Array(batch), head);
+  return buffer;
 }
 
 // `count` ok slots carrying the default triangle frame (geometryDecoder
@@ -350,17 +399,12 @@ describe("renderState.setStageTime", () => {
 
     await renderState.setStageTime(5);
 
-    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_manifest", {
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose", {
       stageId: stageState.activeStageId,
       time: 5,
     });
-    const geometryCalls = mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_geometry_batch");
-    expect(geometryCalls).toHaveLength(1);
-    expect(geometryCalls[0][1]).toEqual({
-      stageId: stageState.activeStageId,
-      paths: ["/Scene/Wobble"],
-      time: 5,
-    });
+    // One pose = one invoke: no follow-up geometry round trip.
+    expect(mockedInvoke).toHaveBeenCalledTimes(1);
     expect(renderState.time).toBe(5);
 
     // The time-step updates the ALREADY-integrated group: the same
@@ -388,7 +432,7 @@ describe("renderState.setStageTime", () => {
     mockIpc(() => [node({ ...mover, transform: translate(5) })]);
     await renderState.setStageTime(5);
 
-    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_manifest", {
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose", {
       stageId: stageState.activeStageId,
       time: 5,
     });
@@ -432,8 +476,7 @@ describe("renderState.setStageTime", () => {
     const index = geometry.getIndex()!;
 
     mockedInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_animated_manifest") return [wobble];
-      if (cmd === "get_geometry_batch") return packedBatch([packedGeometry(4)]);
+      if (cmd === "get_animated_pose") return poseFrame([wobble], packedBatch([packedGeometry(4)]));
       if (cmd === "get_material_data") return { name: "Mat", surface: null };
       throw new Error(`unexpected command: ${cmd}`);
     });
@@ -463,8 +506,7 @@ describe("renderState.setStageTime", () => {
     const disposeSpy = vi.spyOn(oldGeometry, "dispose");
 
     mockedInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_animated_manifest") return [wobble];
-      if (cmd === "get_geometry_batch") return packedBatch([packedGeometryCounts(4, 6)]);
+      if (cmd === "get_animated_pose") return poseFrame([wobble], packedBatch([packedGeometryCounts(4, 6)]));
       if (cmd === "get_material_data") return { name: "Mat", surface: null };
       throw new Error(`unexpected command: ${cmd}`);
     });
@@ -496,8 +538,6 @@ describe("renderState.setStageTime", () => {
     });
     const group = await loadScene(() => [wobble, still]);
     const stillWrapper = group.children.find((child) => child.name === "/Scene/Still")!;
-    const stillGeometryCalls = () =>
-      mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_geometry_batch").length;
 
     mockIpc(() => [node({ ...wobble, transform: translate(7) })]);
     await renderState.setStageTime(5);
@@ -506,11 +546,14 @@ describe("renderState.setStageTime", () => {
     expect(wobbleWrapper!.matrix.elements[12]).toBe(7);
     expect(stillWrapper.matrix.elements[12]).toBe(2);
     expect(stillWrapper.visible).toBe(true);
-    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_manifest", {
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose", {
       stageId: stageState.activeStageId,
       time: 5,
     });
-    expect(stillGeometryCalls()).toBe(1); // only Wobble's refetch
+    // The pose carries only Wobble's geometry: the static sibling is not
+    // refetched (and no per-prim fallback ran).
+    expect(mockedInvoke).toHaveBeenCalledTimes(1);
+    expect(mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_geometry_data")).toHaveLength(0);
   });
 
   it("does not hide a static instanced mesh absent from the delta", async () => {
@@ -710,7 +753,7 @@ describe("renderState.setStageTime", () => {
     const group = await loading;
     await Promise.resolve();
 
-    const deltaCalls = mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_animated_manifest");
+    const deltaCalls = mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_animated_pose");
     expect(deltaCalls).toHaveLength(0);
     expect(renderState.time).toBe(3);
     expect(group).toBeTruthy();
@@ -719,12 +762,14 @@ describe("renderState.setStageTime", () => {
   it("coalesces rapid time steps to one active and one latest manifest fetch", async () => {
     const wobble = node({ path: "/Scene/Wobble", name: "Wobble" });
     await loadScene(() => [wobble]);
-    const active = deferred<RenderNode[]>();
+    const active = deferred<ArrayBuffer>();
     const requested: number[] = [];
     mockedInvoke.mockImplementation(async (cmd: string, args: any) => {
-      if (cmd === "get_animated_manifest") {
+      if (cmd === "get_animated_pose") {
         requested.push(args.time);
-        return requested.length === 1 ? active.promise : [node({ ...wobble, transform: translate(9) })];
+        return requested.length === 1
+          ? active.promise
+          : poseFrame([node({ ...wobble, transform: translate(9) })], packedBatch([]));
       }
       throw new Error(`unexpected command: ${cmd}`);
     });
@@ -737,7 +782,7 @@ describe("renderState.setStageTime", () => {
       renderState.setStageTime(9),
     ];
     const callsWhileActive = requested.length;
-    active.resolve([node({ ...wobble, transform: translate(5) })]);
+    active.resolve(poseFrame([node({ ...wobble, transform: translate(5) })], packedBatch([])));
     await Promise.all(steps);
 
     expect(callsWhileActive).toBe(1);
@@ -1038,6 +1083,8 @@ describe("renderState.setStageTime", () => {
 
     active.resolve([node({ ...wobble, transform: translate(9) })]);
     await Promise.all([activeStep, latestStep]);
+    // The coalesced drain runs detached: flush it before reading the result.
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     const wrapper = group.children.find((child) => child.name === "/Scene/Wobble");
     expect(wrapper!.matrix.elements[12]).toBe(6);
@@ -1085,7 +1132,7 @@ describe("renderState.setStageTime", () => {
     expect(renderState.time).toBe(5);
   });
 
-  it("uses each step's own time for geometry and finishes with the latest queued data", async () => {
+  it("uses each step's own time for the pose and finishes with the latest queued data", async () => {
     const wobble = node({
       path: "/Scene/Wobble",
       name: "Wobble",
@@ -1098,16 +1145,15 @@ describe("renderState.setStageTime", () => {
 
     const slow = deferred<ArrayBuffer>();
     mockedInvoke.mockImplementation(async (cmd: string, args: any) => {
-      if (cmd === "get_animated_manifest") return [wobble];
-      if (cmd === "get_geometry_batch")
-        return args.time === 5 ? slow.promise : packedBatch([packedGeometry(2)]);
+      if (cmd === "get_animated_pose")
+        return args.time === 5 ? slow.promise : poseFrame([wobble], packedBatch([packedGeometry(2)]));
       if (cmd === "get_material_data") return { name: "Mat", surface: null };
       throw new Error(`unexpected command: ${cmd}`);
     });
 
     const slowStep = renderState.setStageTime(5);
     const latestStep = renderState.setStageTime(6);
-    slow.resolve(packedBatch([packedGeometry(9)]));
+    slow.resolve(poseFrame([wobble], packedBatch([packedGeometry(9)])));
     await Promise.all([slowStep, latestStep]);
     // The coalesced drain runs detached (a sustained driver must never
     // extend the caller's chain): flush it before reading the result.
@@ -1116,14 +1162,14 @@ describe("renderState.setStageTime", () => {
     const mesh = findMesh(group);
     expect(mesh.geometry.getAttribute("position").getY(2)).toBe(2);
     const geometryTimes = mockedInvoke.mock.calls
-      .filter(([cmd]) => cmd === "get_geometry_batch")
+      .filter(([cmd]) => cmd === "get_animated_pose")
       .map(([, args]) => (args as any).time);
     expect(geometryTimes).toEqual([5, 6]);
     expect(renderState.time).toBe(6);
   });
 });
 
-describe("playback geometry prefetch", () => {
+describe("playback pose invoke", () => {
   const deforming = (name: string, transform = IDENTITY) =>
     node({
       path: `/Scene/${name}`,
@@ -1135,70 +1181,69 @@ describe("playback geometry prefetch", () => {
       transform,
     });
 
-  it("prefetches every animated prim in one batch per pose", async () => {
-    // F5: the bike paid 14 sequential per-path invokes per pose. The pose
-    // must cost ONE batched geometry round trip for all deforming prims.
+  const meshAt = (group: THREE.Group, path: string): THREE.Mesh => {
+    let mesh: THREE.Mesh | null = null;
+    group.children
+      .find((child) => child.name === path)!
+      .traverse((object) => {
+        if (!mesh && (object as THREE.Mesh).isMesh) mesh = object as THREE.Mesh;
+      });
+    return mesh!;
+  };
+
+  it("steps a pose with ONE invoke and applies the manifest and the geometry slots", async () => {
+    // The bike paid two serial round trips per pose (manifest, then geometry
+    // batch); the merged response must both move the prims and swap their
+    // geometry, with slot i belonging to path i.
     const prims = [deforming("A"), deforming("B"), deforming("C")];
-    await loadScene(() => prims);
-    mockIpc(() => prims);
+    const group = await loadScene(() => prims);
+    const moved = prims.map((prim, i) => ({ ...prim, transform: translate(i + 5) }));
+    const batch = packedBatch([packedGeometry(2), packedGeometry(3), packedGeometry(4)]);
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_animated_pose") return poseFrame(moved, batch);
+      throw new Error(`unexpected command: ${cmd}`);
+    });
 
     await renderState.setStageTime(5);
 
-    const batches = mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_geometry_batch");
-    expect(batches).toHaveLength(1);
-    expect(batches[0][1]).toEqual({
+    expect(mockedInvoke).toHaveBeenCalledTimes(1);
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose", {
       stageId: stageState.activeStageId,
-      paths: ["/Scene/A", "/Scene/B", "/Scene/C"],
       time: 5,
     });
-    // The warm path never falls back to a per-prim fetch.
-    expect(mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_geometry_data")).toHaveLength(0);
+    ["A", "B", "C"].forEach((name, i) => {
+      const wrapper = group.children.find((child) => child.name === `/Scene/${name}`)!;
+      expect(wrapper.matrix.elements[12]).toBe(i + 5);
+      expect(meshAt(group, `/Scene/${name}`).geometry.getAttribute("position").getY(2)).toBe(i + 2);
+    });
   });
 
-  it("dedupes repeated paths and slices the prefetch at the batch size", async () => {
-    // A shared prototype subtree can repeat a path in the delta; bound the
-    // prefetch by GEOMETRY_BATCH_SIZE slices like the load-time prefill.
-    const prims = Array.from({ length: GEOMETRY_BATCH_SIZE + 1 }, (_, i) => deforming(`P${i}`));
-    await loadScene(() => prims);
-    const delta = [...prims, prims[0]!];
-    mockIpc(() => delta);
-
-    await renderState.setStageTime(5);
-
-    const sizes = mockedInvoke.mock.calls
-      .filter(([cmd]) => cmd === "get_geometry_batch")
-      .map(([, args]) => (args as any).paths.length);
-    expect(sizes).toEqual([GEOMETRY_BATCH_SIZE, 1]);
-  });
-
-  it("drops a prefetch that went stale before it applied", async () => {
+  it("drops a pose that went stale before it applied", async () => {
     const wobble = deforming("Wobble");
     const group = await loadScene(() => [wobble]);
     const mesh = findMesh(group);
     expect(mesh.geometry.getAttribute("position").getY(2)).toBe(1);
 
-    const batch = deferred<ArrayBuffer>();
-    let batchCalls = 0;
+    const pose = deferred<ArrayBuffer>();
+    let poseCalls = 0;
     mockedInvoke.mockImplementation(async (cmd: string, args: any) => {
-      if (cmd === "get_animated_manifest") return [deforming("Wobble", translate(9))];
-      if (cmd === "get_geometry_batch") {
-        batchCalls += 1;
-        // Only the in-flight pose prefetch stalls; the superseding load's
-        // own prefill must not (it would deadlock the load).
-        return batchCalls === 1 ? batch.promise : packedBatchGeometry(1, args.paths.length);
+      if (cmd === "get_animated_pose") {
+        poseCalls += 1;
+        return pose.promise;
       }
       if (cmd === "get_scene_manifest") return [deforming("Fresh", translate(3))];
+      if (cmd === "get_geometry_batch") return packedBatchGeometry(1, args.paths.length);
       if (cmd === "get_time_codes") return [];
       throw new Error(`unexpected command: ${cmd}`);
     });
 
     const step = renderState.setStageTime(5);
-    for (let i = 0; i < 20 && batchCalls === 0; i++) await Promise.resolve();
-    expect(batchCalls).toBe(1);
+    for (let i = 0; i < 20 && poseCalls === 0; i++) await Promise.resolve();
+    expect(poseCalls).toBe(1);
 
-    // A reload supersedes the in-flight step while its prefetch is pending.
+    // A reload supersedes the in-flight step while its pose is pending.
     const reloaded = await renderState.loadRenderScene();
-    batch.resolve(packedBatch([packedGeometry(4)]));
+    pose.resolve(poseFrame([deforming("Wobble", translate(9))], packedBatch([packedGeometry(4)])));
     await step;
 
     expect(reloaded).toBeTruthy();

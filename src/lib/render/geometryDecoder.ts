@@ -91,11 +91,16 @@ export function decodeGeometry(buffer: ArrayBuffer | Uint8Array): DecodedGeometr
 // One batched response -> per-slot bytes: a positioned USDB-frame view per
 // ok slot (decodable with decodeGeometry), null for an error slot. The
 // views share the batch payload; keep it alive while slots are in use.
-export function decodeGeometryBatch(buffer: ArrayBuffer): (Uint8Array | null)[] {
+// A Uint8Array input is a positioned view into a larger payload (the merged
+// pose response tails its batch); a plain ArrayBuffer starts at offset 0.
+export function decodeGeometryBatch(buffer: ArrayBuffer | Uint8Array): (Uint8Array | null)[] {
   if (buffer.byteLength < 12) {
     throw new Error(`geometry batch payload truncated: ${buffer.byteLength} bytes, header needs 12`);
   }
-  const view = new DataView(buffer);
+  const based = buffer instanceof Uint8Array;
+  const baseOffset = based ? buffer.byteOffset : 0;
+  const baseBuffer = based ? (buffer.buffer as ArrayBuffer) : buffer;
+  const view = new DataView(baseBuffer, baseOffset, buffer.byteLength);
   const magic = view.getUint32(0, true);
   if (magic !== GEOMETRY_BATCH_MAGIC) {
     throw new Error(
@@ -121,7 +126,7 @@ export function decodeGeometryBatch(buffer: ArrayBuffer): (Uint8Array | null)[] 
         `geometry batch payload truncated in slot ${slot}: needs ${offset + 8 + length} bytes, got ${buffer.byteLength}`,
       );
     }
-    slots.push(status === 0 ? new Uint8Array(buffer, offset + 8, length) : null);
+    slots.push(status === 0 ? new Uint8Array(baseBuffer, baseOffset + offset + 8, length) : null);
     // The frame pads each payload to a 4-byte multiple so the next slot's
     // header and view stay aligned; the length field is the real size.
     offset += 8 + ((length + 3) & ~3);

@@ -37,7 +37,17 @@ export interface SceneFetchers {
   // builder then falls back to getMaterial, which stays the single-binding
   // refetch path.
   getMaterialBatch?: (paths: string[]) => Promise<(MaterialInfo | null)[]>;
+  // Playback pose (Task 2 of the pose-latency plan): ONE invoke returns the
+  // delta manifest plus its animated-geometry slots, already decoded and
+  // keyed by path in slot order. Playback only — loads and edit refreshes
+  // keep getGeometryBatch (their path set differs).
+  getAnimatedPose?: (time: number) => Promise<AnimatedPose>;
   loadTexture: MaterialTextureLoader;
+}
+
+export interface AnimatedPose {
+  manifest: RenderNode[];
+  prefetched: Map<string, ArrayBuffer | Uint8Array | null>;
 }
 
 // Bounded batch size: sequential batches keep the actor fed and memory flat
