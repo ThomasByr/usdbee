@@ -64,6 +64,10 @@ let currentGroup: THREE.Group | null = null;
 let currentPaths = new Map<string, THREE.Object3D>();
 let currentFallbacks: FallbackDependencies = {};
 
+// Per-instance scratch: setMatrixAt copies into the instance buffer right
+// away, so one matrix serves every instance of a step (no GC churn).
+const scratchInstance = new THREE.Matrix4();
+
 // One shared loader; convertMaterial clears failed maps through onError.
 const textureLoader = new THREE.TextureLoader();
 
@@ -272,20 +276,16 @@ async function updateNodes(
           }
         }
         let instanced = drawable as THREE.InstancedMesh;
-        const matrices =
-          node.instances.length > 0
-            ? node.instances.map((instance) => new THREE.Matrix4().fromArray(instance))
-            : isSubtreeNode
-              ? context!.instances.map((instance) =>
-                  new THREE.Matrix4().fromArray(instance).multiply(context!.transform),
-                )
-              : null;
-        if (instanced.isInstancedMesh && matrices && matrices.length > 0) {
-          if (matrices.length > instanced.instanceMatrix.count) {
+        // Subtree descendants carry no instances of their own: theirs come
+        // from the root context, composed with the collapsed wrapper.
+        const owned = node.instances.length > 0;
+        const sources = owned ? node.instances : isSubtreeNode ? context!.instances : null;
+        if (instanced.isInstancedMesh && sources && sources.length > 0) {
+          if (sources.length > instanced.instanceMatrix.count) {
             const replacement = new THREE.InstancedMesh(
               instanced.geometry,
               instanced.material,
-              matrices.length,
+              sources.length,
             );
             replacement.name = instanced.name;
             replacement.castShadow = instanced.castShadow;
@@ -296,8 +296,12 @@ async function updateNodes(
             byPath.set(node.path, replacement);
             instanced = replacement;
           }
-          instanced.count = matrices.length;
-          matrices.forEach((matrix, i) => instanced.setMatrixAt(i, matrix));
+          instanced.count = sources.length;
+          for (let i = 0; i < sources.length; i++) {
+            scratchInstance.fromArray(sources[i]);
+            if (!owned) scratchInstance.multiply(context!.transform);
+            instanced.setMatrixAt(i, scratchInstance);
+          }
           instanced.instanceMatrix.needsUpdate = true;
         }
       }

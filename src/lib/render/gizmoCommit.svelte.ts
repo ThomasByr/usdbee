@@ -55,7 +55,7 @@ export function gizmoWorldMatrix(viewer: RendererKit): THREE.Matrix4 | null {
 export function gizmoAnchorCenter(viewer: { selectedNode: THREE.Object3D | null }): THREE.Vector3 | null {
   const node = viewer.selectedNode;
   if (!node) return null;
-  const box = new THREE.Box3().setFromObject(node, true);
+  const box = new THREE.Box3().setFromObject(node, false);
   return box.isEmpty() ? null : box.getCenter(new THREE.Vector3());
 }
 

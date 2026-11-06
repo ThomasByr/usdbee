@@ -255,7 +255,8 @@ export class RendererKit {
       this.sceneBox.setFromObject(this.loadedGroup, true);
     }
     if (this.selectedNode && this.selectionHelper) {
-      this.selectionHelper.box.setFromObject(this.selectedNode, true);
+      // Per frame: bounding boxes, not a walk of every selected vertex.
+      this.selectionHelper.box.setFromObject(this.selectedNode, false);
       this.selectionHelper.visible = !this.selectionHelper.box.isEmpty();
     } else if (this.selectionHelper) {
       // A cleared selection must take the last-drawn box with it.
