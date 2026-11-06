@@ -131,8 +131,20 @@ function detailsSnapshot(): PrimDetails {
 // --- IPC fake + holds --------------------------------------------------
 
 const mockedInvoke = vi.mocked(invoke);
-const writeLog: { name: string; data: unknown }[] = [];
+const writeLog: { name: string; data: unknown; path: string; stageId: number }[] = [];
 let onWrite: () => void = () => {};
+
+let holdNextWrites = 0;
+const heldWrites: (() => void)[] = [];
+// A write matching this name fails (backend error) instead of authoring:
+// the partial-commit tests need write 2 to fail after write 1 landed.
+let failWriteName: string | null = null;
+
+function releaseWrites(n = 1) {
+  const batch = heldWrites.splice(0, n);
+  batch.forEach((h) => h());
+  return batch.length;
+}
 
 let holdNextManifests = 0;
 const heldManifests: (() => void)[] = [];
@@ -156,7 +168,6 @@ function write(name: string, data: unknown) {
   else if (name === "xformOp:translate") stage.translate = [...(data as Vec)];
   else if (name === "xformOp:rotateXYZ") stage.rotateXYZ = [...(data as Vec)];
   else throw new Error(`unexpected write ${name}`);
-  writeLog.push({ name, data });
 }
 
 function installBackend() {
@@ -205,9 +216,19 @@ function installBackend() {
       case "get_time_codes":
         return [];
       case "set_attribute_value": {
-        write(args.name, args.value.data);
-        onWrite();
-        return null;
+        const done = () => {
+          if (failWriteName !== null && args.name === failWriteName)
+            return Promise.reject("backend write failed");
+          write(args.name, args.value.data);
+          writeLog.push({ name: args.name, data: args.value.data, path: args.path, stageId: args.stageId });
+          onWrite();
+          return null;
+        };
+        if (holdNextWrites > 0) {
+          holdNextWrites -= 1;
+          return new Promise((resolve) => heldWrites.push(() => resolve(done())));
+        }
+        return done();
       }
       default:
         throw new Error(`unexpected command: ${cmd}`);
@@ -314,6 +335,9 @@ function flush() {
 beforeEach(() => {
   mockedInvoke.mockReset();
   writeLog.length = 0;
+  holdNextWrites = 0;
+  heldWrites.length = 0;
+  failWriteName = null;
   holdNextManifests = 0;
   heldManifests.length = 0;
   holdNextDetails = 0;
@@ -451,5 +475,39 @@ describe("stale details payload at the rotate commit", () => {
     // moved position (rotated), instead of reverting to the pre-move one.
     expect(stage.order).toContain("xformOp:translate");
     expect(node().matrix.elements[12]).toBeCloseTo(5, 6);
+  });
+});
+
+describe("commit writes follow the drag's prim, not the live selection", () => {
+  // The tree stays clickable while a commit's writes await IPC: a
+  // selection change (or a tab switch) mid-commit must not redirect the
+  // later writes onto another prim/stage.
+  it("authors both writes on the original prim when the selection changes mid-commit", async () => {
+    await boot();
+    // A tree click lands the instant write 1 resolves: the live selection
+    // (and the active tab's stage) change while write 2 is still pending.
+    onWrite = () => {
+      if (writeLog.length === 1) {
+        stageState.selectedPath = "/Scene";
+        stageState.activeStageId = 2;
+      }
+    };
+    holdNextWrites = 2;
+    beginDrag((p) => p.position.set(p.position.x + 5, p.position.y, p.position.z));
+    const pending = endDrag();
+    await flush();
+    releaseWrites(1); // write 1 resolves; the selection flips right here
+    await flush(); // write 2 (xformOpOrder) computes its target
+    releaseWrites(1);
+    await pending;
+    await flush();
+
+    const commitWrites = writeLog.filter((w) => w.name.startsWith("xformOp"));
+    expect(commitWrites).toHaveLength(2);
+    expect(
+      commitWrites.every((w) => w.path === PATH && w.stageId === 1),
+      `writes went to ${JSON.stringify(commitWrites.map((w) => [w.path, w.stageId]))}`,
+    ).toBe(true);
+    expect(stage.order).toEqual(["xformOp:translate"]);
   });
 });

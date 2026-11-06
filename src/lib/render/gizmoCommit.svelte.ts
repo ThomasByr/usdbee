@@ -244,6 +244,12 @@ async function handleGizmoCommit(commit: GizmoCommit) {
       return;
     }
     let failed = false;
+    // The write loop must not follow the live selection: the tree (and
+    // the tab bar) stay clickable while writes await IPC, so a mid-commit
+    // selection change would redirect the later writes onto another
+    // prim/stage. Pin the drag's prim and stage for every write.
+    const primPath = details.path;
+    const stageId = stageState.activeStageId;
     // Hybrid authoring time: on a static stage the op values author at
     // the DEFAULT time — no phantom samples, and the rust caches stay
     // warm across writes (the c5156f2 keep only covers default-time
@@ -259,6 +265,8 @@ async function handleGizmoCommit(commit: GizmoCommit) {
         write.name,
         { type: write.type, data: write.data },
         write.name === "xformOpOrder" ? null : opTime,
+        primPath,
+        stageId,
       );
       if (error !== null) {
         gizmoPolicy.error = error;

@@ -259,6 +259,8 @@ describe("stale stack guard", () => {
       "xformOp:translate",
       { type: "double3", data: [8, 0, 0] },
       null,
+      "/Scene/Prim",
+      1,
     );
   });
 });
@@ -277,6 +279,8 @@ describe("hybrid authoring time", () => {
       "xformOp:translate",
       { type: "double3", data: [8, 0, 0] },
       null,
+      "/Scene/Prim",
+      1,
     );
   });
 
@@ -293,6 +297,8 @@ describe("hybrid authoring time", () => {
       "xformOp:translate",
       { type: "double3", data: [8, 0, 0] },
       5,
+      "/Scene/Prim",
+      1,
     );
   });
 });
@@ -334,6 +340,8 @@ describe("pause on gizmo drag start", () => {
       "xformOp:translate",
       { type: "double3", data: [8, 0, 0] },
       null,
+      "/Scene/Prim",
+      1,
     );
   });
 
@@ -367,6 +375,8 @@ describe("pause on gizmo drag start", () => {
       "xformOp:translate",
       { type: "double3", data: [8, 0, 0] },
       null,
+      "/Scene/Prim",
+      1,
     );
 
     // Unconditional per commit, not a latch: a later commit refreshes again.
