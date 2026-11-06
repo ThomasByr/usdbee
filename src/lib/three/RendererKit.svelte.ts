@@ -263,11 +263,7 @@ export class RendererKit {
       // a per-frame setFromObject walks every vertex of the selection in dev
       // JS. Keep the box from before the play started; pause, paused scrub and
       // a selection change refresh it.
-      if (!this.isPlayingAnim || this.selectedNode !== this.boxNode) {
-        this.selectionHelper.box.setFromObject(this.selectedNode, false);
-        this.selectionHelper.visible = !this.selectionHelper.box.isEmpty();
-      }
-      this.boxNode = this.selectedNode;
+      if (!this.isPlayingAnim || this.selectedNode !== this.boxNode) this.refreshSelectionBox();
     } else if (this.selectionHelper) {
       // A cleared selection must take the last-drawn box with it.
       this.selectionHelper.visible = false;
@@ -302,6 +298,16 @@ export class RendererKit {
         .catch((err) => console.error("Could not show window", err));
     }
   };
+
+  // One selection-box rescan from the current selection. The paused-frame
+  // path above and a gizmo drag start (whose anchor latch must not read a
+  // box frozen by playback) both refresh through here.
+  public refreshSelectionBox() {
+    if (!this.selectedNode || !this.selectionHelper) return;
+    this.selectionHelper.box.setFromObject(this.selectedNode, false);
+    this.selectionHelper.visible = !this.selectionHelper.box.isEmpty();
+    this.boxNode = this.selectedNode;
+  }
 
   public dispose() {
     if (this.animationFrameId) cancelAnimationFrame(this.animationFrameId);

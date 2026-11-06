@@ -93,16 +93,17 @@ function makeGizmo(): TransformGizmo {
 }
 
 describe("TransformGizmo drag lifecycle", () => {
-  it("fires onDragStart once when a drag begins", () => {
+  it("does not fire on the controls' dragging-changed event", () => {
+    // The host is told on pointerdown instead: by the time dragging-changed
+    // lands, TransformControls has already latched the drag-start pose.
     const gizmo = makeGizmo();
     const onDragStart = vi.fn();
     gizmo.onDragStart = onDragStart;
 
     gizmo.controls.dispatchEvent({ type: "dragging-changed", value: true });
-    expect(onDragStart).toHaveBeenCalledTimes(1);
-
     gizmo.controls.dispatchEvent({ type: "dragging-changed", value: false });
-    expect(onDragStart).toHaveBeenCalledTimes(1);
+
+    expect(onDragStart).not.toHaveBeenCalled();
   });
 
   it("does not re-attach while the proxy stays the attached object", () => {

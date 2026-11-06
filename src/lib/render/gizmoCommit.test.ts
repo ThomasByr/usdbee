@@ -20,8 +20,8 @@ vi.mock("$lib/stage/stageState.svelte", () => {
 
 import { stageState } from "$lib/stage/stageState.svelte";
 import { renderState } from "$lib/render/renderState.svelte";
+import { RendererKit } from "$lib/three/RendererKit.svelte";
 import type { PrimDetails } from "$lib/stage/types";
-import type { RendererKit } from "$lib/three/RendererKit.svelte";
 import { disposeGizmo, frameSyncGizmo, gizmoPolicy, initGizmo, syncGizmoAnchor } from "./gizmoCommit.svelte";
 
 const stage = stageState as unknown as {
@@ -78,7 +78,8 @@ function detailsAt(x: number): PrimDetails {
 }
 
 // The camera/scene/orbit triple plus the per-frame pose source the gizmo
-// policy reads; the domElement only needs the listener surface.
+// policy reads; the domElement only needs the listener surface. The box
+// rescan entry point is a spy: the drag-start pin below uses a real kit.
 function makeViewer(node: THREE.Object3D | null): RendererKit {
   const domElement = {
     addEventListener: () => {},
@@ -94,6 +95,7 @@ function makeViewer(node: THREE.Object3D | null): RendererKit {
     selectionHelper: null,
     selectedNode: node,
     isPlayingAnim: false,
+    refreshSelectionBox: vi.fn(),
   } as unknown as RendererKit;
 }
 
@@ -331,6 +333,41 @@ describe("hybrid authoring time", () => {
 });
 
 describe("pause on gizmo drag start", () => {
+  it("rescans the box and re-anchors the gizmo before the drag latch", () => {
+    // Real kit: the rescan and the anchor read are the point here. Playback
+    // freezes the box, so a drag begun mid-playback would otherwise pivot
+    // on the pre-play center.
+    const kit = new RendererKit();
+    const node = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2));
+    node.updateMatrixWorld(true);
+    kit.scene = new THREE.Scene();
+    kit.camera = new THREE.PerspectiveCamera();
+    kit.renderer = {
+      domElement: { addEventListener: () => {}, removeEventListener: () => {}, style: {} },
+    } as unknown as THREE.WebGLRenderer;
+    kit.controls = { enabled: true } as unknown as RendererKit["controls"];
+    kit.selectedNode = node;
+    kit.selectionHelper = new THREE.Box3Helper(new THREE.Box3(), new THREE.Color());
+    kit.isPlayingAnim = true;
+    stage.details = detailsAt(0);
+    initGizmo(kit, () => "translate");
+
+    kit.refreshSelectionBox();
+    frameSyncGizmo(kit);
+    expect(proxy().position.x).toBeCloseTo(0, 6);
+
+    // Poses land during playback; the frozen box keeps the knob behind.
+    node.position.set(10, 0, 0);
+    node.updateMatrixWorld(true);
+    frameSyncGizmo(kit);
+    expect(proxy().position.x).toBeCloseTo(0, 6);
+
+    gizmoPolicy.kit!.onDragStart!();
+
+    expect(kit.isPlayingAnim).toBe(false);
+    expect(proxy().position.x).toBeCloseTo(10, 6);
+  });
+
   it("pauses playback and commits from fresh details", async () => {
     const viewer = makeViewer(new THREE.Object3D());
     viewer.isPlayingAnim = true;
@@ -338,7 +375,9 @@ describe("pause on gizmo drag start", () => {
     stage.details = detailsAt(1);
     initGizmo(viewer, () => "translate");
 
-    gizmoPolicy.kit!.controls.dispatchEvent({ type: "dragging-changed", value: true });
+    // The gizmo's own pointerdown fires this (see transformGizmo); the
+    // policy body is what the pause is pinned on here.
+    gizmoPolicy.kit!.onDragStart!();
     expect(viewer.isPlayingAnim).toBe(false);
     // The pause only stops playback: the commit refreshes on its own.
     expect(stage.refreshSelectedDetails).not.toHaveBeenCalled();

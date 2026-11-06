@@ -75,6 +75,22 @@ describe("selection box during playback", () => {
     expect(boxOf(kit).min.x).toBeCloseTo(-3.5, 6);
   });
 
+  it("rescans on the frame where playback pauses", () => {
+    const { kit, node } = makeKit(true);
+    frame(kit);
+    const setFromObject = vi.spyOn(THREE.Box3.prototype, "setFromObject");
+    setFromObject.mockClear();
+
+    // The pose reached while playing, frozen until the pause lands.
+    node.position.set(-3, 0, 0);
+    node.updateMatrixWorld(true);
+    kit.isPlayingAnim = false;
+    frame(kit);
+
+    expect(setFromObject).toHaveBeenCalledTimes(1);
+    expect(boxOf(kit).min.x).toBeCloseTo(-3.5, 6);
+  });
+
   it("rescans once when the selection changes during playback", () => {
     const { kit, node } = makeKit(true);
     frame(kit);
@@ -86,10 +102,13 @@ describe("selection box during playback", () => {
     const other = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2));
     other.position.set(10, 0, 0);
     kit.selectedNode = other;
+    // A previously hidden box must come back with the new selection.
+    kit.selectionHelper!.visible = false;
     frame(kit);
 
     expect(setFromObject).toHaveBeenCalledTimes(1);
     expect(boxOf(kit).min.x).toBeCloseTo(9, 6);
+    expect(kit.selectionHelper!.visible).toBe(true);
     frame(kit);
     expect(setFromObject).toHaveBeenCalledTimes(1);
   });

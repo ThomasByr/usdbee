@@ -92,6 +92,15 @@ export function syncGizmoAnchor(viewer: RendererKit, gizmoMode: GizmoMode) {
 // so it never escapes this call.
 const frameAnchor = new THREE.Vector3();
 
+// Poses the gizmo from the live node. The anchor is the selection helper's
+// box center when it has one: it was computed from this same node a moment
+// ago, so reusing it saves a second subtree traversal.
+function attachFromNode(viewer: RendererKit, node: THREE.Object3D) {
+  const box = viewer.selectionHelper?.box;
+  const anchor = box ? (box.isEmpty() ? null : box.getCenter(frameAnchor)) : gizmoAnchorCenter(viewer);
+  gizmoPolicy.kit?.attach(node.matrixWorld, anchor);
+}
+
 export function frameSyncGizmo(viewer: RendererKit) {
   const kit = gizmoPolicy.kit;
   if (!kit || kit.controls.dragging) return;
@@ -106,11 +115,7 @@ export function frameSyncGizmo(viewer: RendererKit) {
   }
   // The renderer already refreshed the node's world matrix this frame.
   node.updateWorldMatrix(true, false);
-  // The selection helper's box was computed from this same node a moment
-  // ago: reuse its center instead of running a second subtree traversal.
-  const box = viewer.selectionHelper?.box;
-  const anchor = box ? (box.isEmpty() ? null : box.getCenter(frameAnchor)) : gizmoAnchorCenter(viewer);
-  kit.attach(node.matrixWorld, anchor);
+  attachFromNode(viewer, node);
 }
 
 // A drag started during playback saw stale details (playback suppresses
@@ -206,8 +211,18 @@ export function initGizmo(viewer: RendererKit, getMode: () => GizmoMode) {
     viewer.controls,
   );
   gizmoPolicy.kit.onCommit = handleGizmoCommit;
+  // Runs on the gizmo's pointerdown, before TransformControls latches its
+  // drag-start pose (see TransformGizmo): the rescan and the re-anchor must
+  // be in place by then, or a rotate/scale drag begun during playback
+  // pivots on the box center from before the play started.
   gizmoPolicy.kit.onDragStart = () => {
     pauseOnDragStart();
+    viewer.refreshSelectionBox();
+    const node = viewer.selectedNode as THREE.Object3D | null;
+    if (node) {
+      node.updateWorldMatrix(true, false);
+      attachFromNode(viewer, node);
+    }
     const group = viewer.loadedGroup;
     if (group) {
       group.updateMatrixWorld();
@@ -215,7 +230,6 @@ export function initGizmo(viewer: RendererKit, getMode: () => GizmoMode) {
     } else {
       latchedGroupMatrix.identity();
     }
-    const node = viewer.selectedNode as THREE.Object3D | null;
     if (node) {
       latchedNodeMatrix.copy(node.matrix);
       previewActive = true;

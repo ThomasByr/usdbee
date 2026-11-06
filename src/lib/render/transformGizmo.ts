@@ -41,9 +41,12 @@ export class TransformGizmo {
   private readonly anchor = new THREE.Matrix4();
   private readonly correction = new THREE.Matrix4();
   onCommit: ((commit: GizmoCommit) => void) | null = null;
-  // Fired when a drag begins, before the anchor latch: the host pauses
-  // playback here so its details catch-up lands before the drag ends.
+  // Fired on the gizmo's pointerdown, before TransformControls latches its
+  // drag-start pose: the host pauses playback and re-anchors the proxy here
+  // so the latch reads the current pose, not one frozen by playback.
   onDragStart: (() => void) | null = null;
+  // Removes the document-level drag-start listener on dispose.
+  private readonly removeDragStartListener: () => void;
   // Fired continuously while a drag is active, with the same endWorld the
   // commit would compute: the host previews the prim's node at that pose.
   onPreview: ((endWorld: THREE.Matrix4) => void) | null = null;
@@ -59,11 +62,21 @@ export class TransformGizmo {
     this.controls = new TransformControls(camera, domElement);
     this.controls.attach(this.proxy);
     scene.add(this.controls.getHelper());
+    // TransformControls' own pointerdown listener sits on the same element
+    // and must not run first: it snapshots the proxy pose (positionStart,
+    // pointStart) that a drag is measured from. Capture on the document
+    // runs before any target-phase listener, whatever its capture flag.
+    const beforeDragStart = (event: PointerEvent) => {
+      if (event.button !== 0 || event.target !== domElement || this.controls.axis === null) return;
+      this.onDragStart?.();
+    };
+    const doc = domElement.ownerDocument;
+    doc?.addEventListener("pointerdown", beforeDragStart, true);
+    this.removeDragStartListener = () => doc?.removeEventListener("pointerdown", beforeDragStart, true);
     // The camera orbit must not fight the gizmo drag.
     this.controls.addEventListener("dragging-changed", (event: any) => {
       orbit.enabled = !event.value;
       if (event.value) {
-        this.onDragStart?.();
         this.proxy.updateMatrixWorld();
         this.anchor.copy(this.proxy.matrixWorld);
       } else {
@@ -106,6 +119,7 @@ export class TransformGizmo {
   }
 
   dispose(): void {
+    this.removeDragStartListener();
     this.controls.detach();
     this.controls.dispose();
     this.proxy.removeFromParent();
