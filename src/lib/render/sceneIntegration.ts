@@ -10,6 +10,7 @@ import {
 import { disposeScene } from "$lib/render/sceneBuilder";
 import { clearTextureCache } from "$lib/render/textureCache";
 import { upAxisRotation } from "$lib/stage/upAxis";
+import * as frameDiag from "$lib/perf/frameDiag";
 import { viewerSettings } from "$lib/state/viewerSettings.svelte";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
 
@@ -184,16 +185,22 @@ export function installPlaybackDriver(viewer: RendererKit) {
     // centers on depends on how long the load took. User scrubs still
     // queue via setStageTime directly.
     if (renderState.status === "loading") return;
+    const tcps = info?.time_codes_per_second ?? 24;
     // Resync: any external write of renderState.time (scrub slider, new
     // load, edit refresh) adopts on the next frame so the continuous
     // playhead never diverges from the stage.
-    if (renderState.time !== lastEmitted) continuous = renderState.time ?? start;
-    const tcps = info?.time_codes_per_second ?? 24;
+    if (renderState.time !== lastEmitted) {
+      continuous = renderState.time ?? start;
+      frameDiag.setRate(tcps);
+      frameDiag.onPoseResync();
+    }
     // advanceStageTime without codes keeps the advanced value continuous
     // (wrap past end, clamp at start); the query snaps and clamps itself.
     continuous = advanceStageTime(continuous ?? start, delta, tcps, start, end);
     const next = Math.min(Math.max(snapToTimeCodes(continuous, renderState.timeCodes), start), end);
     viewer.animationProgress = toPlayheadOffset(next, start);
+    if (next !== lastEmitted)
+      frameDiag.onPose(performance.now(), frameDiag.codeIndex(renderState.timeCodes, next));
     lastEmitted = next;
     void renderState.setStageTime(next);
   };

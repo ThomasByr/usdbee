@@ -6,6 +6,7 @@ import Stats from "three/addons/libs/stats.module.js";
 import { viewerSettings } from "$lib/state/viewerSettings.svelte";
 import { controlsState } from "$lib/state/controlsState.svelte";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import * as frameDiag from "$lib/perf/frameDiag";
 
 export class RendererKit {
   canvas: HTMLCanvasElement | null = null;
@@ -58,6 +59,8 @@ export class RendererKit {
   private animationFrameId: number = 0;
   private lastFrameTime = 0;
   private lastNavTime = performance.now();
+  // Previous play state, for the play -> pause snapshot edge.
+  private wasPlaying = false;
   private hasShownWindow = false;
   private resizeObserver: ResizeObserver | null = null;
   public keysPressed = new Set<string>();
@@ -127,6 +130,11 @@ export class RendererKit {
       this.canvas?.parentElement.appendChild(this.stats.dom);
     }
 
+    (window as any).__usdbeePerf = {
+      snapshot: () => frameDiag.snapshot(),
+      reset: () => frameDiag.reset(),
+    };
+
     this.ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
     this.scene.add(this.ambientLight);
 
@@ -157,6 +165,7 @@ export class RendererKit {
 
   private animate = (time: DOMHighResTimeStamp = 0) => {
     this.animationFrameId = requestAnimationFrame(this.animate);
+    frameDiag.onRaf(time);
 
     if (this.showExportModal) {
       this.lastFrameTime = time;
@@ -171,10 +180,21 @@ export class RendererKit {
 
       // 1 ms tolerance: rAF timestamps jitter, and a frame landing a hair
       // below the interval would push the render a whole frame later.
-      if (elapsed < interval - 1) return;
+      if (elapsed < interval - 1) {
+        frameDiag.onThrottled();
+        return;
+      }
       this.lastFrameTime = time - (elapsed % interval);
     } else if (viewerSettings.maxFps === 0) {
       this.lastFrameTime = time;
+    }
+
+    frameDiag.onRender(time);
+
+    // Play -> pause is the only place the numbers get printed.
+    if (this.wasPlaying !== this.isPlayingAnim) {
+      this.wasPlaying = this.isPlayingAnim;
+      if (!this.isPlayingAnim) console.table(frameDiag.snapshot());
     }
 
     if (this.onAdvanceTime && !this.isDraggingAnim) {

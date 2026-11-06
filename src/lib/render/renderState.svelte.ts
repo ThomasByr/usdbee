@@ -15,6 +15,7 @@ import type { MaterialInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
 import { decodeGeometryBatch, decodeMaterialBatch } from "./geometryDecoder";
 import { loadCachedTexture, clearTextureCache } from "./textureCache";
+import * as frameDiag from "../perf/frameDiag";
 import {
   applyPackedGeometryInPlace,
   applyTransform,
@@ -655,11 +656,13 @@ export const renderState = $state({
         // scene). Cleared right after measuring so a long playback does not
         // grow the timeline.
         performance.mark?.("usdbee:pose:issued");
+        const poseStartedAt = performance.now();
         const { manifest, prefetched } = await fetchers.getAnimatedPose!(time);
         if (generation !== loadGeneration || currentGroup !== group) return;
         const isStale = () => generation !== loadGeneration || currentGroup !== group;
         await updateSceneDelta(manifest, time, isStale, prefetched);
         performance.measure?.("usdbee:pose", "usdbee:pose:issued");
+        frameDiag.onPoseApplied(performance.now() - poseStartedAt);
         performance.clearMarks?.("usdbee:pose:issued");
         performance.clearMeasures?.("usdbee:pose");
       } catch (e) {

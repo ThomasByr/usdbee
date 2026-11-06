@@ -14,6 +14,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { installPlaybackDriver, integrateScene, loadRustScene, resetLoadedScene } from "./sceneIntegration";
 import { loadCachedTexture } from "./textureCache";
 import { renderState } from "./renderState.svelte";
+import * as frameDiag from "../perf/frameDiag";
 import { loadOrchestrator } from "../state/loadOrchestrator.svelte";
 import { stageState } from "../stage/stageState.svelte";
 import type { RendererKit } from "../three/RendererKit.svelte";
@@ -141,6 +142,52 @@ describe("installPlaybackDriver", () => {
     for (let i = 0; i < 10; i++) v.onAdvanceTime!(1 / 60);
 
     expect(renderState.time).toBeGreaterThan(1);
+  });
+
+  it("records one pose sample per distinct presented code", () => {
+    renderState.time = 0;
+    renderState.status = "ready";
+    const v = viewer();
+    installPlaybackDriver(v);
+    frameDiag.reset();
+
+    for (let i = 0; i < 10; i++) v.onAdvanceTime!(1 / 60);
+
+    const diag = frameDiag.snapshot();
+    // The first tick presents a code, so nine gaps follow it.
+    expect(diag.poseN).toBe(9);
+    // No authored codes on this fixture: gaps are measurable, drops are not.
+    expect(diag.droppedCodes).toBe(0);
+    expect(diag.tcps).toBe(24);
+  });
+
+  it("counts the authored codes the playhead skipped", () => {
+    renderState.timeCodes = Array.from({ length: 25 }, (_, i) => i);
+    renderState.time = 0;
+    renderState.status = "ready";
+    const v = viewer();
+    installPlaybackDriver(v);
+    frameDiag.reset();
+
+    v.onAdvanceTime!(0); // presents code 0
+    v.onAdvanceTime!(2 / 24); // 2 codes later: index 1 never showed
+
+    expect(frameDiag.snapshot().droppedCodes).toBe(1);
+  });
+
+  it("does not count a forward scrub as dropped codes", () => {
+    renderState.timeCodes = Array.from({ length: 25 }, (_, i) => i);
+    renderState.time = 0;
+    renderState.status = "ready";
+    const v = viewer();
+    installPlaybackDriver(v);
+    frameDiag.reset();
+
+    v.onAdvanceTime!(0); // presents code 0
+    void renderState.setStageTime(10); // simulated scrub
+    v.onAdvanceTime!(0); // presents code 10
+
+    expect(frameDiag.snapshot().droppedCodes).toBe(0);
   });
 
   it("continues from an externally scrubbed time, not a stale playhead", () => {
