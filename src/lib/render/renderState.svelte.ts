@@ -34,6 +34,11 @@ import {
 } from "./sceneBuilder";
 
 let loadGeneration = 0;
+// Bumped ONLY where a load begins (loadWork). loadGeneration also moves on
+// every playback step and edit refresh, so anything fetched at load time and
+// resolved afterwards must be guarded by this instead: playback steps run
+// while the scene is ready, racing the load-scoped replies.
+let sceneLoadId = 0;
 let sceneLoading = false;
 let timeStepInFlight = false;
 // True while a queue drain calls setStageTime: the drained time was
@@ -549,6 +554,7 @@ export const renderState = $state({
     onProgress?: BuildProgress,
   ): Promise<THREE.Group | null> {
     const generation = ++loadGeneration;
+    const loadId = ++sceneLoadId;
     // F6: the texture memo covers ONE load — the old scene's clones were
     // disposed by whoever dropped it, so the images they shared go too
     // before the new build repopulates the memo.
@@ -595,7 +601,7 @@ export const renderState = $state({
       void (async () => {
         try {
           const codes = await getTimeCodes(stageState.activeStageId);
-          if (generation === loadGeneration && Array.isArray(codes)) this.timeCodes = codes;
+          if (loadId === sceneLoadId && Array.isArray(codes)) this.timeCodes = codes;
         } catch {
           // Codes unavailable: times stay continuous.
         }

@@ -86,6 +86,73 @@ describe("renderState", () => {
     expect(renderState.timeCodes).toEqual([0, 12, 24]);
   });
 
+  it("keeps the time-code fetch valid across playback steps", async () => {
+    // Autoplay's first step can land before the codes IPC resolves (the
+    // fetch is detached). The reply still belongs to the current load, so a
+    // step must not make it look stale.
+    const codes = deferred<number[]>();
+    mockedInvoke.mockImplementation((async (cmd: string) => {
+      if (cmd === "get_scene_manifest") return [];
+      if (cmd === "get_time_codes") return codes.promise;
+      if (cmd === "get_animated_pose") return poseFrame([], packedBatch([]));
+      throw new Error(`unexpected command: ${cmd}`);
+    }) as any);
+
+    await renderState.loadRenderScene();
+    // Two steps before the codes land: the second is deduped, the counter
+    // moved twice regardless.
+    await renderState.setStageTime(12);
+    await renderState.setStageTime(13);
+    codes.resolve([0, 12, 24]);
+    // Two microtask hops: the mock's async wrapper, then the IIFE's await.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(renderState.timeCodes).toEqual([0, 12, 24]);
+  });
+
+  it("discards the time codes of a load superseded before they land", async () => {
+    const staleCodes = deferred<number[]>();
+    mockedInvoke.mockImplementation((async (cmd: string) => {
+      if (cmd === "get_scene_manifest") return [];
+      if (cmd === "get_time_codes") return staleCodes.promise;
+      throw new Error(`unexpected command: ${cmd}`);
+    }) as any);
+    await renderState.loadRenderScene();
+
+    mockedInvoke.mockImplementation((async (cmd: string) => {
+      if (cmd === "get_scene_manifest") return [];
+      if (cmd === "get_time_codes") return [0, 12];
+      throw new Error(`unexpected command: ${cmd}`);
+    }) as any);
+    await renderState.loadRenderScene();
+    await Promise.resolve();
+
+    staleCodes.resolve([7, 8]);
+    await Promise.resolve();
+
+    expect(renderState.timeCodes).toEqual([0, 12]);
+  });
+
+  it("discards the time codes of a load that failed", async () => {
+    const staleCodes = deferred<number[]>();
+    mockedInvoke.mockImplementation((async (cmd: string) => {
+      if (cmd === "get_scene_manifest") return [];
+      if (cmd === "get_time_codes") return staleCodes.promise;
+      throw new Error(`unexpected command: ${cmd}`);
+    }) as any);
+    await renderState.loadRenderScene();
+
+    mockedInvoke.mockRejectedValueOnce("reload blew up");
+    await renderState.loadRenderScene();
+    expect(renderState.status).toBe("error");
+
+    staleCodes.resolve([0, 12]);
+    await Promise.resolve();
+
+    expect(renderState.timeCodes).toEqual([]);
+  });
+
   it("discards a stale manifest response after a newer load", async () => {
     const stale = deferred<never>();
     mockedInvoke.mockReturnValueOnce(stale.promise);
