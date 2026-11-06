@@ -823,9 +823,10 @@ fn undo_and_redo_of_a_sampled_xform_edit_reach_the_manifest() {
 }
 
 // Merged pose (one invoke per playback step): the single response must carry
-// the same manifest JSON and the same geometry slots, in the same order, as
-// the two commands it replaces — otherwise a playback step would apply a
-// different pose on the two paths.
+// the same manifest JSON, the same ordered path list and the same geometry
+// slots as the two commands it replaces — otherwise a playback step would
+// apply a different pose on the two paths, and a slot swapped with its
+// neighbour would paint the wrong mesh on the wrong prim.
 
 fn animated_geometry_paths(nodes: &[RenderNode], paths: &mut Vec<String>) {
     for node in nodes {
@@ -836,11 +837,40 @@ fn animated_geometry_paths(nodes: &[RenderNode], paths: &mut Vec<String>) {
     }
 }
 
+fn align4(offset: usize) -> usize {
+    offset + (4 - offset % 4) % 4
+}
+
+/// A merged pose frame's (manifest JSON, ordered path list, geometry batch
+/// payload), decoded the way the frontend must: true lengths from the u32
+/// prefixes, implicit 4-byte padding between the sections.
+fn decode_pose(frame: &[u8]) -> (&[u8], Vec<String>, &[u8]) {
+    let json_len = u32::from_le_bytes(frame[0..4].try_into().unwrap()) as usize;
+    let manifest = &frame[4..4 + json_len];
+    let mut cursor = align4(4 + json_len);
+    let count = u32::from_le_bytes(frame[cursor..cursor + 4].try_into().unwrap()) as usize;
+    cursor += 4;
+    let mut paths = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len = u32::from_le_bytes(frame[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        paths.push(
+            std::str::from_utf8(&frame[cursor..cursor + len])
+                .expect("path must be utf8")
+                .to_string(),
+        );
+        cursor += len;
+    }
+    (manifest, paths, &frame[align4(cursor)..])
+}
+
 #[test]
 fn merged_pose_matches_the_two_command_path() {
     for (name, times) in [
         ("animated.usda", [0.0, 10.0].as_slice()),
         ("cross_mode.usda", [1.0, 2.0].as_slice()),
+        // Distinct per-slot payloads, so a swapped slot order changes bytes.
+        ("two_deforming_meshes.usda", [1.0, 2.0].as_slice()),
     ] {
         let state = spawn_stage_owner();
         open_via_owner(&state, name);
@@ -860,15 +890,25 @@ fn merged_pose_matches_the_two_command_path() {
 
             let merged = request_animated_pose(&state.sender(), Some(time))
                 .expect("merged pose should serialize");
-            let json_len = u32::from_le_bytes(merged[0..4].try_into().unwrap()) as usize;
+            let (manifest, merged_paths, slots) = decode_pose(&merged);
             assert_eq!(
-                &merged[4..4 + json_len],
+                manifest,
                 serde_json::to_vec(&nodes).unwrap().as_slice(),
                 "{} manifest JSON must be byte-identical",
                 name
             );
-
-            let slots = &merged[4 + json_len..];
+            // The frame names its own slots: nothing on the client re-walks.
+            assert_eq!(
+                merged_paths, paths,
+                "{} path list must be the two-command batch order",
+                name
+            );
+            assert_eq!(
+                (merged.len() - batch.len()) % 4,
+                0,
+                "{} batch tail must start 4-byte aligned for in-place views",
+                name
+            );
             assert_eq!(
                 u32::from_le_bytes(slots[0..4].try_into().unwrap()),
                 0x5553_4247,

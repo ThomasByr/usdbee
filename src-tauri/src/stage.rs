@@ -94,9 +94,9 @@ pub enum StageRequest {
         reply: mpsc::Sender<Result<Vec<u8>, String>>,
     },
     // One playback pose in one owner turn: the time-delta manifest as JSON
-    // bytes plus the geometry batch over its `geometry_animated` paths,
-    // framed by `frame_pose`. Two serial invokes cost a dev-mode pose more
-    // latency than the backend work; this is the same work, one hop.
+    // bytes plus the ordered path list and the geometry batch over those
+    // paths, framed by `frame_pose`. Two serial invokes cost a dev-mode pose
+    // more latency than the backend work; this is the same work, one hop.
     GetAnimatedPose {
         time: Option<f64>,
         reply: mpsc::Sender<Result<Vec<u8>, String>>,
@@ -845,7 +845,7 @@ fn spawn_stage_owner_for(
                                     )
                                 })
                                 .collect();
-                            Ok(frame_pose(manifest, frame_batch(slots)))
+                            Ok(frame_pose(manifest, paths, frame_batch(slots)))
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -4088,20 +4088,29 @@ fn frame_batch(slots: Vec<Result<Vec<u8>, String>>) -> Vec<u8> {
         // USDB frames are already a multiple of 4 (u32 header + f32/u32
         // data), but error messages are arbitrary UTF-8; zero-pad so slot
         // boundaries never depend on payload alignment.
-        let pad = (4 - out.len() % 4) % 4;
-        out.extend(std::iter::repeat_n(0u8, pad));
+        pad_to_4(&mut out);
     }
     out
 }
 
+/// Zero-pad to the next 4-byte boundary. Every length prefix in these frames
+/// carries the true byte count, so the padding is implicit (`align4(len)`) and
+/// a reader can view the body in place with 4-byte-typed views.
+fn pad_to_4(out: &mut Vec<u8>) {
+    let pad = (4 - out.len() % 4) % 4;
+    out.extend(std::iter::repeat_n(0u8, pad));
+}
+
 /// The delta's geometry slots: pre-order walk, `has_geometry &&
 /// geometry_animated`, deduped (a shared prototype subtree can repeat a
-/// path). Slot order is the order the frontend maps slots back to paths.
+/// path). `frame_pose` ships this list, so slot order needs no client-side
+/// re-derivation of the walk.
 fn animated_geometry_paths(nodes: &[RenderNode]) -> Vec<String> {
-    fn walk(nodes: &[RenderNode], paths: &mut Vec<String>, seen: &mut HashSet<String>) {
+    fn walk<'a>(nodes: &'a [RenderNode], paths: &mut Vec<String>, seen: &mut HashSet<&'a str>) {
         for node in nodes {
-            if node.has_geometry && node.geometry_animated && !seen.contains(&node.path) {
-                seen.insert(node.path.clone());
+            // The seen set borrows the paths, so the list holds the only
+            // owned copy: one clone per emitted slot.
+            if node.has_geometry && node.geometry_animated && seen.insert(node.path.as_str()) {
                 paths.push(node.path.clone());
             }
             walk(&node.children, paths, seen);
@@ -4113,13 +4122,26 @@ fn animated_geometry_paths(nodes: &[RenderNode]) -> Vec<String> {
     paths
 }
 
-/// The merged pose response: `[u32 LE manifest JSON length][manifest JSON
-/// utf8][geometry batch payload]`, so one invoke carries a whole pose.
-fn frame_pose(manifest: Vec<u8>, batch: Vec<u8>) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + manifest.len() + batch.len());
+/// The merged pose response, one invoke per pose:
+/// `[u32 LE manifest JSON length][manifest JSON utf8][4-byte pad][u32 LE path
+/// count][per path: u32 LE length + utf8 bytes][4-byte pad][geometry batch
+/// payload]`. Prefixes carry the true byte lengths and the padding is implicit
+/// (`align4`), so the batch tail — and every slot inside it — starts 4-byte
+/// aligned and the frontend can view it in place. The path list is the batch's
+/// slot order, so nothing on the client re-derives the walk.
+fn frame_pose(manifest: Vec<u8>, paths: Vec<String>, mut batch: Vec<u8>) -> Vec<u8> {
+    let paths_len: usize = paths.iter().map(|path| 4 + path.len()).sum();
+    let mut out = Vec::with_capacity(16 + manifest.len() + paths_len + batch.len());
     out.extend((manifest.len() as u32).to_le_bytes());
     out.extend(manifest);
-    out.extend(batch);
+    pad_to_4(&mut out);
+    out.extend((paths.len() as u32).to_le_bytes());
+    for path in &paths {
+        out.extend((path.len() as u32).to_le_bytes());
+        out.extend(path.as_bytes());
+    }
+    pad_to_4(&mut out);
+    out.append(&mut batch);
     out
 }
 
@@ -4351,10 +4373,10 @@ pub fn request_geometry_batch(
         .map_err(|_| "stage service unavailable".to_string())?
 }
 
-// One invoke per playback pose: the delta manifest JSON plus the geometry
-// batch for its `geometry_animated` paths, framed by `frame_pose` into one
-// raw response. Loads / structure rebuilds / `refreshAfterEdit` keep the
-// two commands above.
+// One invoke per playback pose: the delta manifest JSON plus the ordered
+// `geometry_animated` path list and its geometry batch, framed by `frame_pose`
+// into one raw response. Loads / structure rebuilds / `refreshAfterEdit` keep
+// the two commands above.
 #[tauri::command]
 pub async fn get_animated_pose(
     stage_id: u64,
