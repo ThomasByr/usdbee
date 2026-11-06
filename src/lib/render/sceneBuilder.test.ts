@@ -13,7 +13,7 @@ import {
   toBufferGeometry,
 } from "./sceneBuilder";
 import * as materialConverter from "./materialConverter";
-import type { RenderNode } from "../stage/types";
+import type { MaterialInfo, RenderNode } from "../stage/types";
 
 // A valid packed geometry payload for one triangle (layout: geometryDecoder).
 // `y` parameterizes the third vertex's height so tests can tell payloads apart.
@@ -178,10 +178,10 @@ describe("buildScene", () => {
     const group = await buildScene(manifest, { ...fetchers(), getGeometry, getMaterial });
 
     // Geometry is fetched per real subtree path (manifest child), the
-    // child's material applies, and one InstancedMesh carries all 3
+    // child's material binding applies, and one InstancedMesh carries all 3
     // instances of the child geometry — no phantom origin Mesh.
     expect(getGeometry).toHaveBeenCalledWith("/World/Instancer/__proto_0/Shape", undefined);
-    expect(getMaterial).toHaveBeenCalledWith("/World/Instancer/__proto_0/Shape");
+    expect(getMaterial).toHaveBeenCalledWith("/World/Looks/Blue");
     const proto = group.getObjectByName("/World/Instancer/__proto_0")!;
     const meshes = proto.children.find((child) => child.name === "/World/Instancer/__proto_0/Shape")!
       .children[0] as THREE.InstancedMesh;
@@ -307,7 +307,15 @@ describe("buildScene", () => {
   });
 
   it("fails soft on material fetch failure: mesh built with fallback material", async () => {
-    const manifest = [node({ path: "/World/Ball", name: "Ball", type_name: "Mesh", has_geometry: true })];
+    const manifest = [
+      node({
+        path: "/World/Ball",
+        name: "Ball",
+        type_name: "Mesh",
+        has_geometry: true,
+        material: "/World/Looks/Missing",
+      }),
+    ];
     const group = await buildScene(manifest, fetchers({ getMaterial: vi.fn(async () => null) }));
 
     const ball = group.getObjectByName("/World/Ball")!;
@@ -428,7 +436,13 @@ describe("buildScene", () => {
       node({
         path: "/World",
         children: paths.map((path) =>
-          node({ path, name: path.slice("/World/".length), type_name: "Mesh", has_geometry: true }),
+          node({
+            path,
+            name: path.slice("/World/".length),
+            type_name: "Mesh",
+            has_geometry: true,
+            material: `/World/Looks/${path}`,
+          }),
         ),
       }),
     ];
@@ -477,21 +491,28 @@ describe("buildScene", () => {
   });
 
   it("prefetches materials in bounded sequential batches and consumes the prefill", async () => {
-    // Load-time material batching pin: one invoke per 32-path slice, and the
-    // build reads the prefill instead of calling the per-path fetcher.
+    // Load-time material batching pin: one invoke per 32-binding slice, and
+    // the build reads the prefill instead of calling the per-binding fetcher.
     const paths = Array.from({ length: 70 }, (_, i) => `/World/M${i}`);
+    const bindings = paths.map((path) => `/World/Looks/${path}`);
     const manifest = [
       node({
         path: "/World",
-        children: paths.map((path) =>
-          node({ path, name: path.slice("/World/".length), type_name: "Mesh", has_geometry: true }),
+        children: bindings.map((binding, i) =>
+          node({
+            path: paths[i],
+            name: paths[i].slice("/World/".length),
+            type_name: "Mesh",
+            has_geometry: true,
+            material: binding,
+          }),
         ),
       }),
     ];
     const getMaterial = vi.fn(async () => ({ name: "Mat", surface: null }));
     const getMaterialBatch = vi.fn(async (slice: string[]) =>
       slice.map((path) => ({
-        name: path.slice("/World/".length),
+        name: path.slice("/World/Looks/".length),
         surface: {
           diffuse_color: { type: "color3f", data: [0, 1, 0] },
           roughness: null,
@@ -507,7 +528,7 @@ describe("buildScene", () => {
     // ceil(70 / 32) invokes — the batching pin.
     expect(getMaterialBatch).toHaveBeenCalledTimes(3);
     expect(getMaterialBatch.mock.calls.map((call) => call[0].length)).toEqual([32, 32, 6]);
-    expect(getMaterialBatch.mock.calls.flatMap((call) => call[0])).toEqual(paths);
+    expect(getMaterialBatch.mock.calls.flatMap((call) => call[0])).toEqual(bindings);
     expect(getMaterial, "prefill served every node").not.toHaveBeenCalled();
 
     // The prefilled JSON reached convertMaterial: green from the batch.
@@ -517,33 +538,162 @@ describe("buildScene", () => {
     material.dispose();
   });
 
-  it("falls back to a failed material slot's per-path fetch", async () => {
-    const manifest = [
-      node({
-        path: "/World",
-        children: [
-          node({ path: "/World/Ok", name: "Ok", type_name: "Mesh", has_geometry: true }),
-          node({ path: "/World/Bad", name: "Bad", type_name: "Mesh", has_geometry: true }),
-        ],
-      }),
-    ];
-    const getMaterial = vi.fn(async () => ({ name: "Fallback", surface: null }));
-    const getMaterialBatch = vi.fn(async (slice: string[]) =>
-      slice.map((path) => (path === "/World/Ok" ? { name: "Ok", surface: null } : null)),
-    );
-    await buildScene(manifest, { ...fetchers(), getMaterial, getMaterialBatch });
-
-    expect(getMaterial).toHaveBeenCalledTimes(1);
-    expect(getMaterial).toHaveBeenCalledWith("/World/Bad");
-  });
-
-  it("falls back to per-path material fetches when the whole batch command fails", async () => {
+  it("skips the material lookup entirely for unbound prims", async () => {
+    // Kitchen_set shape: every geometry prim has material: null, and the
+    // backend's answer for them is exactly the surface-less fallback the
+    // builder now builds locally — no round trip.
     const manifest = [
       node({
         path: "/World",
         children: [
           node({ path: "/World/A", name: "A", type_name: "Mesh", has_geometry: true }),
           node({ path: "/World/B", name: "B", type_name: "Mesh", has_geometry: true }),
+        ],
+      }),
+    ];
+    const getMaterial = vi.fn(async () => ({ name: "Mat", surface: null }));
+    const getMaterialBatch = vi.fn(async (slice: string[]) => slice.map(() => null));
+    const group = await buildScene(manifest, { ...fetchers(), getMaterial, getMaterialBatch });
+
+    expect(getMaterialBatch).not.toHaveBeenCalled();
+    expect(getMaterial).not.toHaveBeenCalled();
+    const mesh = group.getObjectByName("/World/A")!.children[0] as THREE.Mesh;
+    expect((mesh.material as THREE.MeshPhysicalMaterial).type).toBe("MeshPhysicalMaterial");
+  });
+
+  it("retries an unresolvable prototype binding on the node's own path once", async () => {
+    // A PointInstancer prototype root's binding can only resolve on the
+    // prototype stage; the backend still resolves the node's own path.
+    const manifest = [
+      node({
+        path: "/World/Instancer/__proto_0",
+        name: "__proto_0",
+        type_name: "Mesh",
+        has_geometry: true,
+        material: "/World/Prototypes/Ball/Looks/Ball",
+      }),
+    ];
+    const getMaterial = vi.fn(async (path: string): Promise<MaterialInfo | null> =>
+      path === "/World/Instancer/__proto_0"
+        ? {
+            name: "Ball",
+            surface: {
+              diffuse_color: { type: "color3f", data: [0, 1, 0] },
+              roughness: null,
+              metallic: null,
+              opacity: null,
+              normal: null,
+              textures: [],
+            },
+          }
+        : null,
+    );
+    const group = await buildScene(manifest, fetchers({ getMaterial }));
+
+    expect(getMaterial.mock.calls.map(([path]) => path)).toEqual([
+      "/World/Prototypes/Ball/Looks/Ball",
+      "/World/Instancer/__proto_0",
+    ]);
+    const mesh = group.getObjectByName("/World/Instancer/__proto_0")!.children[0] as THREE.Mesh;
+    expect((mesh.material as THREE.MeshPhysicalMaterial).color.getHex()).toBe(
+      new THREE.Color(0, 1, 0).getHex(),
+    );
+  });
+
+  it("looks up each distinct binding once and shares it across prims", async () => {
+    // Bike shape: 331 prim lookups collapse to one per distinct binding.
+    const manifest = [
+      node({
+        path: "/World",
+        children: ["/World/A", "/World/B", "/World/C"].map((path, i) =>
+          node({
+            path,
+            name: `P${i}`,
+            type_name: "Mesh",
+            has_geometry: true,
+            material: i === 2 ? "/World/Looks/Odd" : "/World/Looks/Shared",
+          }),
+        ),
+      }),
+    ];
+    const getMaterial = vi.fn(async () => null);
+    const getMaterialBatch = vi.fn(async (slice: string[]) =>
+      slice.map(() => ({
+        name: "Shared",
+        surface: {
+          diffuse_color: { type: "color3f", data: [0, 1, 0] },
+          roughness: null,
+          metallic: null,
+          opacity: null,
+          normal: null,
+          textures: [],
+        },
+      })),
+    );
+    const group = await buildScene(manifest, { ...fetchers(), getMaterial, getMaterialBatch });
+
+    expect(getMaterialBatch).toHaveBeenCalledTimes(1);
+    expect(getMaterialBatch.mock.calls[0][0]).toEqual(["/World/Looks/Shared", "/World/Looks/Odd"]);
+    expect(getMaterial, "bindings only: never per prim").not.toHaveBeenCalled();
+    for (const path of ["/World/A", "/World/B", "/World/C"]) {
+      const mesh = group.getObjectByName(path)!.children[0] as THREE.Mesh;
+      expect((mesh.material as THREE.MeshPhysicalMaterial).color.getHex()).toBe(
+        new THREE.Color(0, 1, 0).getHex(),
+      );
+    }
+  });
+
+  it("falls back to a failed material slot's per-binding fetch", async () => {
+    const manifest = [
+      node({
+        path: "/World",
+        children: [
+          node({
+            path: "/World/Ok",
+            name: "Ok",
+            type_name: "Mesh",
+            has_geometry: true,
+            material: "/World/Looks/Ok",
+          }),
+          node({
+            path: "/World/Bad",
+            name: "Bad",
+            type_name: "Mesh",
+            has_geometry: true,
+            material: "/World/Looks/Bad",
+          }),
+        ],
+      }),
+    ];
+    const getMaterial = vi.fn(async () => ({ name: "Fallback", surface: null }));
+    const getMaterialBatch = vi.fn(async (slice: string[]) =>
+      slice.map((path) => (path === "/World/Looks/Ok" ? { name: "Ok", surface: null } : null)),
+    );
+    await buildScene(manifest, { ...fetchers(), getMaterial, getMaterialBatch });
+
+    expect(getMaterial).toHaveBeenCalledTimes(1);
+    expect(getMaterial).toHaveBeenCalledWith("/World/Looks/Bad");
+  });
+
+  it("falls back to per-binding material fetches when the whole batch command fails", async () => {
+    const manifest = [
+      node({
+        path: "/World",
+        children: [
+          node({
+            path: "/World/A",
+            name: "A",
+            type_name: "Mesh",
+            has_geometry: true,
+            material: "/World/Looks/A",
+          }),
+          node({
+            path: "/World/B",
+            name: "B",
+            type_name: "Mesh",
+            has_geometry: true,
+            material: "/World/Looks/B",
+          }),
         ],
       }),
     ];
@@ -555,14 +705,22 @@ describe("buildScene", () => {
     const group = await buildScene(manifest, { ...fetchers(), getMaterial, getMaterialBatch });
 
     expect(getMaterial).toHaveBeenCalledTimes(2);
-    expect(getMaterial).toHaveBeenCalledWith("/World/A");
+    expect(getMaterial).toHaveBeenCalledWith("/World/Looks/A");
     expect(group.getObjectByName("/World/A")!.children[0]).toBeTruthy();
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
 
   it("applies saved dependency fallback colors while building materials", async () => {
-    const manifest = [node({ path: "/World/Floor", name: "Floor", type_name: "Mesh", has_geometry: true })];
+    const manifest = [
+      node({
+        path: "/World/Floor",
+        name: "Floor",
+        type_name: "Mesh",
+        has_geometry: true,
+        material: "/World/Looks/CheckerFloor",
+      }),
+    ];
     const group = await buildScene(
       manifest,
       fetchers({

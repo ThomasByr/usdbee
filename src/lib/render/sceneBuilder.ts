@@ -26,13 +26,16 @@ export interface SceneFetchers {
   // when the whole batch command fails; the builder then falls back to the
   // per-path fetches, which stay the step-refetch path either way.
   getGeometryBatch?: (paths: string[], time?: number | null) => Promise<(ArrayBuffer | Uint8Array | null)[]>;
-  // null = fetch failed; the builder falls back to a plain material.
+  // `path` is a `material:binding` target (a Material prim), which the
+  // backend serializes directly; null = fetch failed, the builder falls
+  // back to a plain material.
   getMaterial: (path: string) => Promise<MaterialInfo | null>;
   // Optional load-time prefill (Phase 2 Task 3), mirroring getGeometryBatch:
-  // one batched backend call per slice of GEOMETRY_BATCH_SIZE paths; a slot
-  // value is that prim's MaterialInfo, null when the slot failed (fail-soft
-  // per path). Throws when the whole batch command fails; the builder then
-  // falls back to getMaterial, which stays the single-prim refetch path.
+  // one batched backend call per slice of GEOMETRY_BATCH_SIZE binding paths;
+  // a slot value is that binding's MaterialInfo, null when the slot failed
+  // (fail-soft per path). Throws when the whole batch command fails; the
+  // builder then falls back to getMaterial, which stays the single-binding
+  // refetch path.
   getMaterialBatch?: (paths: string[]) => Promise<(MaterialInfo | null)[]>;
   loadTexture: MaterialTextureLoader;
 }
@@ -46,8 +49,9 @@ export const GEOMETRY_BATCH_SIZE = 32;
 // geometry frame bytes (a batch slot) or null (that slot failed).
 type PrefetchedGeometry = Map<string, ArrayBuffer | Uint8Array | null>;
 
-// The material twin: the prim's MaterialInfo from a batch slot, or null for a
-// slot that failed (the per-path fetch runs instead).
+// The material twin, keyed by `material:binding` target instead of prim: one
+// slot serves every prim bound to that material, and null marks a slot that
+// failed (the per-binding fetch runs instead).
 type PrefetchedMaterials = Map<string, MaterialInfo | null>;
 
 // USD row-major row-vector matrices and three.js column-major column-vector
@@ -158,16 +162,18 @@ async function fetchGeometry(
   }
 }
 
-// Collects the walk order of every geometry path so the builder can
-// prefetch them in bounded sequential batches before building nodes.
-function geometryPaths(manifest: RenderNode[]): string[] {
+// Distinct walk-order paths the builder prefetches in bounded sequential
+// batches before building nodes: geometry keys by prim path, materials by
+// `material:binding` target (null = nothing to fetch for this node).
+function uniquePaths(manifest: RenderNode[], pick: (node: RenderNode) => string | null): string[] {
   const paths: string[] = [];
   const seen = new Set<string>();
   const walk = (nodes: RenderNode[]) => {
     for (const node of nodes) {
-      if (node.has_geometry) {
-        seen.add(node.path);
-        paths.push(node.path);
+      const path = pick(node);
+      if (path !== null && !seen.has(path)) {
+        seen.add(path);
+        paths.push(path);
       }
       walk(node.children);
     }
@@ -183,7 +189,7 @@ async function preloadGeometry(
   onProgress?: BuildProgress,
 ): Promise<PrefetchedGeometry> {
   const prefetched: PrefetchedGeometry = new Map();
-  const paths = geometryPaths(manifest);
+  const paths = uniquePaths(manifest, (node) => (node.has_geometry ? node.path : null));
   const getGeometryBatch = fetchers.getGeometryBatch;
   if (!getGeometryBatch) return prefetched;
   for (let start = 0; start < paths.length; start += GEOMETRY_BATCH_SIZE) {
@@ -210,9 +216,11 @@ async function preloadMaterials(
   const prefetched: PrefetchedMaterials = new Map();
   const getMaterialBatch = fetchers.getMaterialBatch;
   if (!getMaterialBatch) return prefetched;
-  // Materials are read only for drawing prims, so the geometry walk is the
-  // exact path set — same slices, same 32 bound.
-  const paths = geometryPaths(manifest);
+  // One lookup per DISTINCT binding: get_material_data resolves a Material
+  // prim directly, so every prim sharing a binding shares one answer. Prims
+  // without a binding are skipped entirely — the backend's answer for them
+  // is the surface-less fallback fetchMaterial builds locally.
+  const paths = uniquePaths(manifest, (node) => (node.has_geometry ? node.material : null));
   for (let start = 0; start < paths.length; start += GEOMETRY_BATCH_SIZE) {
     const slice = paths.slice(start, start + GEOMETRY_BATCH_SIZE);
     try {
@@ -220,9 +228,9 @@ async function preloadMaterials(
       slice.forEach((path, slot) => prefetched.set(path, slots[slot] ?? null));
       reportSliceProgress(onProgress, "Loading Materials", start, slice.length, paths.length, 80, 10);
     } catch (e) {
-      // Whole batch failed: leave unfetched so the per-path fetches still
+      // Whole batch failed: leave unfetched so the per-binding fetches still
       // run fail-soft inside fetchMaterial.
-      console.warn("usdbee: material batch failed; fetching per path:", e);
+      console.warn("usdbee: material batch failed; fetching per binding:", e);
       break;
     }
   }
@@ -250,11 +258,21 @@ async function fetchMaterial(
   dependencies: FallbackDependencies,
   prefetched: PrefetchedMaterials = new Map(),
 ): Promise<THREE.MeshPhysicalMaterial> {
-  // A consumed prefill saves the round trip; a null slot falls through to
-  // the per-path fetch, which stays fail-soft.
-  const prefill = prefetched.get(node.path);
-  prefetched.delete(node.path);
-  const info = prefill ?? (await fetchers.getMaterial(node.path).catch(() => null));
+  // An unbound prim needs no round trip: the backend answers exactly this
+  // surface-less fallback for it.
+  const binding = node.material;
+  let info: MaterialInfo | null = null;
+  if (binding !== null) {
+    // Shared by every prim bound to this material, so the prefill is read,
+    // never consumed; a null slot falls through to the per-binding fetch,
+    // which stays fail-soft.
+    const prefill = prefetched.get(binding);
+    info = prefill ?? (await fetchers.getMaterial(binding).catch(() => null));
+    // A PointInstancer prototype root can carry a binding that only
+    // resolves on the prototype stage; the backend still resolves the
+    // node's own path, so retry once there before the local fallback.
+    if (info === null) info = await fetchers.getMaterial(node.path).catch(() => null);
+  }
   const materialInfo = info ?? { name: node.name, surface: null };
   return convertMaterial(materialInfo, fallbackColorFor(materialInfo, dependencies), fetchers.loadTexture);
 }

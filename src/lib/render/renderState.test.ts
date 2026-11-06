@@ -314,7 +314,13 @@ describe("renderState.setStageTime", () => {
     // The wiring pin: the backend command name and the 32-path slices, so a
     // broken fetcher cannot hide behind the per-path fail-soft fallback.
     const mesh = (i: number) =>
-      node({ path: `/Scene/M${i}`, name: `M${i}`, type_name: "Mesh", has_geometry: true });
+      node({
+        path: `/Scene/M${i}`,
+        name: `M${i}`,
+        type_name: "Mesh",
+        has_geometry: true,
+        material: `/Scene/Looks/M${i}`,
+      });
     mockIpc(() => Array.from({ length: GEOMETRY_BATCH_SIZE + 1 }, (_, i) => mesh(i)));
     await renderState.loadRenderScene();
 
@@ -852,6 +858,51 @@ describe("renderState.setStageTime", () => {
     expect(wrapper.visible).toBe(true);
   });
 
+  it("re-derives a direct prototype's instance matrices on every time step", async () => {
+    // The per-step instancing path composes through one reused scratch
+    // matrix: consecutive ticks must still write each tick's transforms,
+    // and growth must reallocate exactly like the array path did.
+    const prototype = (matrices: number[][]) =>
+      node({
+        path: "/Scene/Inst/__proto_0",
+        name: "__proto_0",
+        type_name: "Mesh",
+        has_geometry: true,
+        animated: true,
+        instances: matrices,
+      });
+    const scene = (matrices: number[][]) => [
+      node({
+        path: "/Scene/Inst",
+        name: "Inst",
+        type_name: "PointInstancer",
+        animated: true,
+        children: [prototype(matrices)],
+      }),
+    ];
+
+    const group = await loadScene(() => scene([translate(1), translate(2)]));
+    let mesh = findMesh(group) as THREE.InstancedMesh;
+    expect(mesh.count).toBe(2);
+    expect([...mesh.instanceMatrix.array][12]).toBe(1);
+    expect([...mesh.instanceMatrix.array][28]).toBe(2);
+
+    mockIpc(() => scene([translate(7), translate(8), translate(9)]));
+    await renderState.setStageTime(1);
+    mesh = findMesh(group) as THREE.InstancedMesh;
+    expect(mesh.count).toBe(3);
+    expect([...mesh.instanceMatrix.array][12]).toBe(7);
+    expect([...mesh.instanceMatrix.array][28]).toBe(8);
+    expect([...mesh.instanceMatrix.array][44]).toBe(9);
+
+    // Shrinking keeps the allocated capacity but drops the extra instances.
+    mockIpc(() => scene([translate(4)]));
+    await renderState.setStageTime(2);
+    mesh = findMesh(group) as THREE.InstancedMesh;
+    expect(mesh.count).toBe(1);
+    expect([...mesh.instanceMatrix.array][12]).toBe(4);
+  });
+
   it("resolves loadRenderScene while a playback driver keeps queueing time steps", async () => {
     // ~60fps playback: requests stream in while a load and its drain are in
     // flight and never stop. With the chained recursive drain, every
@@ -1311,8 +1362,8 @@ function texturedMaterial(name: string): MaterialInfo {
   };
 }
 
-function meshNode(path: string): RenderNode {
-  return node({ path, name: path.slice(1), type_name: "Mesh", has_geometry: true });
+function meshNode(path: string, material: string | null = null): RenderNode {
+  return node({ path, name: path.slice(1), type_name: "Mesh", has_geometry: true, material });
 }
 
 describe("texture dedup", () => {
@@ -1323,7 +1374,7 @@ describe("texture dedup", () => {
       .spyOn(THREE.TextureLoader.prototype, "load")
       .mockImplementation(() => new THREE.Texture());
     try {
-      const prims = [meshNode("/Scene/A"), meshNode("/Scene/B")];
+      const prims = [meshNode("/Scene/A", "/Scene/Looks/A"), meshNode("/Scene/B", "/Scene/Looks/B")];
       mockedInvoke.mockImplementation((async (cmd: string, args: any) => {
         if (cmd === "get_scene_manifest") return prims;
         if (cmd === "get_geometry_batch") return packedBatchGeometry(1, args.paths.length);
