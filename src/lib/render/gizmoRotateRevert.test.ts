@@ -547,3 +547,40 @@ describe("a partially authored commit lands on stage truth", () => {
     expect(truth).not.toEqual(latch); // control: the two poses genuinely differ
   });
 });
+
+describe("the stale-drag guard is recentering-invariant", () => {
+  it("commits after a recentering rebuild swapped the loaded group mid-drag", async () => {
+    await boot();
+    beginDrag((p) => p.position.set(p.position.x + 5, p.position.y, p.position.z));
+    // A full scene rebuild between attach and commit legitimately
+    // recenters the loaded group (sceneIntegration): the drag's USD pose
+    // is still valid, so the commit must go through.
+    const g2 = new THREE.Group();
+    g2.position.set(10, 0, 0);
+    g2.updateMatrixWorld(true);
+    viewer.loadedGroup = g2;
+    const pending = endDrag();
+    await pending;
+    await flush();
+    await flush();
+
+    expect(gizmoPolicy.error).toBeNull();
+    expect(writeLog.map((w) => w.name)).toEqual(["xformOp:translate", "xformOpOrder"]);
+    expect(stage.order).toEqual(["xformOp:translate"]);
+  });
+
+  it("still refuses a genuinely stale drag (control)", async () => {
+    await boot();
+    beginDrag((p) => p.position.set(p.position.x + 5, p.position.y, p.position.z));
+    // Another writer moved the prim mid-drag: the drag's start pose no
+    // longer matches stage truth, and the commit must refuse.
+    stage.order = ["xformOp:translate"];
+    stage.translate = [7, 0, 0];
+    const pending = endDrag();
+    await pending;
+    await flush();
+
+    expect(gizmoPolicy.error).toContain("selection changed during the drag");
+    expect(writeLog).toHaveLength(0);
+  });
+});

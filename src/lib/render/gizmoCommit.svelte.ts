@@ -121,6 +121,11 @@ let gizmoCommitInFlight = false;
 // back when the commit authors nothing, so a refused or failed commit
 // leaves the node at stage truth instead of the previewed pose.
 const latchedNodeMatrix = new THREE.Matrix4();
+// The loaded group's world matrix at drag start: the stale-drag guard
+// compares in raw USD world space, cancelling THIS matrix out of the
+// drag-start pose — a recentering rebuild between attach and commit
+// legitimately changes the live one.
+const latchedGroupMatrix = new THREE.Matrix4();
 let previewActive = false;
 
 // Drag-end bookkeeping: the release pose is a three-way policy. Full
@@ -168,6 +173,13 @@ export function initGizmo(viewer: RendererKit, getMode: () => GizmoMode) {
   gizmoPolicy.kit.onCommit = handleGizmoCommit;
   gizmoPolicy.kit.onDragStart = () => {
     pauseOnDragStart();
+    const group = viewer.loadedGroup;
+    if (group) {
+      group.updateMatrixWorld();
+      latchedGroupMatrix.copy(group.matrixWorld);
+    } else {
+      latchedGroupMatrix.identity();
+    }
     const node = viewer.selectedNode as THREE.Object3D | null;
     if (node) {
       latchedNodeMatrix.copy(node.matrix);
@@ -219,9 +231,14 @@ async function handleGizmoCommit(commit: GizmoCommit) {
     // Defense in depth against a stale details payload: the commit math
     // must run on the same stack the drag started from, or the op writes
     // could delete ops from xformOpOrder (the rotate-revert bug). The
-    // fresh world matrix must still match the drag-start pose.
-    const freshWorld = gizmoWorldMatrix(viewer);
-    if (!freshWorld || !matricesClose(freshWorld.toArray() as number[], commit.startWorld.toArray())) {
+    // comparison runs in RAW USD world space — the one space a full scene
+    // rebuild never touches: recentering between attach and commit
+    // legitimately changes the loaded group's matrixWorld
+    // (sceneIntegration), so the group matrix latched at drag start is
+    // cancelled out of the drag pose instead of the live one.
+    const startUSD = latchedGroupMatrix.clone().invert().multiply(commit.startWorld);
+    const freshUSD = new THREE.Matrix4().fromArray(details.world_transform);
+    if (!matricesClose(freshUSD.toArray() as number[], startUSD.toArray() as number[])) {
       gizmoPolicy.error = "selection changed during the drag; edit not applied";
       if (gizmo) reattach(gizmo, viewer, commit.endWorld);
       return;
