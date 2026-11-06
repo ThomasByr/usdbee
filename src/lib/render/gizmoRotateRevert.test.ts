@@ -511,3 +511,39 @@ describe("commit writes follow the drag's prim, not the live selection", () => {
     expect(stage.order).toEqual(["xformOp:translate"]);
   });
 });
+
+describe("a partially authored commit lands on stage truth", () => {
+  it("keeps the refreshed partial truth instead of the pre-drag latch when write 2 fails", async () => {
+    // Both ops exist, so the rotate drag emits exactly two writes: the
+    // rotateXYZ update and the pivot-residual translate update. Write 2
+    // fails on the backend after write 1 already landed: the node must
+    // sit on the stage's PARTIAL truth (rotated, stale translate), not
+    // snap back to the pre-drag latch.
+    stage.order = ["xformOp:rotateXYZ", "xformOp:translate"];
+    stage.translate = [3, 0, 0];
+    failWriteName = "xformOp:translate";
+    mode = "rotate";
+    // The viewport's usd-stage-changed listener refreshes the scene as
+    // write 1 lands (partial truth reaches the node before write 2 fails).
+    onWrite = () => {
+      void renderState.refreshAfterEdit([PATH]);
+    };
+    await boot();
+    await drag((p) => {
+      p.rotation.z += Math.PI / 2; // pivot at (3, 0, 0): a translate residual
+    });
+    await flush();
+    await flush();
+
+    expect(gizmoPolicy.error).toContain("backend write failed");
+    // Write 1 landed; write 2 was refused by the backend.
+    expect(writeLog.map((w) => w.name)).toEqual(["xformOp:rotateXYZ"]);
+    const truth = composedLocal().toArray() as number[]; // Rz(90) * T(3)
+    const latch = new THREE.Matrix4().makeTranslation(3, 0, 0).toArray() as number[];
+    const elements = node().matrix.elements;
+    for (let i = 0; i < 16; i++) {
+      expect(Math.abs(elements[i] - truth[i])).toBeLessThan(1e-6);
+    }
+    expect(truth).not.toEqual(latch); // control: the two poses genuinely differ
+  });
+});

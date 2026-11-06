@@ -3,6 +3,7 @@ import { TransformGizmo, previewLocalMatrix, type GizmoCommit } from "$lib/rende
 import { composeOpUpdate, evaluateGizmoGate, matricesClose, type GizmoMode } from "$lib/render/xformOps";
 import { stageState } from "$lib/stage/stageState.svelte";
 import { renderState } from "$lib/render/renderState.svelte";
+import { refreshSceneAfterEdit } from "$lib/render/sceneIntegration";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
 
 // Transform gizmo editing policy (Phase 3 Task 4), moved out of the
@@ -122,9 +123,15 @@ let gizmoCommitInFlight = false;
 const latchedNodeMatrix = new THREE.Matrix4();
 let previewActive = false;
 
-// Drag-end bookkeeping: on success the previewed pose equals the committed
-// truth, so the node keeps it and the scene refresh lands seamlessly; any
-// other path hands the node back to its pre-drag (stage-truth) matrix.
+// Drag-end bookkeeping: the release pose is a three-way policy. Full
+// success keeps the previewed pose (it equals the committed truth, so the
+// scene refresh lands seamlessly). A PARTIALLY authored commit (write 1
+// landed, write 2 failed) also keeps the pose — the awaited edit refresh
+// has already re-posed the node onto the partial stage truth, and a latch
+// restore would diverge it from the stage with nothing left to correct
+// it. Every other exit (guard refusal, no-op, failed compose, details
+// missing, nothing authored at all) hands the node back to its pre-drag
+// stage-truth matrix.
 function releasePreviewNode(viewer: RendererKit, keepPose: boolean) {
   if (!previewActive) return;
   previewActive = false;
@@ -244,6 +251,9 @@ async function handleGizmoCommit(commit: GizmoCommit) {
       return;
     }
     let failed = false;
+    // Whether ANY write landed: a partial commit's refresh must run, and
+    // its verdict decides the release pose (see releasePreviewNode).
+    let authoredAny = false;
     // The write loop must not follow the live selection: the tree (and
     // the tab bar) stay clickable while writes await IPC, so a mid-commit
     // selection change would redirect the later writes onto another
@@ -273,8 +283,19 @@ async function handleGizmoCommit(commit: GizmoCommit) {
         failed = true;
         break;
       }
+      authoredAny = true;
     }
     keepPreviewPose = !failed;
+    if (failed && authoredAny) {
+      // Write 1's event refresh already applied the partial truth to the
+      // node; restoring the pre-drag latch now would leave the node
+      // diverged from the stage with nothing to correct it. Await a scene
+      // refresh on the drag's prim: its manifest application re-poses the
+      // node onto (partial) stage truth, so the release keeps this pose.
+      // Runs inside the try: the controls stay disabled until it lands.
+      await refreshSceneAfterEdit(viewer, [primPath]);
+      keepPreviewPose = true;
+    }
     // Keep commits disabled until fresh details land; a second drag must
     // never compute from the pre-commit local transform.
     if (!failed) await stageState.refreshAfterEdit();
