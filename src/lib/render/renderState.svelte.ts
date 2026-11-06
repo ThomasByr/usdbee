@@ -671,6 +671,21 @@ export const renderState = $state({
     // identical time on most frames (each a full manifest fetch); skip
     // when the state already sits at the requested time.
     if (!drainingQueue && time === this.time) return Promise.resolve();
+    // Hold on a buffer miss while the prefetch is alive: no fetch, no apply,
+    // and NO time write. A written held time is what the playback driver's
+    // resync adopts, which rewinds its continuous playhead onto the very code
+    // it is waiting for (measured: poseMax 765 ms, frozen motion). Leaving the
+    // time behind lets the playhead pass the code; once the batch lands, the
+    // request for it no longer matches this.time, so the dedupe cannot eat it.
+    if (
+      currentGroup &&
+      holdOnMiss &&
+      !sceneLoading &&
+      !timeStepInFlight &&
+      holdsPoseStep(this.timeCodes, time)
+    ) {
+      return Promise.resolve();
+    }
     this.time = time;
     this.onTimeChange?.(time);
     if (sceneLoading) {
@@ -684,11 +699,6 @@ export const renderState = $state({
     }
     const group = currentGroup;
     if (!group) return Promise.resolve();
-    // Hold on a buffer miss while the prefetch is alive. Resolved before the
-    // step is even considered in flight, exactly like the dedupe above: no
-    // fetch, no apply, nothing to release. The scene keeps its last pose
-    // until the batch lands and the next driver request hits the buffer.
-    if (holdOnMiss && holdsPoseStep(this.timeCodes, time)) return Promise.resolve();
     const generation = ++loadGeneration;
     timeStepInFlight = true;
     activeTimeStep = (async () => {

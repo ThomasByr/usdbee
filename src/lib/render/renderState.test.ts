@@ -1836,6 +1836,42 @@ describe("renderState pose prefetch", () => {
     expect(wrapper.matrix.elements[12]).toBe(9);
   });
 
+  it("holds without writing the playhead (no time, no onTimeChange)", async () => {
+    const group = await loadedScene();
+    const pending = deferred<ArrayBuffer>();
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_animated_pose_batch") return pending.promise;
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    renderState.time = 1;
+    const listener = vi.fn();
+    (renderState as any).onTimeChange = listener;
+    const batch = prefetchPoses(1); // in flight: code 5 is a miss
+
+    await renderState.setStageTime(5, true);
+
+    // A written held time is what the driver's resync adopts, rewinding its
+    // continuous playhead onto the code it was waiting for.
+    expect(renderState.time).toBe(1);
+    expect(listener).not.toHaveBeenCalled();
+
+    // The batch lands and the held code applies: the same-time dedupe must not
+    // eat it now that this.time stayed behind.
+    pending.resolve(
+      poseBatch(codes.slice(2, 14).map(() => poseFrame([wobbleAt(9)], packedBatchGeometry(1, 1)))),
+    );
+    await batch;
+    mockedInvoke.mockClear();
+    await renderState.setStageTime(5, true);
+
+    expect(mockedInvoke).not.toHaveBeenCalled();
+    expect(renderState.time).toBe(5);
+    expect(listener).toHaveBeenCalledWith(5);
+    const wrapper = group.children.find((child) => child.name === "/Scene/Wobble")!;
+    expect(wrapper.matrix.elements[12]).toBe(9);
+    (renderState as any).onTimeChange = null;
+  });
+
   it("single-fetches a playback miss once the batch path is dead", async () => {
     const group = await loadedScene();
     mockedInvoke.mockImplementation(async (cmd: string) => {
