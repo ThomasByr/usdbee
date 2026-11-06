@@ -20,8 +20,9 @@ let epoch = 0;
 // batch, which can no longer block a refill of the new generation, cannot
 // release the guard of the batch that replaced it.
 let inFlightEpoch = -1;
-// A failed batch keeps prefetch off for the rest of the generation: retrying
-// at frame rate would spend one ~145 ms invoke per frame while it is broken.
+// A failed batch keeps prefetch off for the rest of its own generation:
+// retrying at frame rate would spend one ~145 ms invoke per frame while it is
+// broken. Only a failure of the current generation lands here.
 let failedEpoch = -1;
 // The look-ahead window. Fill REPLACES it: both the playhead's window and the
 // new batch start after the same playhead, so nothing valid is dropped and the
@@ -39,7 +40,13 @@ export function invalidatePoseBuffer() {
   buffered = new Map();
 }
 
-/** How many authored codes ahead of `code` are buffered. O(K), allocation-free. */
+/**
+ * How many authored codes ahead of `code` are buffered. A counter of held
+ * entries cannot answer this: coverage is relative to the playhead, which can
+ * skip buffered codes (they then sit behind it until the next fill replaces
+ * the window), so the scan is the honest form. Cost per driver tick is one
+ * short-lived Map iterator, K <= 12.
+ */
 export function poseCoverage(code: number): number {
   let ahead = 0;
   for (const bufferedCode of buffered.keys()) {
@@ -72,11 +79,14 @@ export function claimPoseBatch(codes: readonly number[], code: number): ClaimedP
  */
 export function settlePoseBatch(claimed: ClaimedPoseBatch, poses: AnimatedPose[] | null) {
   if (inFlightEpoch === claimed.epoch) inFlightEpoch = -1;
+  // Epoch first: a batch that failed before an invalidation says nothing about
+  // the generation that replaced it, and marking the new one failed would turn
+  // prefetch off for the rest of the session.
+  if (claimed.epoch !== epoch) return;
   if (poses === null) {
     failedEpoch = epoch;
     return;
   }
-  if (claimed.epoch !== epoch) return;
   if (poses.length !== claimed.times.length) {
     console.warn(`usdbee: pose prefetch dropped, ${poses.length} poses for ${claimed.times.length} codes`);
     return;

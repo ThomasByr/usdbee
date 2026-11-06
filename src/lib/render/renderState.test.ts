@@ -1610,13 +1610,16 @@ describe("renderState pose prefetch", () => {
     frameDiag.reset();
   });
 
-  it("applies a prefetched pose with no invoke and a zero dispatch", async () => {
+  it("applies a prefetched pose with no invoke and no dispatch sample", async () => {
     const group = await loadedScene();
     let poseX = 3;
     mockIpc(() => [wobbleAt(poseX)]);
     mockedInvoke.mockClear();
 
     await prefetchPoses(1);
+
+    // One dispatch sample for the whole batch: the invoke's own wall time.
+    expect(frameDiag.snapshot().dispatchN).toBe(1);
 
     expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose_batch", {
       stageId: stageState.activeStageId,
@@ -1633,8 +1636,8 @@ describe("renderState pose prefetch", () => {
     expect(mockedInvoke).not.toHaveBeenCalled();
     const diag = frameDiag.snapshot();
     expect(diag.applyN).toBe(1);
-    expect(diag.dispatchN).toBe(1);
-    expect(diag.dispatchP50).toBe(0);
+    // Consuming a buffered pose dispatches nothing: its dispatch is the batch's.
+    expect(diag.dispatchN).toBe(0);
   });
 
   it("steps the single-pose path for a code the batch did not cover", async () => {

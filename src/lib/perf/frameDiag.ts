@@ -148,7 +148,10 @@ export function onPoseApplied(ms: number) {
   push(applyRing, ms);
 }
 
-/** The pose fetch resolving with bytes in hand: the dispatch half of the pose span. */
+/**
+ * Bytes in hand: one single-pose fetch, or one batch invoke recorded ONCE per
+ * batch (its whole wall time), never once per pose the batch carries.
+ */
 export function onPoseDispatched(ms: number) {
   push(dispatchRing, ms);
 }

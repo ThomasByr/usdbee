@@ -134,4 +134,19 @@ describe("the look-ahead buffer", () => {
     invalidatePoseBuffer();
     expect(claimPoseBatch(CODES, 0)).not.toBeNull();
   });
+
+  it("keeps prefetching in the new generation after a stale batch fails", () => {
+    const stale = claimPoseBatch(CODES, 0)!;
+    // A scrub / stage switch while that batch is still in flight.
+    invalidatePoseBuffer();
+    const fresh = claimPoseBatch(CODES, 0)!;
+    settlePoseBatch(fresh, poses(fresh.times.length)); // window 1..12
+
+    // The pre-scrub batch rejects late: its failure belongs to the old epoch.
+    settlePoseBatch(stale, null);
+    expect(poseCoverage(0)).toBe(POSE_PREFETCH);
+
+    for (let code = 1; code <= 7; code++) takePose(code); // coverage 5
+    expect(claimPoseBatch(CODES, 7)).not.toBeNull();
+  });
 });

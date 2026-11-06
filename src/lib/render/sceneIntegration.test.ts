@@ -321,6 +321,10 @@ describe("installPlaybackDriver pose prefetch", () => {
     renderState.time = 30; // simulated scrub
     v.onAdvanceTime!(0);
 
+    // The pre-scrub window is gone, not merely behind the new playhead: the
+    // resync branch drops it before the next batch is even claimed.
+    expect(poseCoverage(1)).toBe(0);
+    expect(takePose(2)).toBeNull();
     expect(poseCoverage(30)).toBe(0);
     expect(batchCalls()).toHaveLength(2);
     expect(batchCalls()[1]![1]).toEqual({

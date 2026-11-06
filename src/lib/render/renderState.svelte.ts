@@ -187,8 +187,14 @@ export function prefetchPoses(code: number): Promise<void> {
   const claimed = claimPoseBatch(renderState.timeCodes, code);
   if (!claimed) return Promise.resolve();
   return (async () => {
+    const startedAt = performance.now();
     try {
-      settlePoseBatch(claimed, await fetchers.getAnimatedPoseBatch!(claimed.times));
+      const poses = await fetchers.getAnimatedPoseBatch!(claimed.times);
+      // ONE dispatch sample per batch: the invoke's wall time, recorded where
+      // the batch resolves. A per-pose sample would hide it (the batch's own
+      // ~145 ms is not attributable to any single pose it carries).
+      frameDiag.onPoseDispatched(performance.now() - startedAt);
+      settlePoseBatch(claimed, poses);
     } catch (e) {
       settlePoseBatch(claimed, null);
       console.warn("usdbee: pose prefetch failed; stepping one pose at a time:", e);
@@ -667,7 +673,8 @@ export const renderState = $state({
         let manifest: RenderNode[];
         let prefetched: AnimatedPose["prefetched"] | null = null;
         if (buffered) {
-          frameDiag.onPoseDispatched(0);
+          // No dispatch sample: the batch's own wall time was recorded at fill
+          // time, and a synthetic 0 per pose would flood the ring and dilute it.
           manifest = buffered.manifest;
           prefetched = buffered.prefetched;
         } else {
