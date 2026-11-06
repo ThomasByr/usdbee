@@ -9,6 +9,7 @@ import {
   expectedIntervalMs,
   onPose,
   onPoseApplied,
+  onPoseDispatched,
   onRaf,
   onRender,
   onPoseResync,
@@ -167,6 +168,16 @@ describe("pose pacing", () => {
     expect(s.applyP50).toBe(2.5);
     expect(s.applyMax).toBe(9);
   });
+
+  it("records the pose dispatch cost", () => {
+    onPoseDispatched(1.5);
+    onPoseDispatched(2.5);
+    onPoseDispatched(9);
+    const s = snapshot();
+    expect(s.dispatchN).toBe(3);
+    expect(s.dispatchP50).toBe(2.5);
+    expect(s.dispatchMax).toBe(9);
+  });
 });
 
 describe("snapshot", () => {
@@ -175,6 +186,10 @@ describe("snapshot", () => {
     "applyN",
     "applyP50",
     "applyP95",
+    "dispatchMax",
+    "dispatchN",
+    "dispatchP50",
+    "dispatchP95",
     "droppedCodes",
     "expectedPoseMs",
     "poseMax",
@@ -206,6 +221,7 @@ describe("snapshot", () => {
     onPose(0, 0);
     onPose(41.7, 1);
     onPoseApplied(3);
+    onPoseDispatched(2);
     expect(Object.keys(snapshot()).sort()).toEqual(KEYS);
     expect(JSON.parse(JSON.stringify(empty))).toEqual(empty);
   });
@@ -224,6 +240,7 @@ describe("snapshot", () => {
     expect(s.poseN).toBe(0);
     expect(s.droppedCodes).toBe(0);
     expect(s.applyN).toBe(0);
+    expect(s.dispatchN).toBe(0);
   });
 
   it("keeps the stage rate across a reset, so a reset while paused still reports it", () => {

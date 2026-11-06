@@ -55,12 +55,17 @@ export interface DiagSnapshot {
   applyP50: number;
   applyP95: number;
   applyMax: number;
+  dispatchN: number;
+  dispatchP50: number;
+  dispatchP95: number;
+  dispatchMax: number;
 }
 
 const rafRing = ring(FRAMES);
 const renderRing = ring(FRAMES);
 const gapRing = ring(POSES);
 const applyRing = ring(POSES);
+const dispatchRing = ring(POSES);
 
 // -1 = no sample yet (a 0 ms timestamp is a legitimate first sample).
 let lastRaf = -1;
@@ -143,6 +148,11 @@ export function onPoseApplied(ms: number) {
   push(applyRing, ms);
 }
 
+/** The pose fetch resolving with bytes in hand: the dispatch half of the pose span. */
+export function onPoseDispatched(ms: number) {
+  push(dispatchRing, ms);
+}
+
 /** Stage rate the pose expectation derives from. */
 export function setRate(tcps: number) {
   rate = tcps;
@@ -155,7 +165,7 @@ export function onPoseResync() {
 }
 
 export function reset() {
-  for (const r of [rafRing, renderRing, gapRing, applyRing]) {
+  for (const r of [rafRing, renderRing, gapRing, applyRing, dispatchRing]) {
     r.i = 0;
     r.n = 0;
   }
@@ -194,6 +204,7 @@ export function snapshot(): DiagSnapshot {
   const render = series(renderRing);
   const pose = series(gapRing);
   const apply = series(applyRing);
+  const dispatch = series(dispatchRing);
   return {
     tcps: rate,
     expectedPoseMs: round2(expectedIntervalMs(rate)),
@@ -217,5 +228,9 @@ export function snapshot(): DiagSnapshot {
     applyP50: apply.p50,
     applyP95: apply.p95,
     applyMax: apply.max,
+    dispatchN: dispatch.n,
+    dispatchP50: dispatch.p50,
+    dispatchP95: dispatch.p95,
+    dispatchMax: dispatch.max,
   };
 }

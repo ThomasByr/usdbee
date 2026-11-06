@@ -662,6 +662,8 @@ export const renderState = $state({
         performance.mark?.("usdbee:pose:issued");
         const poseStartedAt = performance.now();
         const { manifest, prefetched } = await fetchers.getAnimatedPose!(time);
+        // Dispatch half of the span: the bytes are in hand, decode+apply follow.
+        frameDiag.onPoseDispatched(performance.now() - poseStartedAt);
         if (generation !== loadGeneration || currentGroup !== group) return;
         const isStale = () => generation !== loadGeneration || currentGroup !== group;
         await updateSceneDelta(manifest, time, isStale, prefetched);
