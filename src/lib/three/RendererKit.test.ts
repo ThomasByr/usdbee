@@ -161,6 +161,15 @@ describe("selection box during playback", () => {
   });
 });
 
+describe("drawing buffer", () => {
+  it("does not ask the browser to preserve it", () => {
+    // A preserved buffer costs a full-canvas copy per frame; the exporters
+    // render right before each read instead.
+    const src = readFileSync(fileURLToPath(new URL("./RendererKit.svelte.ts", import.meta.url)), "utf8");
+    expect(src).not.toMatch(/preserveDrawingBuffer/);
+  });
+});
+
 describe("shadow map updates", () => {
   it("turns the on-demand shadow map on in init", () => {
     // init needs a real WebGL context, so the call site is pinned at the

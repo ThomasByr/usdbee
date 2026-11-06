@@ -88,7 +88,6 @@ export class RendererKit {
       canvas: this.canvas,
       antialias: true,
       alpha: true,
-      preserveDrawingBuffer: true,
     });
     this.renderer.setSize(w, h, false);
     this.renderer.setPixelRatio(window.devicePixelRatio);
