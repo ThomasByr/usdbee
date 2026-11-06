@@ -19,6 +19,7 @@ vi.mock("$lib/stage/stageState.svelte", () => {
 });
 
 import { stageState } from "$lib/stage/stageState.svelte";
+import { renderState } from "$lib/render/renderState.svelte";
 import type { PrimDetails } from "$lib/stage/types";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
 import { disposeGizmo, frameSyncGizmo, gizmoPolicy, initGizmo, syncGizmoAnchor } from "./gizmoCommit.svelte";
@@ -108,6 +109,8 @@ function commit(start: number, end: number): Promise<void> {
 }
 
 beforeEach(() => {
+  renderState.hasAnimated = false;
+  renderState.time = null;
   stage.selectedPath = "/Scene/Prim";
   stage.details = null;
   stage.refreshSelectedDetails.mockReset();
@@ -255,7 +258,41 @@ describe("stale stack guard", () => {
     expect(stage.setAttributeValue).toHaveBeenCalledWith(
       "xformOp:translate",
       { type: "double3", data: [8, 0, 0] },
-      undefined,
+      null,
+    );
+  });
+});
+
+describe("hybrid authoring time", () => {
+  it("authors op values at the default time on a static stage", async () => {
+    // Static stage: default-time writes keep the rust caches warm and
+    // author no phantom time samples.
+    const viewer = makeViewer(new THREE.Object3D());
+    stage.details = detailsAt(5);
+    initGizmo(viewer, () => "translate");
+
+    await commit(5, 8);
+
+    expect(stage.setAttributeValue).toHaveBeenCalledWith(
+      "xformOp:translate",
+      { type: "double3", data: [8, 0, 0] },
+      null,
+    );
+  });
+
+  it("authors op values at the playhead on an animated stage", async () => {
+    renderState.hasAnimated = true;
+    renderState.time = 5;
+    const viewer = makeViewer(new THREE.Object3D());
+    stage.details = detailsAt(5);
+    initGizmo(viewer, () => "translate");
+
+    await commit(5, 8);
+
+    expect(stage.setAttributeValue).toHaveBeenCalledWith(
+      "xformOp:translate",
+      { type: "double3", data: [8, 0, 0] },
+      5,
     );
   });
 });
@@ -296,7 +333,7 @@ describe("pause on gizmo drag start", () => {
     expect(stage.setAttributeValue).toHaveBeenCalledWith(
       "xformOp:translate",
       { type: "double3", data: [8, 0, 0] },
-      undefined,
+      null,
     );
   });
 
@@ -329,7 +366,7 @@ describe("pause on gizmo drag start", () => {
     expect(stage.setAttributeValue).toHaveBeenCalledWith(
       "xformOp:translate",
       { type: "double3", data: [8, 0, 0] },
-      undefined,
+      null,
     );
 
     // Unconditional per commit, not a latch: a later commit refreshes again.

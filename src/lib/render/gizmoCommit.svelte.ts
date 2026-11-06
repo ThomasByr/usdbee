@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { TransformGizmo, previewLocalMatrix, type GizmoCommit } from "$lib/render/transformGizmo";
 import { composeOpUpdate, evaluateGizmoGate, matricesClose, type GizmoMode } from "$lib/render/xformOps";
 import { stageState } from "$lib/stage/stageState.svelte";
+import { renderState } from "$lib/render/renderState.svelte";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
 
 // Transform gizmo editing policy (Phase 3 Task 4), moved out of the
@@ -243,13 +244,21 @@ async function handleGizmoCommit(commit: GizmoCommit) {
       return;
     }
     let failed = false;
+    // Hybrid authoring time: on a static stage the op values author at
+    // the DEFAULT time — no phantom samples, and the rust caches stay
+    // warm across writes (the c5156f2 keep only covers default-time
+    // writes). Animated stages keep playhead authoring so an edit lands
+    // where the user is looking.
+    // shortcut: stage-level granularity, not per-prim; per-prim when
+    // animated stages' static prims feel slow to release
+    const opTime: number | null = renderState.hasAnimated ? renderState.time : null;
     for (const write of result.writes) {
       // xformOpOrder is uniform: it authors its default, never a time
-      // sample; the op values author at the viewer's current time code.
+      // sample.
       const error = await stageState.setAttributeValue(
         write.name,
         { type: write.type, data: write.data },
-        write.name === "xformOpOrder" ? null : undefined,
+        write.name === "xformOpOrder" ? null : opTime,
       );
       if (error !== null) {
         gizmoPolicy.error = error;
