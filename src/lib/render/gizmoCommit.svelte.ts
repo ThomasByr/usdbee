@@ -186,6 +186,8 @@ function releasePreviewNode(viewer: RendererKit, keepPose: boolean) {
   node.matrixAutoUpdate = false;
   node.matrix.copy(latchedNodeMatrix);
   node.matrixWorldNeedsUpdate = true;
+  // The restore moves a caster back: the map holds the dragged pose.
+  requestShadowUpdate();
 }
 
 // Re-anchor after a drag: stage truth wins, the commit's true end matrix

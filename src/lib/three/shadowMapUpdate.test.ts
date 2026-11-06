@@ -4,6 +4,9 @@
 // answers no.
 
 import * as THREE from "three";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   consumeShadowUpdate,
@@ -73,5 +76,28 @@ describe("renderWithShadowUpdate", () => {
     renderWithShadowUpdate(renderer, scene, camera);
 
     expect(drawn).toEqual([false]);
+  });
+});
+
+describe("draw-site discipline", () => {
+  // A raw renderer.render() bypasses the request handoff, so the map drawn
+  // on screen silently keeps the old casters.
+  it("is the only file in src/ that calls renderer.render", () => {
+    const srcRoot = fileURLToPath(new URL("../..", import.meta.url));
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) walk(path);
+        else if (/\.(ts|svelte)$/.test(entry.name) && !entry.name.endsWith(".test.ts")) {
+          if (/\.render\s*\(/.test(readFileSync(path, "utf8"))) {
+            offenders.push(path.slice(srcRoot.length));
+          }
+        }
+      }
+    };
+    walk(srcRoot);
+
+    expect(offenders).toEqual(["lib/three/shadowMapUpdate.ts"]);
   });
 });

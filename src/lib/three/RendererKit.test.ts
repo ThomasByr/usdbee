@@ -12,7 +12,9 @@ vi.mock("@tauri-apps/api/window", () => ({
 import * as THREE from "three";
 import { RendererKit } from "./RendererKit.svelte";
 import * as frameDiag from "$lib/perf/frameDiag";
-import { requestShadowUpdate } from "./shadowMapUpdate";
+import { consumeShadowUpdate, requestShadowUpdate } from "./shadowMapUpdate";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 function makeKit(playing: boolean) {
   const kit = new RendererKit();
@@ -21,7 +23,9 @@ function makeKit(playing: boolean) {
   // `shadowDraws` records what the shadow pass saw at each render: three.js
   // clears needsUpdate itself once it has drawn the map.
   const shadowDraws: boolean[] = [];
-  const shadowMap = { autoUpdate: false, needsUpdate: false };
+  // three.js's own default: production code must turn it off, and the test
+  // proves it did.
+  const shadowMap = { autoUpdate: true, needsUpdate: false };
   kit.renderer = {
     render: vi.fn(() => {
       shadowDraws.push(shadowMap.needsUpdate);
@@ -158,6 +162,13 @@ describe("selection box during playback", () => {
 });
 
 describe("shadow map updates", () => {
+  it("turns the on-demand shadow map on in init", () => {
+    // init needs a real WebGL context, so the call site is pinned at the
+    // source: without it three.js redraws every caster every frame.
+    const src = readFileSync(fileURLToPath(new URL("./RendererKit.svelte.ts", import.meta.url)), "utf8");
+    expect(src).toMatch(/initOnDemandShadows\(this\.renderer\.shadowMap\)/);
+  });
+
   it("draws the map on the first frame, then leaves it alone on plain frames", () => {
     const { kit, shadowDraws } = makeKit(false);
     requestShadowUpdate();

@@ -247,6 +247,9 @@ export function syncGraphicsSettings(viewer: RendererKit) {
     if (viewer.renderer.shadowMap.type !== newShadowType) {
       viewer.renderer.shadowMap.type = newShadowType;
       needsMaterialUpdate = true;
+      // The new type recompiles the depth materials and changes how the
+      // map is sampled: draw it again in that mode.
+      requestShadowUpdate();
     }
 
     if (viewer.scene) {

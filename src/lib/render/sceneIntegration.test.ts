@@ -2,7 +2,7 @@
 // advance the playhead while a scene load is in flight, or the pose the
 // scene centers on would depend on how long the load took.
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -16,6 +16,7 @@ import {
   integrateScene,
   loadRustScene,
   resetLoadedScene,
+  syncGraphicsSettings,
   syncLightRig,
 } from "./sceneIntegration";
 import { loadCachedTexture } from "./textureCache";
@@ -23,6 +24,7 @@ import { renderState } from "./renderState.svelte";
 import * as frameDiag from "../perf/frameDiag";
 import { loadOrchestrator } from "../state/loadOrchestrator.svelte";
 import { stageState } from "../stage/stageState.svelte";
+import { viewerSettings } from "../state/viewerSettings.svelte";
 import { consumeShadowUpdate } from "../three/shadowMapUpdate";
 import type { RendererKit } from "../three/RendererKit.svelte";
 
@@ -307,6 +309,76 @@ describe("syncLightRig", () => {
     syncLightRig(kit, 45, 45);
 
     expect(consumeShadowUpdate()).toBe(true);
+  });
+});
+
+describe("syncGraphicsSettings shadow triggers", () => {
+  // Only the two shadow branches matter here: the material walk needs no
+  // scene, so the kit stays a plain object.
+  function graphicsKit(): RendererKit {
+    return {
+      renderer: {
+        shadowMap: { type: THREE.PCFSoftShadowMap, enabled: true, needsUpdate: false },
+        toneMapping: THREE.ACESFilmicToneMapping,
+        toneMappingExposure: 1,
+        setPixelRatio: vi.fn(),
+        capabilities: { getMaxAnisotropy: () => 16 },
+      },
+      scene: null,
+      dirLight: null,
+      loadedGroup: null,
+    } as unknown as RendererKit;
+  }
+
+  const settings = { size: viewerSettings.shadowMapSize, type: viewerSettings.shadowMapType };
+  beforeEach(() => {
+    settings.size = viewerSettings.shadowMapSize;
+    settings.type = viewerSettings.shadowMapType;
+    // syncGraphicsSettings reads the device pixel ratio it applies.
+    vi.stubGlobal("window", { devicePixelRatio: 1 });
+  });
+  afterEach(() => {
+    viewerSettings.shadowMapSize = settings.size;
+    viewerSettings.shadowMapType = settings.type;
+    vi.unstubAllGlobals();
+  });
+
+  it("requests a redraw when the shadow map type changes", () => {
+    // A new type recompiles the depth materials: without a request the map
+    // keeps sampling the old one until some caster moves.
+    const kit = graphicsKit();
+    viewerSettings.shadowMapType = "VSM";
+    consumeShadowUpdate();
+
+    syncGraphicsSettings(kit);
+
+    expect(kit.renderer.shadowMap.type).toBe(THREE.VSMShadowMap);
+    expect(consumeShadowUpdate()).toBe(true);
+  });
+
+  it("requests a redraw when the shadow map size changes", () => {
+    const kit = graphicsKit();
+    kit.dirLight = {
+      shadow: { mapSize: { width: 512, height: 512 }, map: null },
+    } as unknown as THREE.DirectionalLight;
+    viewerSettings.shadowMapSize = 4096;
+    consumeShadowUpdate();
+
+    syncGraphicsSettings(kit);
+
+    expect(kit.dirLight!.shadow.mapSize.width).toBe(4096);
+    expect(consumeShadowUpdate()).toBe(true);
+  });
+
+  it("leaves the map alone when neither shadow setting changed", () => {
+    const kit = graphicsKit();
+    kit.renderer.shadowMap.type = THREE.VSMShadowMap;
+    viewerSettings.shadowMapType = "VSM";
+    consumeShadowUpdate();
+
+    syncGraphicsSettings(kit);
+
+    expect(consumeShadowUpdate()).toBe(false);
   });
 });
 

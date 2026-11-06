@@ -23,6 +23,7 @@ import { renderState } from "$lib/render/renderState.svelte";
 import { RendererKit } from "$lib/three/RendererKit.svelte";
 import type { PrimDetails } from "$lib/stage/types";
 import { disposeGizmo, frameSyncGizmo, gizmoPolicy, initGizmo, syncGizmoAnchor } from "./gizmoCommit.svelte";
+import { consumeShadowUpdate } from "$lib/three/shadowMapUpdate";
 
 const stage = stageState as unknown as {
   selectedPath: string | null;
@@ -257,6 +258,39 @@ describe("syncGizmoAnchor", () => {
     gizmoPolicy.kit!.controls.dragging = false;
     syncGizmoAnchor(viewer, "translate");
     expect(proxy().position.x).toBeCloseTo(5, 6);
+  });
+});
+
+describe("shadow requests", () => {
+  it("requests a redraw for every previewed drag pose", () => {
+    // The dragged prim is a caster moving under a paused playhead.
+    const parent = new THREE.Group();
+    const node = new THREE.Object3D();
+    parent.add(node);
+    const viewer = makeViewer(node);
+    initGizmo(viewer, () => "translate");
+
+    gizmoPolicy.kit!.onDragStart!();
+    consumeShadowUpdate();
+
+    gizmoPolicy.kit!.onPreview!(translateMatrix(8));
+
+    expect(consumeShadowUpdate()).toBe(true);
+  });
+
+  it("requests a redraw when the release restores the pre-drag pose", async () => {
+    // A commit that authors nothing hands the node back to its latched
+    // matrix: the shadow map still holds the dragged pose.
+    const viewer = makeViewer(new THREE.Object3D());
+    stage.details = detailsAt(5);
+    initGizmo(viewer, () => "translate");
+    gizmoPolicy.kit!.onDragStart!();
+    consumeShadowUpdate();
+
+    await commit(5, 5); // no-op drag: nothing authored, pose restored
+
+    expect(stage.setAttributeValue).not.toHaveBeenCalled();
+    expect(consumeShadowUpdate()).toBe(true);
   });
 });
 
