@@ -823,6 +823,10 @@ fn spawn_stage_owner_for(
                                 stage.edit_target().layer_identifier(),
                                 &path,
                             );
+                            // Decided before the warm/cold split so both arms
+                            // announce the same path: a prototype-subtree
+                            // edit must reach the frontend as a full rebuild.
+                            let emitted = edit_emission_path(stage, &path);
                             // The gizmo's hot path: a default-time xform op /
                             // order write cannot change the tree shape or any
                             // time-independent skeleton fact, yet the coarse
@@ -840,7 +844,7 @@ fn spawn_stage_owner_for(
                                 mesh_cache.clear();
                                 invalidate_skeleton_transform(&mut manifest_skeleton, &path);
                                 resolve_memo.clear();
-                                emit_stage_changed(&sink, &path);
+                                emit_stage_changed(&sink, &emitted);
                             } else {
                                 after_mutation(
                                     &sink,
@@ -848,7 +852,7 @@ fn spawn_stage_owner_for(
                                     &mut manifest_skeleton,
                                     &mut stage_tree,
                                     &mut resolve_memo,
-                                    &path,
+                                    &emitted,
                                 );
                             }
                         }
@@ -1575,6 +1579,33 @@ fn author_prim_metadata(
         }
     }
     Ok(())
+}
+
+/// The `usd-stage-changed` path a successful edit announces. A prim inside
+/// a native-instance prototype subtree renders under every rebased instance
+/// path, so the frontend's targeted in-place refresh at the prototype path
+/// would find nothing to update and the instances would stay visually
+/// stale — the conservative "/" (full scene rebuild) is the only correct
+/// announcement. openusd currently refuses authoring into the prototype
+/// namespace outright (C++ `_ValidateEditPrim`), so this guard is the
+/// emission's contract if that refusal ever lifts.
+fn edit_emission_path(stage: &Stage, path: &str) -> String {
+    // A detection failure must never risk a missed refresh: any error
+    // reading prototype membership announces the conservative "/".
+    let in_prototype = sdf::try_into_path(path)
+        .map(|prim_path| {
+            stage
+                .prim(prim_path)
+                .ok()
+                .and_then(|prim| prim.is_in_prototype().ok())
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+    if in_prototype {
+        "/".to_string()
+    } else {
+        path.to_string()
+    }
 }
 
 /// Post-success bookkeeping every mutation arm shares: the coarse cache
@@ -4519,4 +4550,34 @@ pub fn request_list_stage_layers(
     response
         .recv()
         .map_err(|_| "stage service unavailable".to_string())?
+}
+
+#[cfg(test)]
+mod edit_emission_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    // A write landing inside a native-instance prototype subtree must
+    // announce "/" (full scene rebuild): the instances render under
+    // rebased paths, so a targeted in-place refresh at the prototype
+    // path would find nothing to update and they would stay stale.
+    #[test]
+    fn prototype_subtree_edits_announce_the_root_path() {
+        let (stage, _) = open_stage(&fixture("instanced.usda")).expect("stage should open");
+        assert_eq!(edit_emission_path(&stage, "/__Prototype_0"), "/");
+        assert_eq!(edit_emission_path(&stage, "/__Prototype_0/Wheel"), "/");
+        // Everything outside the prototype namespace keeps its own path:
+        // instance prims and proxies (whose writes other guards refuse)
+        // and plain prims alike.
+        assert_eq!(edit_emission_path(&stage, "/Scene"), "/Scene");
+        assert_eq!(
+            edit_emission_path(&stage, "/Scene/WheelA/Wheel"),
+            "/Scene/WheelA/Wheel"
+        );
+    }
 }

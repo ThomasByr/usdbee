@@ -325,6 +325,70 @@ fn set_value_on_instance_prim_is_a_readable_error() {
     );
 }
 
+#[test]
+fn set_value_on_a_prototype_prim_is_refused_before_any_emission() {
+    let (state, events) = owner_with_events();
+    open_via_owner(&state, "instanced.usda");
+
+    // openusd refuses authoring into the instancing prototype namespace
+    // outright (C++ `_ValidateEditPrim`), so a prototype-path write never
+    // reaches the emission. Pin both halves of that reality: the refusal,
+    // and that no usd-stage-changed fires for it.
+    let error = request_set_value(
+        &state,
+        "/__Prototype_0/Wheel",
+        "radius",
+        payload("double", serde_json::json!(1.5)),
+        None,
+    )
+    .expect_err("authoring into a prototype must fail");
+    assert!(
+        error.contains("prototype"),
+        "the error must name the prototype rule, got: {}",
+        error
+    );
+    assert!(
+        events
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err(),
+        "a refused write must not emit usd-stage-changed"
+    );
+}
+
+#[test]
+fn default_time_and_sampled_writes_keep_per_path_emission() {
+    let (state, events) = owner_with_events();
+    open_via_owner(&state, "instanced.usda");
+
+    // The warm arm (a default-time xform write: kept tree + skeleton)...
+    request_set_value(
+        &state,
+        "/Scene",
+        "xformOp:translate",
+        payload("double3", serde_json::json!([2.0, 0.0, 0.0])),
+        None,
+    )
+    .expect("default-time xform write should succeed");
+    let paths = events
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("usd-stage-changed should fire after the warm write");
+    assert_eq!(paths, vec!["/Scene".to_string()]);
+
+    // ...and the cold arm (a sampled write) keep the per-path emission.
+    request_set_value(
+        &state,
+        "/Scene",
+        "xformOp:translate",
+        payload("double3", serde_json::json!([3.0, 0.0, 0.0])),
+        Some(1.0),
+    )
+    .expect("sampled write should succeed");
+    let paths = events
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("usd-stage-changed should fire after the sampled write");
+    assert_eq!(paths, vec!["/Scene".to_string()]);
+}
+
 // --- Task 3: variant selection ---
 
 fn request_set_variant_selection(
