@@ -1,6 +1,28 @@
-// Playback loop probe: plays every authored time code twice and reports the
-// per-step backend cost of each loop, so "is playback warm after one pass?"
-// can be answered with numbers instead of assumed from cache sizes.
+// Playback loop probe: plays every authored time code through the backend paths
+// playback uses and reports the per-step cost of each loop, so "is playback warm
+// after one pass?" can be answered with numbers instead of assumed from cache
+// sizes.
+//
+// Rows, per loop:
+//   walk      `GetAnimatedManifest` alone: the delta walk, no JSON encode and
+//             no geometry. The difference against `pose` is the encode.
+//   geometry  `GetGeometryBatch` over every `has_geometry` delta node (14 prims
+//             on the bike). This is NOT what the app fetches: the app only
+//             batches `geometry_animated` (1 prim) inside `get_animated_pose`.
+//             Kept because it is what drives the cold tessellation count.
+//   pose      `GetAnimatedPose`: the owner turn the app's single invoke pays,
+//             i.e. walk + `serde_json::to_vec` of the delta + the app's
+//             `geometry_animated` paths + one batch + `frame_pose`'s copies.
+//             This is the per-pose backend cost the app actually sees.
+//   step avg  the pose avg: the app's per-pose backend cost and its fps
+//             ceiling (the frontend decode and GPU upload are not measured).
+//   tessell.  MeshCache insert count for the stage: 3,934 after loop 1 and
+//             unchanged after, since a warm pose must tessellate nothing.
+//
+// The pose row runs after the two rows above, so loop 1's cold tessellation is
+// charged to `geometry`; loops 2-3 `pose` is the warm app turn. Every pose
+// frame is sanity-parsed (JSON decodes, path list matches the batch slots) so a
+// corrupted payload cannot pass as a fast one.
 //
 // cargo run [--release] --example profile_playback_loops
 //   USD_PATH=<asset>   asset under test (default CarbonFrameBike.usdz)
@@ -9,8 +31,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use usdbee_lib::stage::{
-    noop_sink, open_stage, request_animated_manifest, request_geometry_batch, request_time_codes,
-    RenderNode, StageState,
+    noop_sink, open_stage, request_animated_manifest, request_animated_pose,
+    request_geometry_batch, request_time_codes, RenderNode, StageState,
 };
 
 fn ms(duration: Duration) -> f64 {
@@ -22,6 +44,61 @@ fn walk<'a>(nodes: &'a [RenderNode], out: &mut Vec<&'a RenderNode>) {
         out.push(node);
         walk(&node.children, out);
     }
+}
+
+fn take<'a>(bytes: &'a [u8], at: &mut usize, len: usize) -> Result<&'a [u8], String> {
+    let end = at
+        .checked_add(len)
+        .ok_or_else(|| "frame length overflow".to_string())?;
+    let slice = bytes
+        .get(*at..end)
+        .ok_or_else(|| format!("frame truncated at {} + {}", at, len))?;
+    *at = end;
+    Ok(slice)
+}
+
+fn take_u32(bytes: &[u8], at: &mut usize) -> Result<u32, String> {
+    let slice = take(bytes, at, 4)?;
+    Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+/// Parse the merged pose frame far enough to prove it is intact:
+/// `[u32 json_len][json][pad][u32 count][paths][pad][batch]`. The JSON must
+/// decode as a delta manifest, every path must be UTF-8, and the batch tail
+/// must hold exactly one slot per path with nothing left over.
+fn check_pose_frame(bytes: &[u8]) -> Result<usize, String> {
+    let mut at = 0;
+    let json_len = take_u32(bytes, &mut at)? as usize;
+    let json = take(bytes, &mut at, json_len)?;
+    serde_json::from_slice::<Vec<RenderNode>>(json)
+        .map_err(|error| format!("pose json: {}", error))?;
+    at = (at + 3) & !3;
+    let count = take_u32(bytes, &mut at)? as usize;
+    for _ in 0..count {
+        let len = take_u32(bytes, &mut at)? as usize;
+        let path = take(bytes, &mut at, len)?;
+        std::str::from_utf8(path).map_err(|error| format!("pose path: {}", error))?;
+    }
+    at = (at + 3) & !3;
+    take_u32(bytes, &mut at)?; // batch magic
+    take_u32(bytes, &mut at)?; // batch version
+    let slots = take_u32(bytes, &mut at)? as usize;
+    if slots != count {
+        return Err(format!(
+            "pose frame: {} paths, {} batch slots",
+            count, slots
+        ));
+    }
+    for _ in 0..slots {
+        take_u32(bytes, &mut at)?; // slot status
+        let len = take_u32(bytes, &mut at)? as usize;
+        take(bytes, &mut at, len)?;
+        at = (at + 3) & !3;
+    }
+    if at != bytes.len() {
+        return Err(format!("pose frame: {} trailing bytes", bytes.len() - at));
+    }
+    Ok(count)
 }
 
 fn extract(archive_path: &PathBuf) -> (PathBuf, PathBuf) {
@@ -105,13 +182,17 @@ fn main() {
     // build that this triggers is not part of the playback cost.
     let _ = open_stage(&path).map(|(stage, _)| stage);
 
+    let mut frames_checked = 0usize;
     for (loops_done, label) in ["loop 1", "loop 2", "loop 3"].iter().enumerate() {
         let mut walk_total = 0.0;
         let mut geo_total = 0.0;
+        let mut pose_total = 0.0;
         let mut nodes_total = 0usize;
         let mut prims_total = 0usize;
+        let mut pose_prims_total = 0usize;
         let mut walk_max: f64 = 0.0;
         let mut geo_max: f64 = 0.0;
+        let mut pose_max: f64 = 0.0;
         for code in &codes {
             let time = *code;
             let start = Instant::now();
@@ -133,23 +214,46 @@ fn main() {
             let geo_ms = ms(start.elapsed());
             geo_total += geo_ms;
             geo_max = geo_max.max(geo_ms);
+            let start = Instant::now();
+            let frame = request_animated_pose(&sender, Some(time)).unwrap();
+            let pose_ms = ms(start.elapsed());
+            pose_total += pose_ms;
+            pose_max = pose_max.max(pose_ms);
+            match check_pose_frame(&frame) {
+                Ok(paths) => {
+                    pose_prims_total += paths;
+                    frames_checked += 1;
+                }
+                Err(error) => {
+                    eprintln!("PROBE ERROR time {}: {}", time, error);
+                    std::process::exit(1);
+                }
+            }
         }
         let steps = codes.len() as f64;
+        let pose_avg = pose_total / steps;
         println!(
-            "LOOP {} ({}) walk avg {:.2} ms max {:.2} | geometry avg {:.2} ms max {:.2} | {:.1} nodes {:.1} prims | step avg {:.2} ms -> {:.1} fps | tessellations {}",
+            "LOOP {} ({}) walk avg {:.2} ms max {:.2} | geometry has_geometry {:.1} prims avg {:.2} ms max {:.2} | pose app turn {:.1} prims avg {:.2} ms max {:.2} | {:.1} nodes | step avg {:.2} ms -> {:.1} fps | tessellations {}",
             loops_done + 1,
             label,
             walk_total / steps,
             walk_max,
+            prims_total as f64 / steps,
             geo_total / steps,
             geo_max,
+            pose_prims_total as f64 / steps,
+            pose_avg,
+            pose_max,
             nodes_total as f64 / steps,
-            prims_total as f64 / steps,
-            (walk_total + geo_total) / steps,
-            1000.0 / ((walk_total + geo_total) / steps).max(0.001),
+            pose_avg,
+            1000.0 / pose_avg.max(0.001),
             state.mesh_tessellations(info.stage_id).unwrap_or(0)
         );
     }
+    println!(
+        "FRAMES {} pose frames parsed (json decoded, path list == batch slots)",
+        frames_checked
+    );
     if let Some(dir) = extraction {
         let _ = std::fs::remove_dir_all(dir);
     }
