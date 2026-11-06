@@ -178,6 +178,26 @@ describe("resetLoadedScene", () => {
     loadCachedTexture("/Textures/texgen_7.png", () => {}, load);
     expect(load).toHaveBeenCalledTimes(2);
   });
+
+  it("drops the selection visuals with the scene", () => {
+    // The frame loop only redraws the box while selectedNode is set: a
+    // close would freeze the last-drawn box over the empty view.
+    const group = new THREE.Group();
+    const scene = new THREE.Scene();
+    scene.add(group);
+    const helper = { visible: true } as unknown as THREE.Box3Helper;
+    const kit = {
+      loadedGroup: group,
+      scene,
+      selectedNode: group,
+      selectionHelper: helper,
+    } as unknown as RendererKit;
+
+    resetLoadedScene(kit);
+
+    expect(kit.selectedNode).toBeNull();
+    expect(helper.visible).toBe(false);
+  });
 });
 
 describe("integrateScene", () => {

@@ -257,6 +257,9 @@ export class RendererKit {
     if (this.selectedNode && this.selectionHelper) {
       this.selectionHelper.box.setFromObject(this.selectedNode, true);
       this.selectionHelper.visible = !this.selectionHelper.box.isEmpty();
+    } else if (this.selectionHelper) {
+      // A cleared selection must take the last-drawn box with it.
+      this.selectionHelper.visible = false;
     }
     // After the selection box: the gizmo anchor reuses its center.
     this.onFrameGizmoSync?.();

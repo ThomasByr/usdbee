@@ -24,6 +24,11 @@ export function resetLoadedScene(viewer: RendererKit) {
     disposeScene(viewer.loadedGroup);
     viewer.loadedGroup = null;
   }
+  // A reset drops the whole scene, so the selection visuals must not
+  // outlive it: the helper's box would otherwise freeze over whatever
+  // subtree was disposed. A rebuild re-binds both in integrateScene.
+  viewer.selectedNode = null;
+  if (viewer.selectionHelper) viewer.selectionHelper.visible = false;
   // The only images the memo holds belong to the scene just dropped: a
   // stage closed with no reload after it would keep them for the session.
   clearTextureCache();

@@ -96,7 +96,14 @@ export function frameSyncGizmo(viewer: RendererKit) {
   const kit = gizmoPolicy.kit;
   if (!kit || kit.controls.dragging) return;
   const node = viewer.selectedNode as THREE.Object3D | null;
-  if (!node || !getGizmoGate().attachable) return;
+  if (!node || !getGizmoGate().attachable) {
+    // Detach on the closed gate: the anchor effect usually hides the
+    // gizmo when the selection clears, but the per-frame sync guarantees
+    // it — a closed file, a tab switch or a deselection never leaves the
+    // gizmo floating over an empty view.
+    kit.detach();
+    return;
+  }
   // The renderer already refreshed the node's world matrix this frame.
   node.updateWorldMatrix(true, false);
   // The selection helper's box was computed from this same node a moment

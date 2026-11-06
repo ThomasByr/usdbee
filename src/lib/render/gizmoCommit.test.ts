@@ -189,7 +189,9 @@ describe("frameSyncGizmo", () => {
     stage.details = detailsAt(0);
     initGizmo(viewer, () => "translate");
     frameSyncGizmo(viewer);
-    const anchorPose = proxy().position.clone();
+    // The closed gate now detaches, so hold the proxy itself.
+    const p = proxy();
+    const anchorPose = p.position.clone();
 
     // A sync would move the proxy to this pose if it ran.
     node.position.set(9, 9, 9);
@@ -197,13 +199,38 @@ describe("frameSyncGizmo", () => {
 
     viewer.selectedNode = null;
     frameSyncGizmo(viewer);
-    expect(proxy().position.equals(anchorPose)).toBe(true);
+    expect(p.position.equals(anchorPose)).toBe(true);
 
     // Details gone: the gate closes.
     viewer.selectedNode = node;
     stage.details = null;
     frameSyncGizmo(viewer);
-    expect(proxy().position.equals(anchorPose)).toBe(true);
+    expect(p.position.equals(anchorPose)).toBe(true);
+  });
+
+  it("detaches on a closed gate so the gizmo leaves with the selection", () => {
+    // The anchor effect usually hides the gizmo when the selection
+    // clears; the per-frame sync guarantees it, so a close, a tab switch
+    // or a vanished prim never leaves the gizmo over an empty view.
+    const node = new THREE.Object3D();
+    const viewer = makeViewer(node);
+    stage.details = detailsAt(0);
+    initGizmo(viewer, () => "translate");
+    frameSyncGizmo(viewer);
+    expect(gizmoPolicy.kit!.controls.object).toBeTypeOf("object");
+
+    viewer.selectedNode = null;
+    frameSyncGizmo(viewer);
+    expect(gizmoPolicy.kit!.controls.object).toBeUndefined();
+    expect((gizmoPolicy.kit!.controls as any)._root.visible).toBe(false);
+
+    // The gate alone closes too: selection kept, details gone.
+    viewer.selectedNode = node;
+    frameSyncGizmo(viewer);
+    expect(gizmoPolicy.kit!.controls.object).toBeTypeOf("object");
+    stage.details = null;
+    frameSyncGizmo(viewer);
+    expect(gizmoPolicy.kit!.controls.object).toBeUndefined();
   });
 });
 
