@@ -1817,6 +1817,9 @@ describe("renderState pose prefetch", () => {
     // No invoke: a single fetch would queue in FRONT of the batch on the
     // serial dev transport. Nothing applied either — the last pose stands.
     expect(mockedInvoke).not.toHaveBeenCalled();
+    // The hold is reported, so the playback driver can tell this lag apart
+    // from an external write it must adopt.
+    expect(renderState.heldTime).toBe(5);
     const diag = frameDiag.snapshot();
     expect(diag.applyN).toBe(0);
     expect(diag.dispatchN).toBe(0);
@@ -1834,6 +1837,8 @@ describe("renderState pose prefetch", () => {
 
     expect(mockedInvoke).not.toHaveBeenCalled();
     expect(wrapper.matrix.elements[12]).toBe(9);
+    // Applied this time: no stale hold marker survives the write.
+    expect(renderState.heldTime).toBeNull();
   });
 
   it("holds without writing the playhead (no time, no onTimeChange)", async () => {
@@ -1850,9 +1855,10 @@ describe("renderState pose prefetch", () => {
 
     await renderState.setStageTime(5, true);
 
-    // A written held time is what the driver's resync adopts, rewinding its
-    // continuous playhead onto the code it was waiting for.
+    // A written held time is what the playback driver's resync adopts,
+    // rewinding its continuous playhead onto the code it was waiting for.
     expect(renderState.time).toBe(1);
+    expect(renderState.heldTime).toBe(5);
     expect(listener).not.toHaveBeenCalled();
 
     // The batch lands and the held code applies: the same-time dedupe must not
@@ -1866,6 +1872,7 @@ describe("renderState pose prefetch", () => {
 
     expect(mockedInvoke).not.toHaveBeenCalled();
     expect(renderState.time).toBe(5);
+    expect(renderState.heldTime).toBeNull();
     expect(listener).toHaveBeenCalledWith(5);
     const wrapper = group.children.find((child) => child.name === "/Scene/Wobble")!;
     expect(wrapper.matrix.elements[12]).toBe(9);

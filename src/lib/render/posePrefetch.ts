@@ -9,8 +9,8 @@
 import { codeIndex } from "../perf/frameDiag";
 import type { AnimatedPose } from "./sceneBuilder";
 
-// Poses held ahead of the playhead: ~1 MB at ~78 KB a pose, and ~< 1 s at bike
-// cadence, so a refill never has to outrun playback.
+// Poses held ahead of the playhead: ~290 KB at ~24 KB a pose, and ~< 1 s at
+// bike cadence, so a refill never has to outrun playback.
 export const POSE_PREFETCH = 12;
 
 // Generation of the buffer: bumped by invalidation so a batch still in flight

@@ -177,6 +177,10 @@ export function installPlaybackDriver(viewer: RendererKit) {
   // Only the setStageTime query (and the progress display) snaps.
   let continuous: number | null = null;
   let lastEmitted: number | null = null;
+  // The last code reported to frameDiag as PRESENTED. A held code presents
+  // nothing, so it must not advance this: the stall then shows up as a real
+  // inter-pose gap and the held code as dropped.
+  let presented: number | null = null;
   viewer.onAdvanceTime = (deltaSeconds: number) => {
     // Main-thread stalls (shader compile, GPU upload) pause the render
     // loop, so THREE.Clock hands us the whole stall as one delta — clamp
@@ -193,8 +197,12 @@ export function installPlaybackDriver(viewer: RendererKit) {
     const tcps = info?.time_codes_per_second ?? 24;
     // Resync: any external write of renderState.time (scrub slider, new
     // load, edit refresh) adopts on the next frame so the continuous
-    // playhead never diverges from the stage.
-    const resynced = renderState.time !== lastEmitted;
+    // playhead never diverges from the stage. A hold is NOT an external
+    // write: it leaves renderState.time on the last applied code on purpose,
+    // so the playhead keeps running ahead of it and the batch in transit
+    // stays valid.
+    const held = lastEmitted !== null && renderState.heldTime === lastEmitted;
+    const resynced = renderState.time !== lastEmitted && !held;
     if (resynced) {
       continuous = renderState.time ?? start;
       frameDiag.setRate(tcps);
@@ -215,10 +223,14 @@ export function installPlaybackDriver(viewer: RendererKit) {
     // is already covered by the resync branch above.
     if (!resynced && lastEmitted !== null && next < lastEmitted) invalidatePoseBuffer();
     viewer.animationProgress = toPlayheadOffset(next, start);
-    if (next !== lastEmitted)
-      frameDiag.onPose(performance.now(), frameDiag.codeIndex(renderState.timeCodes, next));
     lastEmitted = next;
     void renderState.setStageTime(next, true);
+    // After the call: a played hold is already recorded by then, and only the
+    // diag waits on it.
+    if (next !== presented && renderState.heldTime !== next) {
+      frameDiag.onPose(performance.now(), frameDiag.codeIndex(renderState.timeCodes, next));
+      presented = next;
+    }
     // Look ahead while playing: one background batch of the next K authored
     // codes stays in transit for the whole of playback (any consumed pose
     // re-claims). The frame itself is already stepped above, so a cold buffer

@@ -373,6 +373,120 @@ describe("installPlaybackDriver pose prefetch", () => {
   });
 });
 
+describe("installPlaybackDriver on a held code", () => {
+  const codes = Array.from({ length: 60 }, (_, i) => i);
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const singlePoseCalls = () => mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_animated_pose");
+
+  // The hold needs a loaded group (setStageTime has nothing to hold for
+  // without one) and an authored code list; the manifest can stay empty.
+  beforeEach(async () => {
+    invalidatePoseBuffer();
+    renderState.timeCodes = codes;
+    stageState.stageInfo = {
+      start_time_code: 0,
+      end_time_code: 60,
+      time_codes_per_second: 24,
+    } as any;
+    mockedInvoke.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === "get_scene_manifest") return [];
+      if (cmd === "get_time_codes") return codes;
+      if (cmd === "get_animated_pose") return encodePoseFrame([], emptyPoseBatch());
+      if (cmd === "get_animated_pose_batch") return poseBatch(args.times.length);
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    await renderState.loadRenderScene(0);
+  });
+
+  // Drives playback to a code the window does not hold, with a refill in
+  // transit: the hold. Returns the driver and the release of that refill —
+  // a test that aborts early must still release it, or the claim stays in
+  // flight for the next test.
+  async function playIntoHold() {
+    let refills = 0;
+    let releaseRefill!: () => void;
+    const hanging = new Promise<void>((resolve) => (releaseRefill = resolve));
+    mockedInvoke.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === "get_scene_manifest") return [];
+      if (cmd === "get_time_codes") return codes;
+      if (cmd === "get_animated_pose") return encodePoseFrame([], emptyPoseBatch());
+      if (cmd === "get_animated_pose_batch") {
+        if (refills++ > 0) await hanging;
+        return poseBatch(args.times.length);
+      }
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    const v = viewer();
+    installPlaybackDriver(v);
+    frameDiag.reset();
+    v.onAdvanceTime!(1 / 24); // code 1: one fetch, look-ahead 2..13
+    await flush();
+    // One frame per code with the step settled in between, as a real rAF
+    // gives us: 2..13 come from the window, 14..25 from a refill that hangs.
+    for (let code = 2; code <= 13; code++) {
+      v.onAdvanceTime!(1 / 24);
+      await flush();
+    }
+    v.onAdvanceTime!(1 / 24); // code 14: a miss, the refill still in transit
+    return { v, releaseRefill };
+  }
+
+  it("plays through a hold without rewinding or dropping the window", async () => {
+    const { v, releaseRefill } = await playIntoHold();
+    try {
+      expect(renderState.time).toBe(13);
+      // The playhead passed the held code instead of rewinding onto it.
+      expect(v.animationProgress).toBeCloseTo(14, 10);
+
+      mockedInvoke.mockClear();
+      releaseRefill(); // the refill lands into an intact window
+      await flush();
+      v.onAdvanceTime!(1 / 24); // code 15: served from it
+      expect(renderState.time).toBe(15);
+      expect(v.animationProgress).toBeCloseTo(15, 10);
+      expect(singlePoseCalls()).toHaveLength(0);
+    } finally {
+      releaseRefill();
+      await flush();
+    }
+  });
+
+  it("records the hold as a pose gap and a skipped code", async () => {
+    const { v, releaseRefill } = await playIntoHold();
+    try {
+      releaseRefill();
+      await flush();
+      v.onAdvanceTime!(1 / 24); // code 15: the first present after the stall
+
+      const diag = frameDiag.snapshot();
+      // The held code never showed, so it counts as skipped.
+      expect(diag.droppedCodes).toBe(1);
+      // And the stall is in the gap ring: 13 to 15 is one sampled gap.
+      expect(diag.poseN).toBe(13);
+    } finally {
+      releaseRefill();
+      await flush();
+    }
+  });
+
+  it("still resyncs on an external write while a batch is in transit", async () => {
+    const v = viewer();
+    installPlaybackDriver(v);
+    v.onAdvanceTime!(1 / 24); // code 1 and a batch in transit
+    await flush();
+    expect(poseCoverage(2)).toBe(11);
+
+    renderState.time = 30; // simulated scrub
+    v.onAdvanceTime!(0);
+
+    // Adopted, then advanced: the pre-scrub window is gone.
+    expect(renderState.time).toBe(30);
+    expect(v.animationProgress).toBeCloseTo(30, 10);
+    expect(poseCoverage(2)).toBe(0);
+  });
+});
+
 describe("resetLoadedScene", () => {
   it("drops the scene and the texture memo so a closed stage holds no images", () => {
     // The memo is cleared again at the next load, but a stage closed with

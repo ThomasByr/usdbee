@@ -107,9 +107,10 @@ export function getTimeCodes(stageId: number): Promise<number[]> {
   return invoke<number[]>("get_time_codes", { stageId });
 }
 
-// One pose response (stage.rs::frame_pose): u32 manifest length + JSON, u32
-// path count + length-prefixed paths (slot order), then the geometry batch
-// frame. Decoded by poseDecoder (pure, unit-tested apart from the invoke).
+// One pose response (stage.rs::frame_pose): the compact binary frame of a
+// delta manifest (path + material tables, 80-byte node records, then the
+// geometry batch frame). Decoded by poseDecoder (pure, unit-tested apart
+// from the invoke).
 const fetchers: SceneFetchers = {
   getGeometry: (path: string, time = renderState.time) =>
     invoke<ArrayBuffer>("get_geometry_data", {
@@ -151,8 +152,8 @@ const fetchers: SceneFetchers = {
       path,
     }).catch(() => null),
   // Load-time material prefill (Phase 2 Task 3): one invoke per slice of
-  // GEOMETRY_BATCH_SIZE paths, JSON slots decoded here so sceneBuilder only
-  // sees per-path results.
+  // GEOMETRY_BATCH_SIZE paths, the material slots decoded here so sceneBuilder
+  // only sees per-path results.
   getMaterialBatch: async (paths: string[]) =>
     decodeMaterialBatch(
       await invoke<ArrayBuffer>("get_material_batch", {
@@ -551,6 +552,11 @@ export const renderState = $state({
   timeCodes: [] as number[],
   status: "idle" as "idle" | "loading" | "ready" | "error",
   error: null as string | null,
+  // The code the last setStageTime request was HELD on (null when it wrote or
+  // was not a playback hold). A hold leaves `time` on the last applied code
+  // on purpose; the playback driver reads this to tell that lag apart from an
+  // external write it must adopt.
+  heldTime: null as number | null,
 
   // Builds the render scene from the manifest of the currently open stage.
   // Returns null when the response was superseded (or the fetch failed) —
@@ -587,6 +593,7 @@ export const renderState = $state({
     // everything anyway) — drop it like a queued time step.
     dropQueuedRefresh();
     this.time = startTime;
+    this.heldTime = null;
     this.timeCodes = [];
     this.onTimeChange?.(startTime);
     this.status = "loading";
@@ -667,16 +674,20 @@ export const renderState = $state({
   // holdsPoseStep). Every other caller — paused scrub, export frame, edit
   // refresh — fetches, because nothing would retry it.
   setStageTime(time: number, holdOnMiss = false): Promise<void> {
+    // Answers this request only: the driver reads it right after the call.
+    this.heldTime = null;
     // Same-time dedupe: with time-code snapping the driver re-requests the
     // identical time on most frames (each a full manifest fetch); skip
     // when the state already sits at the requested time.
     if (!drainingQueue && time === this.time) return Promise.resolve();
     // Hold on a buffer miss while the prefetch is alive: no fetch, no apply,
-    // and NO time write. A written held time is what the playback driver's
-    // resync adopts, which rewinds its continuous playhead onto the very code
-    // it is waiting for (measured: poseMax 765 ms, frozen motion). Leaving the
-    // time behind lets the playhead pass the code; once the batch lands, the
+    // and NO time write. The write is what the playback driver's resync
+    // adopts, which rewinds its continuous playhead onto the very code it is
+    // waiting for (measured: poseMax 765 ms, frozen motion). Leaving the time
+    // behind lets the playhead pass the code; once the batch lands, the
     // request for it no longer matches this.time, so the dedupe cannot eat it.
+    // heldTime is how the driver tells that deliberate lag from an external
+    // write without matching on the time alone.
     if (
       currentGroup &&
       holdOnMiss &&
@@ -684,6 +695,7 @@ export const renderState = $state({
       !timeStepInFlight &&
       holdsPoseStep(this.timeCodes, time)
     ) {
+      this.heldTime = time;
       return Promise.resolve();
     }
     this.time = time;
