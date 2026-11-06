@@ -64,33 +64,71 @@ fn take_u32(bytes: &[u8], at: &mut usize) -> Result<u32, String> {
 }
 
 /// Parse the merged pose frame far enough to prove it is intact:
-/// `[u32 json_len][json][pad][u32 count][paths][pad][batch]`. The JSON must
-/// decode as a delta manifest, every path must be UTF-8, and the batch tail
-/// must hold exactly one slot per path with nothing left over.
+/// `[u32 path count][paths][pad][u32 node count][node records][batch]`. Every
+/// path must be UTF-8 and dense, every node's path id must resolve, every
+/// first child id must stay inside the node array, and the batch tail must
+/// hold exactly one slot per deforming, deduped node path with nothing left
+/// over.
 fn check_pose_frame(bytes: &[u8]) -> Result<usize, String> {
     let mut at = 0;
-    let json_len = take_u32(bytes, &mut at)? as usize;
-    let json = take(bytes, &mut at, json_len)?;
-    serde_json::from_slice::<Vec<RenderNode>>(json)
-        .map_err(|error| format!("pose json: {}", error))?;
-    at = (at + 3) & !3;
-    let count = take_u32(bytes, &mut at)? as usize;
-    for _ in 0..count {
+    let path_count = take_u32(bytes, &mut at)? as usize;
+    let mut paths: Vec<&str> = Vec::with_capacity(path_count);
+    for _ in 0..path_count {
         let len = take_u32(bytes, &mut at)? as usize;
         let path = take(bytes, &mut at, len)?;
-        std::str::from_utf8(path).map_err(|error| format!("pose path: {}", error))?;
+        paths.push(std::str::from_utf8(path).map_err(|error| format!("pose path: {}", error))?);
     }
     at = (at + 3) & !3;
+    let node_count = take_u32(bytes, &mut at)? as usize;
+    let mut slots_expected = 0usize;
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for index in 0..node_count {
+        let path_id = take_u32(bytes, &mut at)? as usize;
+        let first_child = take_u32(bytes, &mut at)?;
+        let child_count = {
+            let slice = take(bytes, &mut at, 2)?;
+            u16::from_le_bytes([slice[0], slice[1]]) as usize
+        };
+        let header = take(bytes, &mut at, 2)?;
+        let (flags, visible) = (header[0], header[1]);
+        if visible > 1 {
+            return Err(format!("pose frame: node {} visibility {}", index, visible));
+        }
+        if child_count == 0 {
+            if first_child != u32::MAX {
+                return Err(format!(
+                    "pose frame: leaf {} points at {}",
+                    index, first_child
+                ));
+            }
+        } else if first_child as usize != index + 1 {
+            return Err(format!(
+                "pose frame: node {} first child {} is not the next index",
+                index, first_child
+            ));
+        }
+        let path = paths
+            .get(path_id)
+            .ok_or_else(|| format!("pose frame: node {} path id {}", index, path_id))?;
+        if flags & 0b110 == 0b110 && seen.insert(path) {
+            slots_expected += 1;
+        }
+        take(bytes, &mut at, 64)?; // 16 x f32 matrix
+        if flags & 0b100 != 0 {
+            let instances = take_u32(bytes, &mut at)? as usize;
+            take(bytes, &mut at, instances * 64)?;
+        }
+    }
     let magic = take_u32(bytes, &mut at)?;
     if magic != 0x5553_4247 {
         return Err(format!("pose frame: bad batch magic {:#x}", magic));
     }
     take_u32(bytes, &mut at)?; // batch version
     let slots = take_u32(bytes, &mut at)? as usize;
-    if slots != count {
+    if slots != slots_expected {
         return Err(format!(
-            "pose frame: {} paths, {} batch slots",
-            count, slots
+            "pose frame: {} deforming paths, {} batch slots",
+            slots_expected, slots
         ));
     }
     for _ in 0..slots {
@@ -105,7 +143,7 @@ fn check_pose_frame(bytes: &[u8]) -> Result<usize, String> {
     if at != bytes.len() {
         return Err(format!("pose frame: {} trailing bytes", bytes.len() - at));
     }
-    Ok(count)
+    Ok(node_count)
 }
 
 fn extract(archive_path: &PathBuf) -> (PathBuf, PathBuf) {

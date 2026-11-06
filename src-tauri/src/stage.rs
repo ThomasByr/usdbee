@@ -831,8 +831,6 @@ fn spawn_stage_owner_for(
                                 )?
                             };
                             let paths = animated_geometry_paths(&nodes);
-                            let manifest = serde_json::to_vec(&nodes)
-                                .map_err(|e| format!("manifest serialization failed: {}", e))?;
                             let slots = paths
                                 .iter()
                                 .map(|path| {
@@ -845,7 +843,7 @@ fn spawn_stage_owner_for(
                                     )
                                 })
                                 .collect();
-                            Ok(frame_pose(manifest, paths, frame_batch(slots)))
+                            frame_pose(&nodes, frame_batch(slots))
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -4103,8 +4101,9 @@ fn pad_to_4(out: &mut Vec<u8>) {
 
 /// The delta's geometry slots: pre-order walk, `has_geometry &&
 /// geometry_animated`, deduped (a shared prototype subtree can repeat a
-/// path). `frame_pose` ships this list, so slot order needs no client-side
-/// re-derivation of the walk.
+/// path). The pose frame ships the slots in this order and the node table
+/// marks which nodes they belong to, so a reader re-derives the walk instead
+/// of being handed a second list.
 fn animated_geometry_paths(nodes: &[RenderNode]) -> Vec<String> {
     fn walk<'a>(nodes: &'a [RenderNode], paths: &mut Vec<String>, seen: &mut HashSet<&'a str>) {
         for node in nodes {
@@ -4122,28 +4121,101 @@ fn animated_geometry_paths(nodes: &[RenderNode]) -> Vec<String> {
     paths
 }
 
+/// Pose node record flags. The frontend decoder
+/// (src/lib/render/poseDecoder.ts) mirrors these.
+const POSE_LEAF: u32 = u32::MAX;
+const POSE_FLAG_HAS_GEOMETRY: u8 = 1 << 0;
+const POSE_FLAG_GEOMETRY_ANIMATED: u8 = 1 << 1;
+const POSE_FLAG_INSTANCES: u8 = 1 << 2;
+
+/// Pre-order flatten of the delta tree: a node's children sit directly after
+/// it, so `first_child_id` is always `index + 1` when it has any.
+fn flatten_pose<'a>(nodes: &'a [RenderNode], flat: &mut Vec<&'a RenderNode>) {
+    for node in nodes {
+        flat.push(node);
+        flatten_pose(&node.children, flat);
+    }
+}
+
+/// `[u32 path id][u32 first child id][u16 child count][u8 flags][u8 visible]
+/// [16 x f32 matrix]`, then, when the node owns instances,
+/// `[u32 count][count x 16 f32]`. Matrices go out as f32: display transforms
+/// tolerate the precision, and the matrix halves its per-node bytes.
+fn write_pose_node(
+    out: &mut Vec<u8>,
+    node: &RenderNode,
+    path_id: u32,
+    index: usize,
+) -> Result<(), String> {
+    let child_count = u16::try_from(node.children.len())
+        .map_err(|_| format!("pose node {} has too many children", node.path))?;
+    let mut flags = 0u8;
+    if node.has_geometry {
+        flags |= POSE_FLAG_HAS_GEOMETRY;
+    }
+    if node.geometry_animated {
+        flags |= POSE_FLAG_GEOMETRY_ANIMATED;
+    }
+    if !node.instances.is_empty() {
+        flags |= POSE_FLAG_INSTANCES;
+    }
+    let first_child = if node.children.is_empty() {
+        POSE_LEAF
+    } else {
+        index as u32 + 1
+    };
+    out.extend(path_id.to_le_bytes());
+    out.extend(first_child.to_le_bytes());
+    out.extend(child_count.to_le_bytes());
+    out.extend([flags, u8::from(node.visible)]);
+    for value in node.transform {
+        out.extend((value as f32).to_le_bytes());
+    }
+    if !node.instances.is_empty() {
+        out.extend((node.instances.len() as u32).to_le_bytes());
+        for instance in &node.instances {
+            for value in instance {
+                out.extend((*value as f32).to_le_bytes());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The merged pose response, one invoke per pose:
-/// `[u32 LE manifest JSON length][manifest JSON utf8][4-byte pad][u32 LE path
-/// count][per path: u32 LE length + utf8 bytes][4-byte pad][geometry batch
-/// payload]`. Prefixes carry the true byte lengths and the padding is implicit
+/// `[u32 LE path count][per path: u32 LE length + utf8 bytes][4-byte pad]
+/// [u32 LE node count][pre-order node records][geometry batch payload]`.
+/// Prefixes carry the true byte lengths and the padding is implicit
 /// (`align4`), so the batch tail — and every slot inside it — starts 4-byte
-/// aligned and the frontend can view it in place. The path list is the batch's
-/// slot order, so nothing on the client re-derives the walk.
+/// aligned and the frontend can view it in place. The node table is the
+/// delta tree with paths deduplicated into the table, so a playback step
+/// ships no JSON and no repeated path strings.
 /// shortcut: the merged pose batches ALL geometry_animated prims with no slot cap (the old 32-slice batching is gone), upgrade to a capped batch + per-prim fallback when a stage with more than ~32 deforming prims appears.
-fn frame_pose(manifest: Vec<u8>, paths: Vec<String>, mut batch: Vec<u8>) -> Vec<u8> {
-    let paths_len: usize = paths.iter().map(|path| 4 + path.len()).sum();
-    let mut out = Vec::with_capacity(16 + manifest.len() + paths_len + batch.len());
-    out.extend((manifest.len() as u32).to_le_bytes());
-    out.extend(manifest);
-    pad_to_4(&mut out);
-    out.extend((paths.len() as u32).to_le_bytes());
-    for path in &paths {
+fn frame_pose(nodes: &[RenderNode], mut batch: Vec<u8>) -> Result<Vec<u8>, String> {
+    let mut flat = Vec::with_capacity(nodes.len());
+    flatten_pose(nodes, &mut flat);
+    let mut ids: HashMap<&str, u32> = HashMap::with_capacity(flat.len());
+    let mut table: Vec<&str> = Vec::with_capacity(flat.len());
+    for node in &flat {
+        if !ids.contains_key(node.path.as_str()) {
+            ids.insert(node.path.as_str(), table.len() as u32);
+            table.push(node.path.as_str());
+        }
+    }
+    let table_len: usize = table.iter().map(|path| 4 + path.len()).sum();
+    let mut out = Vec::with_capacity(8 + table_len + flat.len() * 76 + batch.len());
+    out.extend((table.len() as u32).to_le_bytes());
+    for path in &table {
         out.extend((path.len() as u32).to_le_bytes());
         out.extend(path.as_bytes());
     }
     pad_to_4(&mut out);
+    out.extend((flat.len() as u32).to_le_bytes());
+    for (index, node) in flat.iter().enumerate() {
+        write_pose_node(&mut out, node, ids[node.path.as_str()], index)?;
+    }
     out.append(&mut batch);
-    out
+    Ok(out)
 }
 
 /// A batch pose response: `[u32 LE frame count][frame_count x frame_pose
@@ -4995,5 +5067,150 @@ mod keyed_cache_tests {
         cache.clear();
         assert_eq!(cache.bytes, 0);
         assert!(cache.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod pose_frame_tests {
+    use super::*;
+
+    fn identity() -> [f64; 16] {
+        let mut matrix = [0.0; 16];
+        for (index, value) in matrix.iter_mut().enumerate() {
+            *value = if index % 5 == 0 { 1.0 } else { 0.0 };
+        }
+        matrix
+    }
+
+    fn node(path: &str, children: Vec<RenderNode>) -> RenderNode {
+        RenderNode {
+            path: path.to_string(),
+            name: path.rsplit('/').next().unwrap_or_default().to_string(),
+            type_name: "Mesh".to_string(),
+            has_geometry: true,
+            animated: true,
+            geometry_animated: false,
+            material: None,
+            instances: Vec::new(),
+            transform: identity(),
+            visible: true,
+            children,
+        }
+    }
+
+    fn u32_at(bytes: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+    }
+
+    fn f32_at(bytes: &[u8], at: usize) -> f32 {
+        f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+    }
+
+    // An empty delta still frames a readable header: no paths, no nodes, just
+    // the geometry batch tail (here empty).
+    #[test]
+    fn frame_pose_emits_an_empty_table_for_an_empty_delta() {
+        let frame = frame_pose(&[], Vec::new()).unwrap();
+        assert_eq!(frame, [0u8; 8], "empty path table + zero node count");
+    }
+
+    // The node record, field by field, at its documented offsets.
+    #[test]
+    fn frame_pose_pins_the_node_record_bytes() {
+        let mut root = node("/A", vec![node("/A/B", Vec::new())]);
+        root.transform[0] = 0.1; // not exactly representable in f32
+        root.visible = false;
+        root.geometry_animated = true;
+        root.instances = vec![identity()];
+        let frame = frame_pose(&[root], Vec::new()).unwrap();
+
+        // Path table: count, then per path a u32 length + utf8.
+        let mut at = 0;
+        assert_eq!(u32_at(&frame, at), 2, "two unique paths");
+        at += 4;
+        for path in ["/A", "/A/B"] {
+            assert_eq!(u32_at(&frame, at) as usize, path.len());
+            at += 4;
+            assert_eq!(&frame[at..at + path.len()], path.as_bytes());
+            at += path.len();
+        }
+        at = (at + 3) & !3;
+        assert_eq!(u32_at(&frame, at), 2, "two nodes, pre-order");
+        at += 4;
+
+        // Root: path id 0, first child is the next index, one child.
+        assert_eq!(u32_at(&frame, at), 0, "root path id");
+        assert_eq!(u32_at(&frame, at + 4), 1, "first child id");
+        assert_eq!(
+            u16::from_le_bytes(frame[at + 8..at + 10].try_into().unwrap()),
+            1,
+            "child count"
+        );
+        assert_eq!(
+            frame[at + 10],
+            POSE_FLAG_HAS_GEOMETRY | POSE_FLAG_GEOMETRY_ANIMATED | POSE_FLAG_INSTANCES
+        );
+        assert_eq!(frame[at + 11], 0, "invisible root");
+        assert_eq!(f32_at(&frame, at + 12), 0.1f32, "matrix element 0 as f32");
+        let instances = at + 12 + 64;
+        assert_eq!(u32_at(&frame, instances), 1, "one instance matrix");
+        assert_eq!(f32_at(&frame, instances + 4), 1.0, "identity element 0");
+
+        // Leaf: path id 1, the leaf sentinel, no children, would-be flags.
+        let leaf = instances + 4 + 64;
+        assert_eq!(u32_at(&frame, leaf), 1, "leaf path id");
+        assert_eq!(u32_at(&frame, leaf + 4), POSE_LEAF, "leaf first child");
+        assert_eq!(
+            u16::from_le_bytes(frame[leaf + 8..leaf + 10].try_into().unwrap()),
+            0,
+            "leaf child count"
+        );
+        assert_eq!(frame[leaf + 10], POSE_FLAG_HAS_GEOMETRY, "leaf flags");
+        assert_eq!(frame[leaf + 11], 1, "visible leaf");
+        assert_eq!(frame.len(), leaf + 12 + 64, "no trailing bytes");
+    }
+
+    // A zero-child root list: as many roots as nodes, none pointing at a child.
+    #[test]
+    fn frame_pose_marks_every_childless_root_list_entry_as_a_leaf() {
+        let roots: Vec<RenderNode> = (0..3)
+            .map(|index| node(&format!("/R{index}"), Vec::new()))
+            .collect();
+        let frame = frame_pose(&roots, Vec::new()).unwrap();
+        let table_end = 4 + roots.iter().map(|root| 4 + root.path.len()).sum::<usize>();
+        let mut at = (table_end + 3) & !3;
+        assert_eq!(u32_at(&frame, at), 3, "three roots");
+        at += 4;
+        for index in 0..3 {
+            assert_eq!(u32_at(&frame, at), index as u32, "root {index} path id");
+            assert_eq!(u32_at(&frame, at + 4), POSE_LEAF, "root {index} is a leaf");
+            at += 76;
+        }
+        assert_eq!(at, frame.len(), "no trailing bytes");
+    }
+
+    // Payload budget: a bike pose is ~190 delta nodes with ~30-byte paths, so
+    // the frame is 200 nodes x 76 B + ~200 x 34 B of path table = ~22 KB. The
+    // JSON it replaces measured ~78 KB. (The plan's "16 KB" predates the
+    // 12-byte node header + 64-byte matrix arithmetic: 200 nodes alone are
+    // 15.2 KB, which leaves no room for paths.)
+    #[test]
+    fn frame_pose_keeps_a_realistic_pose_within_the_payload_budget() {
+        let children: Vec<RenderNode> = (0..199)
+            .map(|index| {
+                node(
+                    &format!("/Hummingbird/Wing_L/Feather.{index:03}"),
+                    Vec::new(),
+                )
+            })
+            .collect();
+        let root = node("/Hummingbird", children);
+        let frame = frame_pose(&[root], Vec::new()).unwrap();
+        assert!(
+            frame.len() < 24 * 1024,
+            "200-node pose frame is {} B, over the ~22 KB budget",
+            frame.len()
+        );
+        println!("200-node pose frame: {} B", frame.len());
     }
 }

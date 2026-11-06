@@ -824,13 +824,25 @@ fn undo_and_redo_of_a_sampled_xform_edit_reach_the_manifest() {
 }
 
 // Merged pose (one invoke per playback step): the single response must carry
-// the same manifest JSON, the same ordered path list and the same geometry
-// slots as the two commands it replaces — otherwise a playback step would
-// apply a different pose on the two paths, and a slot swapped with its
-// neighbour would paint the wrong mesh on the wrong prim.
+// the same delta tree and the same geometry slots as the two commands it
+// replaces — otherwise a playback step would apply a different pose on the two
+// paths, and a slot swapped with its neighbour would paint the wrong mesh on
+// the wrong prim.
 // The reference side runs the owner-thread request functions directly
 // (`request_animated_manifest` + `request_geometry_batch`), the same path the
 // profile probes drive; no IPC command wraps the delta manifest any more.
+//
+// Pose frame layout (stage.rs::frame_pose), per pose:
+//   [u32 LE path count][per path: u32 LE len + utf8][pad to 4]
+//   [u32 LE node count][node count x node, pre-order]
+//   [geometry batch]
+// and node =
+//   [u32 path id][u32 first child id (0xFFFF_FFFF for a leaf)][u16 child
+//   count][u8 flags (bit0 has_geometry, bit1 geometry_animated, bit2 has
+//   instances)][u8 visible][16 x f32 LE matrix]
+//   [u32 instance count][instance count x 16 f32 LE]   // only when bit2
+// The decoder below is the spec the frontend one has to match: it rebuilds the
+// exact tree from first_child_id + child_count.
 
 fn animated_geometry_paths(nodes: &[RenderNode], paths: &mut Vec<String>) {
     for node in nodes {
@@ -845,27 +857,259 @@ fn align4(offset: usize) -> usize {
     offset + (4 - offset % 4) % 4
 }
 
-/// A merged pose frame's (manifest JSON, ordered path list, geometry batch
-/// payload), decoded the way the frontend must: true lengths from the u32
-/// prefixes, implicit 4-byte padding between the sections.
-fn decode_pose(frame: &[u8]) -> (&[u8], Vec<String>, &[u8]) {
-    let json_len = u32::from_le_bytes(frame[0..4].try_into().unwrap()) as usize;
-    let manifest = &frame[4..4 + json_len];
-    let mut cursor = align4(4 + json_len);
-    let count = u32::from_le_bytes(frame[cursor..cursor + 4].try_into().unwrap()) as usize;
-    cursor += 4;
-    let mut paths = Vec::with_capacity(count);
-    for _ in 0..count {
-        let len = u32::from_le_bytes(frame[cursor..cursor + 4].try_into().unwrap()) as usize;
-        cursor += 4;
+/// One node of a decoded pose frame, exactly as the frame carries it: no
+/// material, name, type name or `animated` flag (the pose path reads those
+/// only where a node first appears, and a delta node carries no material).
+#[derive(Debug, Clone)]
+struct PoseNode {
+    path: String,
+    first_child: u32,
+    child_count: u16,
+    has_geometry: bool,
+    geometry_animated: bool,
+    visible: bool,
+    matrix: [f32; 16],
+    instances: Vec<[f32; 16]>,
+}
+
+struct DecodedPose<'a> {
+    paths: Vec<String>,
+    /// Pre-order, flat.
+    nodes: Vec<PoseNode>,
+    /// The geometry batch tail, byte for byte.
+    slots: &'a [u8],
+}
+
+const POSE_LEAF: u32 = u32::MAX;
+const POSE_FLAG_HAS_GEOMETRY: u8 = 1 << 0;
+const POSE_FLAG_GEOMETRY_ANIMATED: u8 = 1 << 1;
+const POSE_FLAG_INSTANCES: u8 = 1 << 2;
+
+fn take_u32(bytes: &[u8], at: &mut usize) -> u32 {
+    let value = u32::from_le_bytes(bytes[*at..*at + 4].try_into().unwrap());
+    *at += 4;
+    value
+}
+
+fn take_f32s<const N: usize>(bytes: &[u8], at: &mut usize) -> [f32; N] {
+    let mut out = [0.0f32; N];
+    for slot in out.iter_mut() {
+        *slot = f32::from_le_bytes(bytes[*at..*at + 4].try_into().unwrap());
+        *at += 4;
+    }
+    out
+}
+
+/// A merged pose frame, decoded the way the frontend must: true lengths from
+/// the u32 prefixes, implicit 4-byte padding between the sections.
+fn decode_pose(frame: &[u8]) -> DecodedPose<'_> {
+    let mut at = 0;
+    let path_count = take_u32(frame, &mut at) as usize;
+    let mut paths = Vec::with_capacity(path_count);
+    for _ in 0..path_count {
+        let len = take_u32(frame, &mut at) as usize;
         paths.push(
-            std::str::from_utf8(&frame[cursor..cursor + len])
+            std::str::from_utf8(&frame[at..at + len])
                 .expect("path must be utf8")
                 .to_string(),
         );
-        cursor += len;
+        at += len;
     }
-    (manifest, paths, &frame[align4(cursor)..])
+    at = align4(at);
+    let node_count = take_u32(frame, &mut at) as usize;
+    let mut nodes = Vec::with_capacity(node_count);
+    for _ in 0..node_count {
+        let path_id = take_u32(frame, &mut at) as usize;
+        let first_child = take_u32(frame, &mut at);
+        let child_count = u16::from_le_bytes(frame[at..at + 2].try_into().unwrap());
+        at += 2;
+        let flags = frame[at];
+        let visible = frame[at + 1];
+        at += 2;
+        let matrix = take_f32s::<16>(frame, &mut at);
+        let instances = if flags & POSE_FLAG_INSTANCES != 0 {
+            let count = take_u32(frame, &mut at) as usize;
+            (0..count)
+                .map(|_| take_f32s::<16>(frame, &mut at))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        nodes.push(PoseNode {
+            path: paths
+                .get(path_id)
+                .unwrap_or_else(|| panic!("node path id {path_id} out of range"))
+                .clone(),
+            first_child,
+            child_count,
+            has_geometry: flags & POSE_FLAG_HAS_GEOMETRY != 0,
+            geometry_animated: flags & POSE_FLAG_GEOMETRY_ANIMATED != 0,
+            visible: match visible {
+                0 => false,
+                1 => true,
+                other => panic!("node visibility byte {other}"),
+            },
+            matrix,
+            instances,
+        });
+    }
+    DecodedPose {
+        paths,
+        nodes,
+        slots: &frame[at..],
+    }
+}
+
+/// A tree rebuilt from the flat pre-order list, using first_child_id +
+/// child_count exactly like the frontend decoder will.
+#[derive(Debug)]
+struct PoseTree {
+    node: PoseNode,
+    children: Vec<PoseTree>,
+}
+
+fn build_pose_node(nodes: &[PoseNode], id: usize) -> (PoseTree, usize) {
+    let node = &nodes[id];
+    let mut children = Vec::with_capacity(node.child_count as usize);
+    let mut cursor = node.first_child as usize;
+    for _ in 0..node.child_count {
+        let (child, next) = build_pose_node(nodes, cursor);
+        children.push(child);
+        cursor = next;
+    }
+    if node.child_count == 0 {
+        assert_eq!(
+            node.first_child, POSE_LEAF,
+            "leaf {} must point at no child",
+            node.path
+        );
+    } else {
+        // Pre-order: a node's children follow it directly.
+        assert_eq!(
+            node.first_child as usize,
+            id + 1,
+            "{}: first child must be the next pre-order index",
+            node.path
+        );
+    }
+    (
+        PoseTree {
+            node: node.clone(),
+            children,
+        },
+        if node.child_count == 0 {
+            id + 1
+        } else {
+            cursor
+        },
+    )
+}
+
+fn rebuild_pose_tree(nodes: &[PoseNode]) -> Vec<PoseTree> {
+    let mut roots = Vec::new();
+    let mut cursor = 0;
+    while cursor < nodes.len() {
+        let (tree, next) = build_pose_node(nodes, cursor);
+        roots.push(tree);
+        cursor = next;
+    }
+    roots
+}
+
+fn assert_pose_matrix(json: &[f64; 16], bin: &[f32; 16], where_: &str) {
+    for (element, (exact, approx)) in json.iter().zip(bin.iter()).enumerate() {
+        let approx = *approx as f64;
+        let scale = exact.abs().max(approx.abs());
+        assert!(
+            (exact - approx).abs() <= 1e-6 * scale,
+            "{where_} element {element}: json {exact} vs f32 {approx} exceeds the 1e-6 relative tolerance"
+        );
+    }
+}
+
+/// Deep compare of the decoded tree against the JSON delta manifest: paths,
+/// tree shape, matrices (1e-6 relative), visibility, flags and instance
+/// matrices. Any field drift fails here.
+fn assert_pose_matches(nodes: &[RenderNode], trees: &[PoseTree], where_: &str) {
+    assert_eq!(nodes.len(), trees.len(), "{where_}: root count");
+    for (node, tree) in nodes.iter().zip(trees) {
+        assert_eq!(node.path, tree.node.path, "{where_}: path");
+        assert_eq!(node.visible, tree.node.visible, "{}: visible", node.path);
+        assert_eq!(
+            node.has_geometry, tree.node.has_geometry,
+            "{}: has_geometry",
+            node.path
+        );
+        assert_eq!(
+            node.geometry_animated, tree.node.geometry_animated,
+            "{}: geometry_animated",
+            node.path
+        );
+        // The frame drops `animated`; the pose path only reads it next to
+        // `geometry_animated`, which is the tighter condition.
+        if node.geometry_animated {
+            assert!(node.animated, "{}: geometry implies animated", node.path);
+        }
+        assert_pose_matrix(&node.transform, &tree.node.matrix, &node.path);
+        assert_eq!(
+            node.instances.len(),
+            tree.node.instances.len(),
+            "{}: instance count",
+            node.path
+        );
+        for (instance, decoded) in node.instances.iter().zip(&tree.node.instances) {
+            assert_pose_matrix(instance, decoded, &node.path);
+        }
+        assert_pose_matches(&node.children, &tree.children, where_);
+    }
+}
+
+/// The frame's path table: every node path once, in first-visit pre-order.
+fn pose_path_table(nodes: &[RenderNode], table: &mut Vec<String>) {
+    for node in nodes {
+        if !table.contains(&node.path) {
+            table.push(node.path.clone());
+        }
+        pose_path_table(&node.children, table);
+    }
+}
+
+/// Edge pins for the node record: a leaf marks no child, a root list carries
+/// as many roots as the manifest, and a stage whose pose is empty still frames
+/// a readable (empty) table.
+#[test]
+fn pose_frame_pins_the_node_record_edges() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "skinned.usda");
+    let nodes = request_animated_manifest(&state.sender(), Some(1.0))
+        .expect("delta manifest should serialize");
+    let frame = request_animated_pose(&state.sender(), Some(1.0)).expect("pose should serialize");
+    let decoded = decode_pose(&frame);
+    let trees = rebuild_pose_tree(&decoded.nodes);
+    assert_eq!(trees.len(), nodes.len(), "one root record per root node");
+
+    let mut leaves = 0;
+    for node in &decoded.nodes {
+        if node.child_count == 0 {
+            assert_eq!(node.first_child, POSE_LEAF, "{}: leaf sentinel", node.path);
+            leaves += 1;
+        }
+    }
+    assert!(leaves > 0, "the fixture must carry a leaf for this pin");
+
+    // Every node's path id must index its own path.
+    for node in &decoded.nodes {
+        assert!(
+            decoded.paths.contains(&node.path),
+            "{}: node path must be in the table",
+            node.path
+        );
+    }
+    // The path table is deduplicated: ids are dense.
+    let mut unique = decoded.paths.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), decoded.paths.len(), "path table is dense");
 }
 
 #[test]
@@ -875,6 +1119,8 @@ fn merged_pose_matches_the_two_command_path() {
         ("cross_mode.usda", [1.0, 2.0].as_slice()),
         // Distinct per-slot payloads, so a swapped slot order changes bytes.
         ("two_deforming_meshes.usda", [1.0, 2.0].as_slice()),
+        // A deep tree with many deforming prims.
+        ("skinned.usda", [0.0, 1.0].as_slice()),
     ] {
         let state = spawn_stage_owner();
         open_via_owner(&state, name);
@@ -894,19 +1140,22 @@ fn merged_pose_matches_the_two_command_path() {
 
             let merged = request_animated_pose(&state.sender(), Some(time))
                 .expect("merged pose should serialize");
-            let (manifest, merged_paths, slots) = decode_pose(&merged);
+            let decoded = decode_pose(&merged);
+
+            // The path table covers every node once, in first-visit pre-order.
+            let mut table = Vec::new();
+            pose_path_table(&nodes, &mut table);
+            assert_eq!(decoded.paths, table, "{} at {time}: path table", name);
             assert_eq!(
-                manifest,
-                serde_json::to_vec(&nodes).unwrap().as_slice(),
-                "{} manifest JSON must be byte-identical",
+                decoded.nodes.len(),
+                table.len(),
+                "{} at {time}: one node per path (delta paths are unique)",
                 name
             );
-            // The frame names its own slots: nothing on the client re-walks.
-            assert_eq!(
-                merged_paths, paths,
-                "{} path list must be the two-command batch order",
-                name
-            );
+            // The rebuilt tree is the JSON delta manifest, field for field.
+            assert_pose_matches(&nodes, &rebuild_pose_tree(&decoded.nodes), name);
+
+            // The geometry slots keep today's order and framing.
             assert_eq!(
                 (merged.len() - batch.len()) % 4,
                 0,
@@ -914,36 +1163,44 @@ fn merged_pose_matches_the_two_command_path() {
                 name
             );
             assert_eq!(
-                u32::from_le_bytes(slots[0..4].try_into().unwrap()),
+                u32::from_le_bytes(decoded.slots[0..4].try_into().unwrap()),
                 0x5553_4247,
                 "the tail is the batch framing"
             );
             assert_eq!(
-                slots, batch,
+                decoded.slots, batch,
                 "{} geometry batch must be byte-identical",
                 name
             );
             assert_eq!(
-                u32::from_le_bytes(slots[8..12].try_into().unwrap()) as usize,
+                u32::from_le_bytes(decoded.slots[8..12].try_into().unwrap()) as usize,
                 paths.len(),
                 "one slot per geometry_animated path"
             );
+            // The slot order is the pre-order of the deforming nodes, so the
+            // path table locates every slot in the flat node list too.
+            for slot_path in &paths {
+                assert!(
+                    decoded.paths.contains(slot_path),
+                    "{} at {time}: slot path {slot_path} must be in the path table",
+                    name
+                );
+            }
         }
     }
 }
 
 /// A batch pose payload's frames, split the way the frontend must: the u32
-/// frame count, then each frame self-delimited by its own prefixes (manifest
-/// length, path lengths, batch slot lengths). Every frame stays 4-byte aligned
-/// inside the payload, so the splits need no extra padding.
+/// frame count, then each frame self-delimited by its own prefixes (path
+/// lengths, node records, batch slot lengths). Every frame stays 4-byte
+/// aligned inside the payload, so the splits need no extra padding.
 fn decode_pose_frames(payload: &[u8]) -> Vec<&[u8]> {
     let u32_at = |at: usize| u32::from_le_bytes(payload[at..at + 4].try_into().unwrap()) as usize;
     let count = u32_at(0);
     let mut cursor = 4;
     let mut frames = Vec::with_capacity(count);
     for _ in 0..count {
-        let json_len = u32_at(cursor);
-        let mut at = align4(cursor + 4 + json_len);
+        let mut at = cursor;
         let paths = u32_at(at);
         at += 4;
         for _ in 0..paths {
@@ -951,6 +1208,16 @@ fn decode_pose_frames(payload: &[u8]) -> Vec<&[u8]> {
             at += 4 + len;
         }
         at = align4(at);
+        let nodes = u32_at(at);
+        at += 4;
+        for _ in 0..nodes {
+            let flags = payload[at + 10];
+            at += 12 + 64; // header + 16 x f32 matrix
+            if flags & POSE_FLAG_INSTANCES != 0 {
+                let instances = u32_at(at);
+                at += 4 + instances * 64;
+            }
+        }
         assert_eq!(u32_at(at), 0x5553_4247, "the tail is the batch framing");
         let slots = u32_at(at + 8);
         let mut slot_at = at + 12;
@@ -1006,15 +1273,33 @@ fn batch_pose_frames_are_decodable_by_the_frontend() {
     let frames = decode_pose_frames(&batch);
     assert_eq!(frames.len(), times.len(), "one frame per authored code");
     for (frame, &time) in frames.iter().zip(&times) {
-        let (manifest, paths, slots) = decode_pose(frame);
-        assert!(!manifest.is_empty(), "frame at {time} carries a manifest");
-        assert!(!paths.is_empty(), "frame at {time} names its slots");
+        let decoded = decode_pose(frame);
+        assert!(!decoded.paths.is_empty(), "frame at {time} names its nodes");
+        assert!(!decoded.nodes.is_empty(), "frame at {time} carries nodes");
+        // The slot order is no longer the frame's own list: it is the
+        // pre-order of the deforming nodes, which the reader re-derives.
+        let mut paths = Vec::new();
+        let mut flat = Vec::new();
+        fn flatten<'a>(trees: &'a [PoseTree], out: &mut Vec<&'a PoseNode>) {
+            for tree in trees {
+                out.push(&tree.node);
+                flatten(&tree.children, out);
+            }
+        }
+        let trees = rebuild_pose_tree(&decoded.nodes);
+        flatten(&trees, &mut flat);
+        let mut seen = std::collections::HashSet::new();
+        for node in flat {
+            if node.has_geometry && node.geometry_animated && seen.insert(node.path.as_str()) {
+                paths.push(node.path.clone());
+            }
+        }
         assert_eq!(
-            slots,
+            decoded.slots,
             request_geometry_batch(&state.sender(), &paths, Some(time))
                 .expect("geometry batch should serialize")
                 .as_slice(),
-            "frame at {time} carries the same geometry batch"
+            "frame at {time} carries the same geometry batch in the same slot order"
         );
     }
 }
