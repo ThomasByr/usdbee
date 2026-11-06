@@ -563,6 +563,10 @@ fn spawn_stage_owner_for(
         let mut current_stage: Option<UndoStage> = None;
         let mut current_replay: Option<ReplayStage> = None;
         let mut mesh_cache = MeshCache::with_counter(owner_counter.clone());
+        // Sampled local matrices by (prim, time), beside the mesh cache: the
+        // animated half of the walk's transform, memoized across calls and
+        // cleared wherever the caches clear.
+        let mut transform_memo = new_transform_memo();
         // The time-independent manifest skeleton, built by the first manifest
         // call after an open; cleared on Open (like the geometry MeshCache).
         let mut manifest_skeleton: Option<ManifestSkeleton> = None;
@@ -632,6 +636,7 @@ fn spawn_stage_owner_for(
                         stage_source_usdz =
                             source_usdz.or_else(|| direct_usdz.then_some(path.clone()));
                         mesh_cache.clear();
+                        transform_memo.clear();
                         manifest_skeleton = None;
                         stage_tree = None;
                         resolve_memo.clear();
@@ -709,13 +714,13 @@ fn spawn_stage_owner_for(
                             let skeleton = manifest_skeleton
                                 .as_ref()
                                 .ok_or_else(|| "manifest skeleton build failed".to_string())?;
-                            let mut prototype_memo = PrototypeMemo::new();
+                            let mut ctx = WalkCtx::new(&mut transform_memo);
                             render_children(
                                 skeleton,
                                 &skeleton.root_children,
                                 time,
                                 false,
-                                &mut prototype_memo,
+                                &mut ctx,
                             )
                         }))
                         .unwrap_or_else(panic_reply),
@@ -732,13 +737,13 @@ fn spawn_stage_owner_for(
                             let skeleton = manifest_skeleton
                                 .as_ref()
                                 .ok_or_else(|| "manifest skeleton build failed".to_string())?;
-                            let mut prototype_memo = PrototypeMemo::new();
+                            let mut ctx = WalkCtx::new(&mut transform_memo);
                             delta_children(
                                 skeleton,
                                 &skeleton.root_children,
                                 time,
                                 false,
-                                &mut prototype_memo,
+                                &mut ctx,
                                 false,
                                 false,
                             )
@@ -876,6 +881,7 @@ fn spawn_stage_owner_for(
                                     &mut mesh_cache,
                                     &mut manifest_skeleton,
                                     &mut resolve_memo,
+                                    &mut transform_memo,
                                     &emitted,
                                 );
                             } else {
@@ -885,6 +891,7 @@ fn spawn_stage_owner_for(
                                     &mut manifest_skeleton,
                                     &mut stage_tree,
                                     &mut resolve_memo,
+                                    &mut transform_memo,
                                     &emitted,
                                 );
                             }
@@ -924,6 +931,7 @@ fn spawn_stage_owner_for(
                                 &mut manifest_skeleton,
                                 &mut stage_tree,
                                 &mut resolve_memo,
+                                &mut transform_memo,
                                 &path,
                             );
                         }
@@ -967,6 +975,7 @@ fn spawn_stage_owner_for(
                                 &mut manifest_skeleton,
                                 &mut stage_tree,
                                 &mut resolve_memo,
+                                &mut transform_memo,
                                 &path,
                             );
                         }
@@ -1004,6 +1013,7 @@ fn spawn_stage_owner_for(
                                 &mut manifest_skeleton,
                                 &mut stage_tree,
                                 &mut resolve_memo,
+                                &mut transform_memo,
                                 &path,
                             );
                         }
@@ -1109,6 +1119,7 @@ fn spawn_stage_owner_for(
                                         &mut mesh_cache,
                                         &mut manifest_skeleton,
                                         &mut resolve_memo,
+                                        &mut transform_memo,
                                         &path,
                                     );
                                 } else {
@@ -1118,6 +1129,7 @@ fn spawn_stage_owner_for(
                                         &mut manifest_skeleton,
                                         &mut stage_tree,
                                         &mut resolve_memo,
+                                        &mut transform_memo,
                                         &path,
                                     );
                                 }
@@ -1134,6 +1146,7 @@ fn spawn_stage_owner_for(
                                     &mut manifest_skeleton,
                                     &mut stage_tree,
                                     &mut resolve_memo,
+                                    &mut transform_memo,
                                     "/",
                                 );
                             }
@@ -1182,6 +1195,7 @@ fn spawn_stage_owner_for(
                                         &mut mesh_cache,
                                         &mut manifest_skeleton,
                                         &mut resolve_memo,
+                                        &mut transform_memo,
                                         &path,
                                     );
                                 } else {
@@ -1191,6 +1205,7 @@ fn spawn_stage_owner_for(
                                         &mut manifest_skeleton,
                                         &mut stage_tree,
                                         &mut resolve_memo,
+                                        &mut transform_memo,
                                         &path,
                                     );
                                 }
@@ -1261,6 +1276,7 @@ fn spawn_stage_owner_for(
                                 &mut manifest_skeleton,
                                 &mut stage_tree,
                                 &mut resolve_memo,
+                                &mut transform_memo,
                                 "/",
                             );
                         }
@@ -1683,6 +1699,7 @@ fn after_mutation(
     manifest_skeleton: &mut Option<ManifestSkeleton>,
     stage_tree: &mut Option<Vec<PrimNode>>,
     resolve_memo: &mut ResolveMemo,
+    transforms: &mut TransformMemo,
     path: &str,
 ) {
     // shortcut: coarse clear — any edit invalidates every cached
@@ -1695,6 +1712,7 @@ fn after_mutation(
     // The tree may change shape too (variant switches, authored children).
     *stage_tree = None;
     resolve_memo.clear();
+    transforms.clear();
     emit_stage_changed(sink, path);
 }
 
@@ -1717,6 +1735,7 @@ fn warm_xform_keep(
     mesh_cache: &mut MeshCache,
     manifest_skeleton: &mut Option<ManifestSkeleton>,
     resolve_memo: &mut ResolveMemo,
+    transforms: &mut TransformMemo,
     path: &str,
 ) {
     // shortcut: coarse clear — tessellation may bake transform-dependent
@@ -1724,6 +1743,11 @@ fn warm_xform_keep(
     mesh_cache.clear();
     invalidate_skeleton_transform(manifest_skeleton, path);
     resolve_memo.clear();
+    // The memo holds the pre-edit matrix for exactly the time codes the write
+    // changed, and it cannot tell an animated comp from a static one, so the
+    // whole map goes: serving a pre-edit pose after a gizmo commit, an undo
+    // or a redo is the one thing this cache must never do.
+    transforms.clear();
     emit_stage_changed(sink, path);
 }
 
@@ -3070,7 +3094,7 @@ fn prototype_children(
     prototypes: &[sdf::Path],
     time: Option<f64>,
     instancer_moves: bool,
-    prototype_memo: &mut PrototypeMemo,
+    ctx: &mut WalkCtx<'_>,
     walk: ProtoWalk,
 ) -> Result<Vec<RenderNode>, String> {
     let instancer = PointInstancer::from_prim_unchecked(prim.clone());
@@ -3126,11 +3150,8 @@ fn prototype_children(
         };
         let type_name = prototype.type_name.clone();
         // A prototype root whose own xformOpOrder samples moves: the build
-        // leaves its static transform unset, so the per-call read stands in.
-        let proto_xform = match prototype.static_transform {
-            Some(matrix) => matrix,
-            None => local_transform(&prototype.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY),
-        };
+        // leaves its static transform unset, so the per-time read stands in.
+        let proto_xform = node_transform(prototype, time, ctx.transforms)?;
         // The prototype root's own xform is folded into every
         // instance matrix, so sampled proto xformOps animate the
         // child as much as the instancer's own arrays do.
@@ -3192,14 +3213,7 @@ fn prototype_children(
         } else {
             (
                 visible,
-                build_subtree(
-                    mode,
-                    skeleton,
-                    &prototype.children,
-                    time,
-                    animated,
-                    prototype_memo,
-                )?,
+                build_subtree(mode, skeleton, &prototype.children, time, animated, ctx)?,
             )
         };
         rebase_render_paths(
@@ -3252,6 +3266,23 @@ fn rebase_render_paths(
 /// reused by a filtered delta walk (or vice versa) within one request.
 type PrototypeMemo = HashMap<(sdf::Path, bool, SubtreeMode), Vec<RenderNode>>;
 
+/// Per-walk state threaded through the manifest recursion: the prototype
+/// subtrees this call already built, and the owner's (prim, time) -> matrix
+/// memo. They travel together because every level of the walk needs both.
+struct WalkCtx<'a> {
+    prototypes: PrototypeMemo,
+    transforms: &'a mut TransformMemo,
+}
+
+impl<'a> WalkCtx<'a> {
+    fn new(transforms: &'a mut TransformMemo) -> Self {
+        Self {
+            prototypes: PrototypeMemo::new(),
+            transforms,
+        }
+    }
+}
+
 /// Which walk builds a prototype subtree: the full walk (every node) or
 /// the delta walk filtered to signal-bearing nodes. `vis` is the delta
 /// walk's visibility force — see `delta_children`.
@@ -3267,21 +3298,13 @@ fn build_subtree(
     children: &[String],
     time: Option<f64>,
     ancestor_moves: bool,
-    prototype_memo: &mut PrototypeMemo,
+    ctx: &mut WalkCtx<'_>,
 ) -> Result<Vec<RenderNode>, String> {
     match mode {
-        SubtreeMode::Full => {
-            render_children(skeleton, children, time, ancestor_moves, prototype_memo)
+        SubtreeMode::Full => render_children(skeleton, children, time, ancestor_moves, ctx),
+        SubtreeMode::DeltaFiltered { vis } => {
+            delta_children(skeleton, children, time, ancestor_moves, ctx, false, vis)
         }
-        SubtreeMode::DeltaFiltered { vis } => delta_children(
-            skeleton,
-            children,
-            time,
-            ancestor_moves,
-            prototype_memo,
-            false,
-            vis,
-        ),
     }
 }
 
@@ -3291,7 +3314,7 @@ fn native_prototype_children(
     prototype: Option<&sdf::Path>,
     time: Option<f64>,
     ancestor_moves: bool,
-    prototype_memo: &mut PrototypeMemo,
+    ctx: &mut WalkCtx<'_>,
     mode: SubtreeMode,
 ) -> Result<Vec<RenderNode>, String> {
     let Some(prototype_path) = prototype else {
@@ -3304,8 +3327,11 @@ fn native_prototype_children(
     // The memo is per-call state: its entries hold sampled transforms and
     // visibility, so they must not outlive the manifest call that built them.
     let memo_key = (prototype_path.clone(), ancestor_moves, mode);
-    let mut raw = match prototype_memo.get(&memo_key) {
-        Some(children) => children.clone(),
+    // Taken out of the ctx before the miss arm rebuilds it: the arm needs the
+    // whole ctx mutably.
+    let cached = ctx.prototypes.get(&memo_key).cloned();
+    let mut raw = match cached {
+        Some(children) => children,
         None => {
             let prototype = skeleton
                 .facts
@@ -3317,15 +3343,8 @@ fn native_prototype_children(
                     )
                 })?;
             let moves = ancestor_moves || prototype.self_moves;
-            let children = build_subtree(
-                mode,
-                skeleton,
-                &prototype.children,
-                time,
-                moves,
-                prototype_memo,
-            )?;
-            prototype_memo.insert(memo_key.clone(), children.clone());
+            let children = build_subtree(mode, skeleton, &prototype.children, time, moves, ctx)?;
+            ctx.prototypes.insert(memo_key.clone(), children.clone());
             children
         }
     };
@@ -3338,7 +3357,7 @@ fn render_node_children(
     facts: &SkeletonFacts,
     time: Option<f64>,
     ancestor_moves: bool,
-    prototype_memo: &mut PrototypeMemo,
+    ctx: &mut WalkCtx<'_>,
 ) -> Result<Vec<RenderNode>, String> {
     match &facts.kind {
         SkeletonKind::PointInstancer { prototypes } => prototype_children(
@@ -3347,7 +3366,7 @@ fn render_node_children(
             prototypes,
             time,
             ancestor_moves,
-            prototype_memo,
+            ctx,
             ProtoWalk::Full,
         ),
         SkeletonKind::NativeInstance { prototype } => native_prototype_children(
@@ -3356,16 +3375,12 @@ fn render_node_children(
             prototype.as_ref(),
             time,
             ancestor_moves,
-            prototype_memo,
+            ctx,
             SubtreeMode::Full,
         ),
-        SkeletonKind::Plain => render_children(
-            skeleton,
-            &facts.children,
-            time,
-            ancestor_moves,
-            prototype_memo,
-        ),
+        SkeletonKind::Plain => {
+            render_children(skeleton, &facts.children, time, ancestor_moves, ctx)
+        }
     }
 }
 
@@ -3374,7 +3389,7 @@ fn render_children(
     children: &[String],
     time: Option<f64>,
     ancestor_moves: bool,
-    prototype_memo: &mut PrototypeMemo,
+    ctx: &mut WalkCtx<'_>,
 ) -> Result<Vec<RenderNode>, String> {
     let mut nodes = Vec::new();
     for child in children {
@@ -3384,16 +3399,12 @@ fn render_children(
             .ok_or_else(|| format!("cached manifest facts missing for prim {}", child))?;
         let deforms = facts.renders_geometry && facts.self_deforms;
         let moves = ancestor_moves || facts.self_moves;
-        let transform = match facts.static_transform {
-            Some(matrix) => matrix,
-            None => local_transform(&facts.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY),
-        };
+        let transform = node_transform(facts, time, ctx.transforms)?;
         if facts.excluded {
             // Purpose proxy/guide is a cached fact: the prim itself emits
             // nothing and its descendants flatten up with its transform
             // composed in — but they still need this call's sampling.
-            let mut descendants =
-                render_node_children(skeleton, facts, time, moves, prototype_memo)?;
+            let mut descendants = render_node_children(skeleton, facts, time, moves, ctx)?;
             for descendant in &mut descendants {
                 descendant.transform = (transform * gf::Matrix4d(descendant.transform)).0;
             }
@@ -3404,7 +3415,7 @@ fn render_children(
         // only stands in when the build proved nothing on the render path
         // samples it.
         let visible = node_visible(facts, time, false)?;
-        let node_children = render_node_children(skeleton, facts, time, moves, prototype_memo)?;
+        let node_children = render_node_children(skeleton, facts, time, moves, ctx)?;
         let node = RenderNode {
             material: facts.material.clone(),
             path: child.clone(),
@@ -3450,7 +3461,7 @@ fn delta_children(
     children: &[String],
     time: Option<f64>,
     ancestor_moves: bool,
-    prototype_memo: &mut PrototypeMemo,
+    ctx: &mut WalkCtx<'_>,
     force: bool,
     vis: bool,
 ) -> Result<Vec<RenderNode>, String> {
@@ -3466,10 +3477,7 @@ fn delta_children(
             continue;
         }
         let moves = ancestor_moves || facts.self_moves;
-        let transform = match facts.static_transform {
-            Some(matrix) => matrix,
-            None => local_transform(&facts.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY),
-        };
+        let transform = node_transform(facts, time, ctx.transforms)?;
         if facts.excluded {
             // The lift composes this transform into the descendants' local
             // matrices, so its own motion forces the whole level along; its
@@ -3480,7 +3488,7 @@ fn delta_children(
                 facts,
                 time,
                 moves,
-                prototype_memo,
+                ctx,
                 force || facts.self_moves || facts.self_visibility_animated,
                 vis,
             )?;
@@ -3499,7 +3507,7 @@ fn delta_children(
             facts,
             time,
             moves,
-            prototype_memo,
+            ctx,
             false,
             vis || facts.self_visibility_animated,
         )?;
@@ -3526,7 +3534,7 @@ fn delta_node_children(
     facts: &SkeletonFacts,
     time: Option<f64>,
     ancestor_moves: bool,
-    prototype_memo: &mut PrototypeMemo,
+    ctx: &mut WalkCtx<'_>,
     force: bool,
     vis: bool,
 ) -> Result<Vec<RenderNode>, String> {
@@ -3545,7 +3553,7 @@ fn delta_node_children(
                 prototypes,
                 time,
                 ancestor_moves,
-                prototype_memo,
+                ctx,
                 vis,
             )
         }
@@ -3566,7 +3574,7 @@ fn delta_node_children(
                 prototype.as_ref(),
                 time,
                 ancestor_moves,
-                prototype_memo,
+                ctx,
                 SubtreeMode::DeltaFiltered {
                     vis: vis || force || root_vis,
                 },
@@ -3577,7 +3585,7 @@ fn delta_node_children(
             &facts.children,
             time,
             ancestor_moves,
-            prototype_memo,
+            ctx,
             force,
             vis,
         ),
@@ -3600,7 +3608,7 @@ fn delta_prototype_children(
     prototypes: &[sdf::Path],
     time: Option<f64>,
     instancer_moves: bool,
-    prototype_memo: &mut PrototypeMemo,
+    ctx: &mut WalkCtx<'_>,
     vis: bool,
 ) -> Result<Vec<RenderNode>, String> {
     let walk = if instancer_moves {
@@ -3608,15 +3616,7 @@ fn delta_prototype_children(
     } else {
         ProtoWalk::DeltaFiltered { vis }
     };
-    prototype_children(
-        skeleton,
-        prim,
-        prototypes,
-        time,
-        instancer_moves,
-        prototype_memo,
-        walk,
-    )
+    prototype_children(skeleton, prim, prototypes, time, instancer_moves, ctx, walk)
 }
 
 /// Computed visibility at the requested time — the per-time imageable
@@ -3655,6 +3655,26 @@ fn node_visible(facts: &SkeletonFacts, time: Option<f64>, forced: bool) -> Resul
     }
 }
 
+/// The node's local matrix at `time`: the build's static value when the prim's
+/// xformOps author no samples, else the memoized per-time read. `Unsupported`
+/// keeps the old use-site fallback (identity).
+fn node_transform(
+    facts: &SkeletonFacts,
+    time: Option<f64>,
+    transforms: &mut TransformMemo,
+) -> Result<gf::Matrix4d, String> {
+    if let Some(matrix) = facts.static_transform {
+        return Ok(matrix);
+    }
+    let key = (facts.prim.path().to_string(), time);
+    if let Some(matrix) = transforms.get(&key) {
+        return Ok(*matrix);
+    }
+    let matrix = local_transform(&facts.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
+    transforms.insert(key, matrix, std::mem::size_of::<gf::Matrix4d>());
+    Ok(matrix)
+}
+
 pub fn serialize_render_manifest(
     stage: &Stage,
     time: Option<f64>,
@@ -3664,14 +3684,9 @@ pub fn serialize_render_manifest(
     // rebuilds it per call so the walk stays self-contained. Output shape
     // and semantics are unchanged either way — a pure perf refactor.
     let skeleton = ManifestSkeleton::build(stage)?;
-    let mut prototype_memo = PrototypeMemo::new();
-    render_children(
-        &skeleton,
-        &skeleton.root_children,
-        time,
-        false,
-        &mut prototype_memo,
-    )
+    let mut transforms = new_transform_memo();
+    let mut ctx = WalkCtx::new(&mut transforms);
+    render_children(&skeleton, &skeleton.root_children, time, false, &mut ctx)
 }
 
 pub fn serialize_animated_manifest(
@@ -3679,22 +3694,100 @@ pub fn serialize_animated_manifest(
     time: Option<f64>,
 ) -> Result<Vec<RenderNode>, String> {
     let skeleton = ManifestSkeleton::build(stage)?;
-    let mut prototype_memo = PrototypeMemo::new();
+    let mut transforms = new_transform_memo();
+    let mut ctx = WalkCtx::new(&mut transforms);
     delta_children(
         &skeleton,
         &skeleton.root_children,
         time,
         false,
-        &mut prototype_memo,
+        &mut ctx,
         false,
         false,
     )
 }
 
+// `Option<f64>` is not `Hash` (and NaN keys would be ambiguous), so the
+// public API takes the queried `Option<f64>` and stores its bits.
+fn cache_key(key: (String, Option<f64>)) -> (String, Option<u64>) {
+    (key.0, key.1.map(f64::to_bits))
+}
+
+/// Owner-thread cache keyed by (prim path, queried time bits), evicted oldest
+/// first, under a byte budget and an entry ceiling. Both users are fed in
+/// authored-time order by playback, where insertion order is as good as
+/// least-recently-used and costs nothing per hit, so a hit does not refresh
+/// an entry's position: re-insertion on write already does.
+struct KeyedCache<V> {
+    // Each entry carries its own charge, so a refresh can credit the old one.
+    entries: HashMap<(String, Option<u64>), (V, usize)>,
+    order: VecDeque<(String, Option<u64>)>,
+    bytes: usize,
+    byte_budget: usize,
+    entry_ceiling: usize,
+}
+
+impl<V> KeyedCache<V> {
+    fn with_limits(byte_budget: usize, entry_ceiling: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            byte_budget,
+            entry_ceiling,
+        }
+    }
+
+    fn get(&self, key: &(String, Option<f64>)) -> Option<&V> {
+        self.entries
+            .get(&cache_key(key.clone()))
+            .map(|(value, _)| value)
+    }
+
+    /// Insert (or refresh) one entry charged `bytes`, then evict the oldest
+    /// entries until both limits hold again. The newest entry always stays,
+    /// even when it alone exceeds the budget: the caller just asked for it.
+    fn insert(&mut self, key: (String, Option<f64>), value: V, bytes: usize) {
+        let key = cache_key(key);
+        match self.entries.insert(key.clone(), (value, bytes)) {
+            // A refresh keeps its place in the queue.
+            Some((_, previous)) => self.bytes = self.bytes - previous + bytes,
+            None => {
+                self.order.push_back(key);
+                self.bytes += bytes;
+            }
+        }
+        while self.order.len() > 1
+            && (self.bytes > self.byte_budget || self.entries.len() > self.entry_ceiling)
+        {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some((_, freed)) = self.entries.remove(&oldest) {
+                self.bytes -= freed;
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.bytes = 0;
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// Tessellation cache owned by the stage-owner thread: (prim path, time as
 /// queried) -> mesh. `None` and `Some(t)` are distinct keys.
 pub struct MeshCache {
-    entries: HashMap<(String, Option<u64>), Arc<MeshData>>,
+    entries: KeyedCache<Arc<MeshData>>,
     // Shared with StageState so tessellation-filling work can be counted
     // from outside the owner thread.
     tessellations: Arc<AtomicUsize>,
@@ -3706,17 +3799,16 @@ impl Default for MeshCache {
     }
 }
 
-// `Option<f64>` is not `Hash` (and NaN keys would be ambiguous), so the
-// public API takes the queried `Option<f64>` and stores its bits.
-fn cache_key(key: (String, Option<f64>)) -> (String, Option<u64>) {
-    (key.0, key.1.map(f64::to_bits))
-}
-
 impl MeshCache {
-    // Kitchen_set_instanced tessellates 1,462 unique prototype meshes per
-    // load (pack bytes measured 14.7 MB total); 256 full-cleared twice per
-    // pass defeats the warm hit. The cap must hold a full scene.
-    const CAP: usize = 2048;
+    // The budget must hold a full animation loop, or playback thrashes: the
+    // CarbonFrameBike authors 281 time codes for 14 deforming prims (3,934
+    // entries, 150.7 MiB of MeshData measured, capacities included), and a
+    // mid-loop clear made every step re-tessellate all 14 (54 ms/step in dev,
+    // 4.6 ms in release). 256 MiB fits that loop with headroom; the entry
+    // ceiling bounds a scene of many tiny meshes (8,192 holds the loop's
+    // 3,934 entries and Kitchen_set_instanced's 1,462 prototype meshes).
+    const BYTE_BUDGET: usize = 256 * 1024 * 1024;
+    const ENTRY_CEILING: usize = 8192;
 
     pub fn new() -> Self {
         Self::with_counter(Arc::new(AtomicUsize::new(0)))
@@ -3724,24 +3816,19 @@ impl MeshCache {
 
     pub fn with_counter(counter: Arc<AtomicUsize>) -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: KeyedCache::with_limits(Self::BYTE_BUDGET, Self::ENTRY_CEILING),
             tessellations: counter,
         }
     }
 
     pub fn get(&self, key: &(String, Option<f64>)) -> Option<Arc<MeshData>> {
-        self.entries.get(&cache_key(key.clone())).cloned()
+        self.entries.get(key).cloned()
     }
 
     pub fn insert(&mut self, key: (String, Option<f64>), mesh: Arc<MeshData>) {
-        // shortcut: primitive eviction — a full clear at the cap; measured rule: cap
-        // 2048 holds both benchmark heaps (kitchen 1,462 keys / 14.7 MB packed),
-        // raise further only if a scene exceeds it
-        if !self.entries.contains_key(&cache_key(key.clone())) && self.entries.len() >= Self::CAP {
-            self.entries.clear();
-        }
         self.tessellations.fetch_add(1, Ordering::Relaxed);
-        self.entries.insert(cache_key(key), mesh);
+        let bytes = mesh.size_bytes();
+        self.entries.insert(key, mesh, bytes);
     }
 
     pub fn clear(&mut self) {
@@ -3755,6 +3842,24 @@ impl MeshCache {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+/// Owner-thread memo of sampled local matrices: (prim path, queried time) ->
+/// matrix. The skeleton hoists every prim whose xformOps author no samples
+/// (`SkeletonFacts::static_transform`); this covers the animated half, which
+/// would otherwise re-compose `xformOpOrder` and every op on each walk step
+/// (174 of the bike's 190 delta nodes, 112 ms/step in dev, 2.4 ms in
+/// release). Same lifecycle as the MeshCache: cleared on `Open` and by every
+/// mutation — `warm_xform_keep` included, since a default-time xform write
+/// is exactly what can falsify an entry.
+type TransformMemo = KeyedCache<gf::Matrix4d>;
+
+fn new_transform_memo() -> TransformMemo {
+    // A bike loop is 174 animated prims x 281 codes = 48,894 entries, ~10 MiB
+    // with keys; 64 MiB / 131,072 entries holds several such loops of
+    // authored codes without ever clearing, and eviction only costs a
+    // recomputed matrix.
+    KeyedCache::with_limits(64 * 1024 * 1024, 131_072)
 }
 
 /// Rewrite a frontend-requested prim path to the prim the request actually
@@ -4666,5 +4771,40 @@ mod edit_emission_tests {
             edit_emission_path(&stage, "/Scene/WheelA/Wheel"),
             "/Scene/WheelA/Wheel"
         );
+    }
+}
+
+#[cfg(test)]
+mod keyed_cache_tests {
+    use super::KeyedCache;
+
+    fn key(name: &str) -> (String, Option<f64>) {
+        (name.to_string(), None)
+    }
+
+    // Synthetic per-entry charges: the byte budget, not the entry ceiling,
+    // must drive eviction, and the newest insert must survive even alone
+    // over budget.
+    #[test]
+    fn byte_budget_evicts_oldest_and_keeps_newest() {
+        let mut cache = KeyedCache::with_limits(1000, 100);
+        for name in ["a", "b", "c"] {
+            cache.insert(key(name), name.to_string(), 400);
+        }
+        assert!(cache.get(&key("a")).is_none(), "oldest evicted by bytes");
+        assert_eq!(cache.len(), 2, "far below the 100-entry ceiling");
+        assert_eq!(cache.bytes, 800);
+        // Eviction trimmed the oldest entries only, never cleared the cache.
+        assert_eq!(cache.get(&key("b")), Some(&"b".to_string()));
+        assert_eq!(cache.get(&key("c")), Some(&"c".to_string()));
+
+        cache.insert(key("huge"), "huge".to_string(), 4096);
+        assert_eq!(cache.get(&key("huge")), Some(&"huge".to_string()));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.bytes, 4096);
+
+        cache.clear();
+        assert_eq!(cache.bytes, 0);
+        assert!(cache.is_empty());
     }
 }

@@ -403,19 +403,33 @@ fn manifest_matches_authored_hierarchy_transforms_and_flags() {
 }
 
 #[test]
-fn mesh_cache_caps_at_2048_by_clearing() {
+fn mesh_cache_evicts_oldest_entries_instead_of_clearing() {
+    // The old cache cleared itself at 2,048 entries, which threw away a whole
+    // animation loop's tessellations (a bike loop needs 3,934 keys and every
+    // step re-tessellated). Past that cap the map must stay warm.
     let mut cache = MeshCache::new();
-    for i in 0..2048 {
+    for i in 0..5000 {
         cache.insert((format!("/M{}", i), None), stub_mesh());
     }
-    assert_eq!(cache.len(), 2048);
-    assert!(cache.get(&("/M0".into(), None)).is_some());
+    assert_eq!(cache.len(), 5000, "no clear at the old 2,048-entry cap");
+    assert!(cache.get(&("/M0".into(), None)).is_some(), "old keys stay");
+    assert!(cache.get(&("/M4999".into(), None)).is_some());
 
-    // shortcut: 2049th distinct insert clears everything, keeps just the new entry
-    cache.insert(("/M2048".into(), None), stub_mesh());
-    assert_eq!(cache.len(), 1);
-    assert!(cache.get(&("/M2048".into(), None)).is_some());
-    assert!(cache.get(&("/M0".into(), None)).is_none());
+    // Past the entry ceiling the OLDEST keys go one by one; a full clear
+    // would leave exactly one entry behind.
+    for i in 5000..8200 {
+        cache.insert((format!("/M{}", i), None), stub_mesh());
+    }
+    assert!(
+        cache.len() > 2048,
+        "eviction trims, it never empties the cache (len {})",
+        cache.len()
+    );
+    assert!(
+        cache.get(&("/M0".into(), None)).is_none(),
+        "the oldest key is the one evicted"
+    );
+    assert!(cache.get(&("/M8199".into(), None)).is_some());
 }
 #[test]
 fn mesh_cache_distinguishes_none_and_some_time_keys() {

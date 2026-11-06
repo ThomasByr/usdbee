@@ -39,6 +39,25 @@ pub struct MeshData {
     pub indices: Vec<u32>,
 }
 
+impl MeshData {
+    /// Heap bytes this mesh holds, for the stage owner's cache budget.
+    /// `Vec` capacity is what the allocator actually keeps, so it is what
+    /// gets charged; the struct header itself is dwarfed by the buffers.
+    pub fn size_bytes(&self) -> usize {
+        let vertices = self.positions.capacity() * std::mem::size_of::<[f32; 3]>()
+            + self.normals.as_ref().map_or(0, |values| {
+                values.capacity() * std::mem::size_of::<[f32; 3]>()
+            })
+            + self.uvs.as_ref().map_or(0, |values| {
+                values.capacity() * std::mem::size_of::<[f32; 2]>()
+            })
+            + self.colors.as_ref().map_or(0, |values| {
+                values.capacity() * std::mem::size_of::<[f32; 3]>()
+            });
+        vertices + self.indices.capacity() * std::mem::size_of::<u32>()
+    }
+}
+
 /// How a primvar's values lie on the surface; only the flavors this task can
 /// map over a triangle soup are material, and anything that cannot map is
 /// dropped rather than faked.

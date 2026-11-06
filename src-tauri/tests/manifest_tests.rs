@@ -13,10 +13,11 @@ use common::spawn_stage_owner;
 use openusd::gf;
 
 use usdbee_lib::stage::{
-    open_stage, request_geometry_data, request_material_data, request_redo, request_scene_manifest,
-    request_set_attribute_value, request_undo, serialize_render_manifest, RenderNode,
+    open_stage, request_animated_manifest, request_geometry_data, request_material_data,
+    request_redo, request_scene_manifest, request_set_attribute_value, request_undo,
+    serialize_render_manifest, RenderNode,
 };
-use usdbee_lib::values::ValuePayload;
+use usdbee_lib::values::{local_transform, ValuePayload};
 
 fn open_fixture_manifest(name: &str, time: Option<f64>) -> Vec<RenderNode> {
     let (stage, info) = open_stage(&fixture(name)).expect("stage should open");
@@ -645,4 +646,178 @@ fn editing_a_static_prims_transform_and_visibility_clears_the_skeleton() {
     let node = expect(&redone, "/World/StaticXform");
     assert_matrix_close(&after.transform, &node.transform);
     assert_eq!(node.visible, after.visible, "redo restores the edit");
+}
+
+// Sample-time transform memo (stage owner, beside the mesh cache): animated
+// prims whose xformOps author samples are re-composed per (prim, time); the
+// memo serves them across calls. These pins assert only that the memo never
+// changes an answer — same-time repeats, edits, undo/redo, and an uncached
+// read as the oracle.
+
+fn flatten<'a>(nodes: &'a [RenderNode], out: &mut Vec<&'a RenderNode>) {
+    for node in nodes {
+        out.push(node);
+        flatten(&node.children, out);
+    }
+}
+
+#[test]
+fn repeated_delta_manifest_at_one_time_is_identical_with_the_transform_memo() {
+    // The second call at the same time must serve the memo and still return
+    // byte-identical transforms and visibility...
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+
+    for time in [0.0, 10.0, 17.5] {
+        let first = request_animated_manifest(&state.sender(), Some(time))
+            .expect("delta manifest should serialize");
+        let second = request_animated_manifest(&state.sender(), Some(time))
+            .expect("delta manifest should serialize");
+        assert_manifest_json_equal(&first, &second);
+        assert!(
+            find(&first, "/Scene/Mover").is_some(),
+            "the sampled prim rides the delta at {time}"
+        );
+    }
+}
+
+#[test]
+fn memoized_sample_transforms_match_an_uncached_walk() {
+    // The oracle is a second stage plus a per-prim `local_transform`: no memo,
+    // no skeleton. Every transform the warm delta serves must equal it.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+    let (oracle, _) = open_stage(&fixture("animated.usda")).expect("stage should open");
+
+    for time in [0.0, 1.0, 10.0, 17.5, 24.0] {
+        // Cold call fills the memo, warm call must serve it.
+        request_animated_manifest(&state.sender(), Some(time))
+            .expect("cold delta manifest should serialize");
+        let warm = request_animated_manifest(&state.sender(), Some(time))
+            .expect("warm delta manifest should serialize");
+        let mut nodes = Vec::new();
+        flatten(&warm, &mut nodes);
+        assert!(!nodes.is_empty(), "delta at {} must carry nodes", time);
+        for node in nodes {
+            let prim = oracle
+                .prim(
+                    openusd::sdf::try_into_path(node.path.as_str())
+                        .expect("render path should parse"),
+                )
+                .expect("render path should resolve");
+            let expected = local_transform(&prim, Some(time))
+                .expect("local transform should compose")
+                .unwrap_or(gf::Matrix4d::IDENTITY);
+            assert_matrix_close(&expected.0, &node.transform);
+        }
+    }
+}
+
+#[test]
+fn editing_a_sampled_xform_at_a_time_reaches_the_manifest() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+
+    // Warm the memo at the time the edit targets.
+    let warm = request_animated_manifest(&state.sender(), Some(10.0))
+        .expect("delta manifest should serialize");
+    assert_eq!(expect(&warm, "/Scene/Mover").transform[12], 5.0);
+
+    request_set_attribute_value(
+        &state.sender(),
+        "/Scene/Mover",
+        "xformOp:translate",
+        &payload("double3", serde_json::json!([0, 7, 0])),
+        Some(10.0),
+    )
+    .expect("authoring the sampled translate should succeed");
+
+    let edited = request_animated_manifest(&state.sender(), Some(10.0))
+        .expect("delta manifest should serialize");
+    let node = expect(&edited, "/Scene/Mover");
+    assert_eq!(node.transform[12], 0.0, "the edited sample, not the memo");
+    assert_eq!(node.transform[13], 7.0, "the edited sample, not the memo");
+}
+
+#[test]
+fn default_time_xform_edit_clears_every_memoized_sample() {
+    // A gizmo commit on an animated prim writes at DEFAULT time and keeps the
+    // skeleton warm (`warm_xform_keep`). An entry the memo already holds at a
+    // sampled time must not survive it.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+
+    // Both times enter the memo.
+    for time in [0.0, 10.0] {
+        request_animated_manifest(&state.sender(), Some(time))
+            .expect("delta manifest should serialize");
+    }
+    let before = request_animated_manifest(&state.sender(), Some(10.0))
+        .expect("delta manifest should serialize");
+    let prior = expect(&before, "/Scene/Mover").transform;
+
+    request_set_attribute_value(
+        &state.sender(),
+        "/Scene/Mover",
+        "xformOp:rotateXYZ",
+        &payload("float3", serde_json::json!([0, 0, 90])),
+        None,
+    )
+    .expect("creating the rotate should succeed");
+    request_set_attribute_value(
+        &state.sender(),
+        "/Scene/Mover",
+        "xformOpOrder",
+        &payload(
+            "token_array",
+            serde_json::json!(["xformOp:translate", "xformOp:rotateXYZ"]),
+        ),
+        None,
+    )
+    .expect("authoring the order should succeed");
+
+    let after = request_animated_manifest(&state.sender(), Some(10.0))
+        .expect("delta manifest should serialize");
+    let node = expect(&after, "/Scene/Mover").transform;
+    assert!(
+        node[0].abs() < 1e-9,
+        "the 90-degree Z rotation applies: got {:?}",
+        node
+    );
+    assert_eq!(node[12], 5.0, "the t=10 sample still drives the translate");
+    assert_ne!(node, prior, "the pre-edit matrix must not be served");
+}
+
+#[test]
+fn undo_and_redo_of_a_sampled_xform_edit_reach_the_manifest() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+
+    let original = request_animated_manifest(&state.sender(), Some(10.0))
+        .expect("delta manifest should serialize");
+    let before = expect(&original, "/Scene/Mover").transform;
+
+    request_set_attribute_value(
+        &state.sender(),
+        "/Scene/Mover",
+        "xformOp:translate",
+        &payload("double3", serde_json::json!([0, 7, 0])),
+        Some(10.0),
+    )
+    .expect("authoring the sampled translate should succeed");
+    let edited = request_animated_manifest(&state.sender(), Some(10.0))
+        .expect("delta manifest should serialize");
+    assert_eq!(expect(&edited, "/Scene/Mover").transform[13], 7.0);
+
+    assert!(request_undo(&state.sender()).expect("undo should succeed"));
+    let undone = request_animated_manifest(&state.sender(), Some(10.0))
+        .expect("delta manifest should serialize");
+    assert_matrix_close(&before, &expect(&undone, "/Scene/Mover").transform);
+
+    assert!(request_redo(&state.sender()).expect("redo should succeed"));
+    let redone = request_animated_manifest(&state.sender(), Some(10.0))
+        .expect("delta manifest should serialize");
+    let node = expect(&redone, "/Scene/Mover").transform;
+    assert_eq!(node[12], 0.0, "redo reapplies the edit");
+    assert_eq!(node[13], 7.0, "redo reapplies the edit");
 }
