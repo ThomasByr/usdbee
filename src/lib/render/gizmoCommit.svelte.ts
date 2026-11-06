@@ -1,7 +1,14 @@
 import * as THREE from "three";
 import { TransformGizmo, previewLocalMatrix, type GizmoCommit } from "$lib/render/transformGizmo";
-import { composeOpUpdate, evaluateGizmoGate, matricesClose, type GizmoMode } from "$lib/render/xformOps";
+import {
+  composeOpUpdate,
+  evaluateGizmoGate,
+  matricesClose,
+  type GizmoMode,
+  type OpWrite,
+} from "$lib/render/xformOps";
 import { stageState } from "$lib/stage/stageState.svelte";
+import type { PrimDetails } from "$lib/stage/types";
 import { renderState } from "$lib/render/renderState.svelte";
 import { refreshSceneAfterEdit } from "$lib/render/sceneIntegration";
 import { requestShadowUpdate } from "$lib/three/shadowMapUpdate";
@@ -262,6 +269,65 @@ export function disposeGizmo() {
   if (gizmoViewer) gizmoViewer.onFrameGizmoSync = null;
 }
 
+// The op update a desired local matrix composes to. Shared by the drag
+// commit and the drag-free entry below.
+function composeFor(details: PrimDetails, gizmoMode: GizmoMode, target: number[]) {
+  const orderAttribute = details.attributes.find((a) => a.name === "xformOpOrder");
+  const order = Array.isArray(orderAttribute?.value.data) ? (orderAttribute!.value.data as string[]) : [];
+  // Callers check local_transform before composing.
+  return composeOpUpdate({
+    mode: gizmoMode,
+    order,
+    attrs: details.attributes,
+    localMatrix: details.local_transform!,
+    targetLocalMatrix: target,
+  });
+}
+
+// One composed op update -> set_attribute_value writes. Stops at the first
+// backend error; `authored` counts the writes that landed, which is what
+// the partial-commit path below turns on.
+async function writeOpUpdate(
+  writes: OpWrite[],
+  opTime: number | null,
+  primPath: string,
+  stageId: number,
+): Promise<{ error: string | null; authored: number }> {
+  let authored = 0;
+  for (const write of writes) {
+    // xformOpOrder is uniform: it authors its default, never a time
+    // sample.
+    const error = await stageState.setAttributeValue(
+      write.name,
+      { type: write.type, data: write.data },
+      write.name === "xformOpOrder" ? null : opTime,
+      primPath,
+      stageId,
+    );
+    if (error !== null) return { error, authored };
+    authored++;
+  }
+  return { error: null, authored };
+}
+
+// Absolute local-transform authoring for a prim that no drag owns (the dev
+// bridge's transform_object): the drag commit's op composition and writes,
+// minus the drag latches. Returns the backend error, or null on success.
+export async function authorLocalTransform(
+  details: PrimDetails,
+  gizmoMode: GizmoMode,
+  targetLocalMatrix: number[],
+): Promise<string | null> {
+  if (!details.local_transform) return "transform stack is not editable";
+  const result = composeFor(details, gizmoMode, targetLocalMatrix);
+  if (!result.ok) return result.error;
+  // Hybrid authoring time, same as the commit: a static stage authors at
+  // the default time.
+  const opTime: number | null = renderState.hasAnimated ? renderState.time : null;
+  const { error } = await writeOpUpdate(result.writes, opTime, details.path, stageState.activeStageId);
+  return error;
+}
+
 // Drag end -> desired USD local matrix -> the op(s) to author. The
 // parent/world chain cancels in the start/end ratio, so no ancestor
 // walk is needed: L' = L * inv(startWorld) * endWorld.
@@ -307,28 +373,18 @@ async function handleGizmoCommit(commit: GizmoCommit) {
       if (gizmo) reattach(gizmo, viewer, commit.endWorld);
       return;
     }
-    const orderAttribute = details.attributes.find((a) => a.name === "xformOpOrder");
-    const order = Array.isArray(orderAttribute?.value.data) ? (orderAttribute!.value.data as string[]) : [];
-    const result = composeOpUpdate({
-      mode: gizmoMode,
-      order,
-      attrs: details.attributes,
-      localMatrix: details.local_transform,
-      targetLocalMatrix: target,
-    });
+    const result = composeFor(details, gizmoMode, target);
     if (!result.ok) {
       gizmoPolicy.error = result.error;
       if (gizmo) reattach(gizmo, viewer, commit.endWorld);
       return;
     }
-    let failed = false;
     // Whether ANY write landed: a partial commit's refresh must run, and
     // its verdict decides the release pose (see releasePreviewNode).
-    let authoredAny = false;
-    // The write loop must not follow the live selection: the tree (and
-    // the tab bar) stay clickable while writes await IPC, so a mid-commit
-    // selection change would redirect the later writes onto another
-    // prim/stage. Pin the drag's prim and stage for every write.
+    // The writes must not follow the live selection: the tree (and the tab
+    // bar) stay clickable while they await IPC, so a mid-commit selection
+    // change would redirect the later writes onto another prim/stage. Pin
+    // the drag's prim and stage for every write.
     const primPath = details.path;
     const stageId = stageState.activeStageId;
     // Hybrid authoring time: on a static stage the op values author at
@@ -339,23 +395,10 @@ async function handleGizmoCommit(commit: GizmoCommit) {
     // shortcut: stage-level granularity, not per-prim; per-prim when
     // animated stages' static prims feel slow to release
     const opTime: number | null = renderState.hasAnimated ? renderState.time : null;
-    for (const write of result.writes) {
-      // xformOpOrder is uniform: it authors its default, never a time
-      // sample.
-      const error = await stageState.setAttributeValue(
-        write.name,
-        { type: write.type, data: write.data },
-        write.name === "xformOpOrder" ? null : opTime,
-        primPath,
-        stageId,
-      );
-      if (error !== null) {
-        gizmoPolicy.error = error;
-        failed = true;
-        break;
-      }
-      authoredAny = true;
-    }
+    const write = await writeOpUpdate(result.writes, opTime, primPath, stageId);
+    const failed = write.error !== null;
+    const authoredAny = write.authored > 0;
+    if (failed) gizmoPolicy.error = write.error;
     keepPreviewPose = !failed;
     if (failed && authoredAny) {
       // Write 1's event refresh already applied the partial truth to the

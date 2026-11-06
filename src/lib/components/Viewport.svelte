@@ -159,6 +159,15 @@
 
     installPlaybackDriver(viewer);
 
+    // Dev-only MCP bridge. The dynamic import sits behind the same DEV flag
+    // the bridge's own gate uses, so a release bundle carries neither.
+    let stopBridge: (() => void) | null = null;
+    if (import.meta.env.DEV) {
+      void import("$lib/dev/mcpBridge.svelte").then((bridge) => {
+        stopBridge = bridge.startMcpBridge(viewer);
+      });
+    }
+
     // Loading orchestration lives in loadOrchestrator; the viewport-bound
     // steps it can't own are handed back through the sceneIntegration
     // step functions.
@@ -187,6 +196,7 @@
     ];
 
     return () => {
+      stopBridge?.();
       unlisteners.forEach((u) => u.then((f) => f()));
       disposeGizmo();
       viewer.dispose();
