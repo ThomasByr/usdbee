@@ -14,7 +14,13 @@
     syncGraphicsSettings,
     syncLightRig,
   } from "$lib/render/sceneIntegration";
-  import { disposeGizmo, getGizmoError, getGizmoGate, initGizmo } from "$lib/render/gizmoCommit.svelte";
+  import {
+    disposeGizmo,
+    gateCommitStageRefresh,
+    getGizmoError,
+    getGizmoGate,
+    initGizmo,
+  } from "$lib/render/gizmoCommit.svelte";
   import type { GizmoMode } from "$lib/render/xformOps";
   import type { RendererKit } from "$lib/three/RendererKit.svelte";
   import { controlsState } from "$lib/state/controlsState.svelte";
@@ -172,6 +178,10 @@
         const payload = event.payload as { stage_id?: number; paths?: string[] } | null;
         if (payload?.stage_id !== stageState.activeStageId) return;
         const paths = (payload?.paths ?? []) as string[];
+        // A gizmo commit authors several ops, each emitting its own event:
+        // refreshing mid-commit renders an intermediate pose (the release
+        // snap-back). The commit refreshes once, when its writes are done.
+        if (gateCommitStageRefresh(paths)) return;
         void refreshSceneAfterEdit(viewer, paths);
       }),
     ];

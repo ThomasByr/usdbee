@@ -117,6 +117,33 @@ function pauseOnDragStart() {
 // handler and is never rendered, so a rune adds nothing there.
 let gizmoCommitInFlight = false;
 
+// A commit is not one write: the mode op, its pivot-residual translate and
+// xformOpOrder author separately, and each write makes the backend emit a
+// usd-stage-changed event. An event handled MID-COMMIT refreshes the scene
+// onto an intermediate stage (a new op value the order does not carry yet
+// composes as the original pose), which renders as the release snap-back.
+// The viewport listener gates its events through gateCommitStageRefresh;
+// the commit runs one refresh of its own once its writes are done.
+const deferredStagePaths = new Set<string>();
+
+// The viewport's usd-stage-changed gate: while a commit is in flight the
+// event's paths are deferred to the commit's own refresh. Returns true when
+// the caller must NOT refresh.
+export function gateCommitStageRefresh(paths: string[]): boolean {
+  if (!gizmoCommitInFlight) return false;
+  for (const path of paths) deferredStagePaths.add(path);
+  return true;
+}
+
+// The one refresh a commit runs: whatever its own writes deferred, seeded
+// with the prim it authored (the partial-commit case refreshes that prim
+// itself). Ordered so the prim's own paths lead.
+function drainDeferredStagePaths(seed: string[]): string[] {
+  const paths = [...new Set([...seed, ...deferredStagePaths])];
+  deferredStagePaths.clear();
+  return paths;
+}
+
 // The node's frozen local matrix at drag start: the pose a release hands
 // back when the commit authors nothing, so a refused or failed commit
 // leaves the node at stage truth instead of the previewed pose.
@@ -161,6 +188,7 @@ export function initGizmo(viewer: RendererKit, getMode: () => GizmoMode) {
   // semantics: a fresh commit lock and no stale error message.
   gizmoPolicy.error = null;
   gizmoCommitInFlight = false;
+  deferredStagePaths.clear();
   // A remount mid-drag leaves a stale latch behind; a fresh mount starts
   // clean, same as the commit lock above.
   previewActive = false;
@@ -310,7 +338,8 @@ async function handleGizmoCommit(commit: GizmoCommit) {
       // refresh on the drag's prim: its manifest application re-poses the
       // node onto (partial) stage truth, so the release keeps this pose.
       // Runs inside the try: the controls stay disabled until it lands.
-      await refreshSceneAfterEdit(viewer, [primPath]);
+      // Its gated events ride along, so the finally drains nothing here.
+      await refreshSceneAfterEdit(viewer, drainDeferredStagePaths([primPath]));
       keepPreviewPose = true;
     }
     // Keep commits disabled until fresh details land; a second drag must
@@ -318,6 +347,12 @@ async function handleGizmoCommit(commit: GizmoCommit) {
     if (!failed) await stageState.refreshAfterEdit();
     if (gizmo) reattach(gizmo, viewer, commit.endWorld);
   } finally {
+    // The commit's writes deferred their events: one refresh applies the
+    // committed end state, and it must land before the controls come back
+    // (a second drag never starts from the pre-commit pose). An empty
+    // queue means no write landed, so there is nothing to refresh.
+    const deferred = drainDeferredStagePaths([]);
+    if (deferred.length > 0) await refreshSceneAfterEdit(viewer, deferred);
     releasePreviewNode(viewer, keepPreviewPose);
     gizmoCommitInFlight = false;
     if (gizmo) gizmo.controls.enabled = true;

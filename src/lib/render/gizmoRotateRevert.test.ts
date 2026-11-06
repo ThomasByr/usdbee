@@ -16,7 +16,14 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { invoke } from "@tauri-apps/api/core";
 import { renderState } from "$lib/render/renderState.svelte";
 import { stageState } from "$lib/stage/stageState.svelte";
-import { disposeGizmo, frameSyncGizmo, gizmoPolicy, initGizmo } from "$lib/render/gizmoCommit.svelte";
+import {
+  disposeGizmo,
+  frameSyncGizmo,
+  gateCommitStageRefresh,
+  gizmoPolicy,
+  initGizmo,
+} from "$lib/render/gizmoCommit.svelte";
+import { refreshSceneAfterEdit } from "$lib/render/sceneIntegration";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
 import type { PrimDetails, RenderNode } from "$lib/stage/types";
 
@@ -148,6 +155,9 @@ function releaseWrites(n = 1) {
 
 let holdNextManifests = 0;
 const heldManifests: (() => void)[] = [];
+// Every get_scene_manifest invocation: the mid-commit assertions count
+// refreshes, so a held fetch counts when it is issued, not when it lands.
+let manifestCalls = 0;
 let holdNextDetails = 0;
 const heldDetails: (() => void)[] = [];
 
@@ -174,6 +184,7 @@ function installBackend() {
   mockedInvoke.mockImplementation((async (cmd: string, args: any) => {
     switch (cmd) {
       case "get_scene_manifest": {
+        manifestCalls += 1;
         const snap = manifestSnapshot();
         if (holdNextManifests > 0) {
           holdNextManifests -= 1;
@@ -340,6 +351,7 @@ beforeEach(() => {
   failWriteName = null;
   holdNextManifests = 0;
   heldManifests.length = 0;
+  manifestCalls = 0;
   holdNextDetails = 0;
   heldDetails.length = 0;
   mode = "translate";
@@ -545,6 +557,51 @@ describe("a partially authored commit lands on stage truth", () => {
       expect(Math.abs(elements[i] - truth[i])).toBeLessThan(1e-6);
     }
     expect(truth).not.toEqual(latch); // control: the two poses genuinely differ
+  });
+});
+
+describe("a multi-write commit refreshes the scene once, after its writes", () => {
+  // The viewport's usd-stage-changed listener, gate included: one event
+  // per write IPCs, so an ungated listener refreshes MID-COMMIT and
+  // renders the intermediate pose (a fresh rotateXYZ value the order does
+  // not carry yet composes as the original pose — the release snap-back).
+  function viewportListener() {
+    onWrite = () => {
+      if (gateCommitStageRefresh([PATH])) return;
+      void refreshSceneAfterEdit(viewer, [PATH]);
+    };
+  }
+
+  it("runs no manifest fetch while the write IPCs are in flight", async () => {
+    viewportListener();
+    await boot();
+    const before = manifestCalls;
+    // Fresh stack: the rotate creates xformOp:rotateXYZ and authors
+    // xformOpOrder, so the commit is two writes and two events.
+    mode = "rotate";
+    holdNextWrites = 2;
+    beginDrag((p) => {
+      p.rotation.z += Math.PI / 2;
+    });
+    const pending = endDrag();
+    await flush();
+    releaseWrites(1);
+    await flush();
+
+    // Write 1 landed, the order has not: a refresh here renders the
+    // ORIGINAL pose, which is exactly the flicker.
+    expect(stage.order).toEqual([]);
+    expect(stage.rotateXYZ[2]).toBeCloseTo(90, 6);
+    expect(manifestCalls, "a mid-commit event refreshed the scene").toBe(before);
+
+    releaseWrites(1);
+    await pending;
+    await flush();
+    await flush();
+
+    // One refresh for the whole commit, over the edited prim.
+    expect(manifestCalls).toBe(before + 1);
+    expect(node().matrix.elements[0]).toBeCloseTo(0, 6); // Rz(90) applied
   });
 });
 
