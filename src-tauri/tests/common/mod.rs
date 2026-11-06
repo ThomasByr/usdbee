@@ -37,6 +37,12 @@ impl TestOwner {
             .expect("a stage should be open")
     }
 
+    pub fn stage_tree_serializations(&self) -> usize {
+        self.state
+            .stage_tree_serializations(self.id.get())
+            .expect("a stage should be open")
+    }
+
     /// Open a stage through the full flow (is_usdz origin flag, source
     /// archive, cleanup-owned extraction dir) and track its id.
     pub fn open_flow(

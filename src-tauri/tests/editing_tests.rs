@@ -2107,6 +2107,145 @@ fn undo_reverts_an_authored_value_and_drains() {
     assert_eq!(paths, vec!["/World/Ball".to_string()]);
 }
 
+// The gizmo's undo/redo pair: a default-time xform write reverts a matrix, so
+// the reverted state can falsify neither the tree shape nor any sibling
+// skeleton fact — the same reasoning the SetValue warm arm rests on (see
+// .agents/knowledge/gizmo-edit-commit-costs.md). The tree serialization
+// counter is the observable: a kept tree means no serialize_tree walk, so the
+// undo button costs ~0.4 ms instead of ~700 ms on a big scene.
+#[test]
+fn undo_and_redo_of_a_default_time_xform_write_keep_the_tree() {
+    let (state, events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+
+    // Two fetches: the first serializes, the second is served from the cache
+    // (the counter counts builds, not replies).
+    request_stage_tree(&state.sender()).expect("tree should serialize");
+    request_stage_tree(&state.sender()).expect("tree should serialize");
+    assert_eq!(
+        state.stage_tree_serializations(),
+        1,
+        "one build serves every cached reply"
+    );
+
+    // Prime the mesh cache so the warm path's own clear stays observable.
+    request_geometry_data(&state.sender(), "/World/Ball", None).expect("geometry fetches");
+    let tessellations_before_write = state.mesh_tessellations();
+
+    // `/World` already authors `xformOp:translate`, so the undo has a root
+    // opinion to compose back to.
+    request_set_value(
+        &state,
+        "/World",
+        "xformOp:translate",
+        payload("double3", serde_json::json!([9.0, 0.0, 0.0])),
+        None,
+    )
+    .expect("a default-time xform write should succeed");
+    let paths = events
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the mutation emits usd-stage-changed");
+    assert_eq!(paths, vec!["/World".to_string()]);
+    assert_eq!(
+        state.stage_tree_serializations(),
+        1,
+        "the write kept the tree"
+    );
+
+    // The warm write still clears the mesh cache (tessellation may bake
+    // transform-dependent skinning), and the refetch re-primes it.
+    request_geometry_data(&state.sender(), "/World/Ball", None).expect("geometry refetches");
+    assert!(
+        state.mesh_tessellations() > tessellations_before_write,
+        "the write cleared the mesh cache: {} vs {}",
+        state.mesh_tessellations(),
+        tessellations_before_write
+    );
+    let tessellations_before_undo = state.mesh_tessellations();
+
+    assert!(request_undo(&state).expect("undo should succeed"));
+    let details = details_via_owner(&state, "/World", None);
+    assert_eq!(
+        attribute(&details, "xformOp:translate").value.data,
+        serde_json::json!([1.0, 2.0, 3.0]),
+        "the root layer's original translate composes again"
+    );
+    let paths = events
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("undo emits usd-stage-changed too");
+    assert_eq!(paths, vec!["/World".to_string()]);
+    // The regression this pins: a coarse after_mutation would have emptied
+    // the tree, so this fetch would count a second serialization.
+    request_stage_tree(&state.sender()).expect("tree should serialize");
+    assert_eq!(
+        state.stage_tree_serializations(),
+        1,
+        "undoing an xform write keeps the tree"
+    );
+
+    // The tree survives the undo, the tessellations do not.
+    request_geometry_data(&state.sender(), "/World/Ball", None).expect("geometry refetches");
+    assert!(
+        state.mesh_tessellations() > tessellations_before_undo,
+        "undo cleared the mesh cache: {} vs {}",
+        state.mesh_tessellations(),
+        tessellations_before_undo
+    );
+    let tessellations_before_redo = state.mesh_tessellations();
+
+    assert!(request_redo(&state).expect("redo should succeed"));
+    let details = details_via_owner(&state, "/World", None);
+    assert_eq!(
+        attribute(&details, "xformOp:translate").value.data,
+        serde_json::json!([9.0, 0.0, 0.0])
+    );
+    let paths = events
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("redo emits usd-stage-changed too");
+    assert_eq!(paths, vec!["/World".to_string()]);
+    request_stage_tree(&state.sender()).expect("tree should serialize");
+    assert_eq!(
+        state.stage_tree_serializations(),
+        1,
+        "redoing an xform write keeps the tree"
+    );
+    request_geometry_data(&state.sender(), "/World/Ball", None).expect("geometry refetches");
+    assert!(
+        state.mesh_tessellations() > tessellations_before_redo,
+        "redo cleared the mesh cache: {} vs {}",
+        state.mesh_tessellations(),
+        tessellations_before_redo
+    );
+}
+
+// The cold control: any other mutation can reshape the composed tree, so its
+// undo keeps the coarse clear.
+#[test]
+fn undo_of_a_non_xform_write_rebuilds_the_tree() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+
+    request_stage_tree(&state.sender()).expect("tree should serialize");
+    assert_eq!(state.stage_tree_serializations(), 1);
+
+    request_set_value(
+        &state,
+        "/World/Ball",
+        "radius",
+        payload("float", serde_json::json!(2.5)),
+        None,
+    )
+    .expect("setting an authored float should succeed");
+    assert!(request_undo(&state).expect("undo should succeed"));
+
+    request_stage_tree(&state.sender()).expect("tree should serialize");
+    assert_eq!(
+        state.stage_tree_serializations(),
+        2,
+        "a non-xform undo rebuilds the tree exactly once"
+    );
+}
+
 // Creating an attribute (spec + value) is ONE undo step: a create + set
 // split across two transactions would leave a half-created attribute after
 // one undo.

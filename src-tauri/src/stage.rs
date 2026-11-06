@@ -218,6 +218,11 @@ struct MutationEntry {
     layer: String,
     diffs: Vec<Diff>,
     path: String,
+    // The mutation was a default-time xform op / order write, so reverting it
+    // (undo) or re-applying it (redo) cannot reshape the tree or falsify a
+    // sibling skeleton fact — the undo/redo arms keep the warm caches, as the
+    // SetValue arm did when it recorded the entry.
+    warm_xform: bool,
 }
 
 /// Per-layer unsaved-edit bookkeeping: `applied` counts the mutations
@@ -340,6 +345,10 @@ struct StageHandle {
     // tessellation work without reaching into the owner thread; used by
     // the dedup pin.
     tessellations: Arc<AtomicUsize>,
+    // Tree serialize_tree calls since the last Open: a cache-miss count, so
+    // tests can tell a kept stage_tree from a rebuilt one (the warm-path
+    // pins). Cold clears and rebuilds leave it where it was.
+    tree_serializations: Arc<AtomicUsize>,
 }
 
 impl StageState {
@@ -372,6 +381,15 @@ impl StageState {
             .ok_or_else(|| format!("no stage {}", stage_id))
     }
 
+    pub fn stage_tree_serializations(&self, stage_id: u64) -> Result<usize, String> {
+        self.stages
+            .lock()
+            .map_err(|_| "stage map lock poisoned".to_string())?
+            .get(&stage_id)
+            .map(|handle| handle.tree_serializations.load(Ordering::Relaxed))
+            .ok_or_else(|| format!("no stage {}", stage_id))
+    }
+
     /// The dependency scan of one open stage, from its own owner: the scan
     /// walks the layers the owner parsed, so the caller pays no second
     /// parse of the root layer.
@@ -400,7 +418,14 @@ impl StageState {
         let stage_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
         let tessellations = Arc::new(AtomicUsize::new(0));
-        spawn_stage_owner_for(stage_id, self.sink.clone(), receiver, tessellations.clone());
+        let tree_serializations = Arc::new(AtomicUsize::new(0));
+        spawn_stage_owner_for(
+            stage_id,
+            self.sink.clone(),
+            receiver,
+            tessellations.clone(),
+            tree_serializations.clone(),
+        );
         self.stages
             .lock()
             .map_err(|_| "stage map lock poisoned".to_string())?
@@ -409,6 +434,7 @@ impl StageState {
                 StageHandle {
                     sender: sender.clone(),
                     tessellations,
+                    tree_serializations,
                 },
             );
         let (reply, response) = mpsc::channel();
@@ -518,6 +544,7 @@ fn spawn_stage_owner_for(
     event_sink: StageEventSink,
     receiver: mpsc::Receiver<StageRequest>,
     tessellations: Arc<AtomicUsize>,
+    tree_serializations: Arc<AtomicUsize>,
 ) {
     let owner_counter = tessellations.clone();
     thread::spawn(move || {
@@ -612,6 +639,7 @@ fn spawn_stage_owner_for(
                         undo_journal.clear();
                         redo_stack.clear();
                         owner_counter.store(0, Ordering::Relaxed);
+                        tree_serializations.store(0, Ordering::Relaxed);
                         // The session layer file this open created: the
                         // owner deletes it on Shutdown (the ride-along
                         // temp-file cleanup — session edits are never
@@ -631,6 +659,9 @@ fn spawn_stage_owner_for(
                                 // A failed build leaves the cache empty, so
                                 // the next call retries instead of serving it.
                                 stage_tree = Some(serialize_tree(stage)?);
+                                // Only the rebuild counts: a cache hit is the
+                                // warm keep this counter exists to pin.
+                                tree_serializations.fetch_add(1, Ordering::Relaxed);
                             }
                             match stage_tree {
                                 // Clone-on-reply: the cache keeps its own copy.
@@ -815,14 +846,6 @@ fn spawn_stage_owner_for(
                         if let (Some(ref stage), Some(ref replay)) =
                             (&current_stage, &current_replay)
                         {
-                            record_user_mutation(
-                                replay,
-                                &mut undo_journal,
-                                &mut redo_stack,
-                                &mut dirty_ledger,
-                                stage.edit_target().layer_identifier(),
-                                &path,
-                            );
                             // Decided before the warm/cold split so both arms
                             // announce the same path: a prototype-subtree
                             // edit must reach the frontend as a full rebuild.
@@ -836,15 +859,25 @@ fn spawn_stage_owner_for(
                             // Only the edited prim's cached static transform
                             // can go stale. Sampled writes and every other
                             // mutation keep the coarse clear.
-                            if time.is_none()
-                                && (name == "xformOpOrder" || name.starts_with("xformOp:"))
-                            {
-                                // shortcut: coarse clear — tessellation may bake
-                                // transform-dependent skinning
-                                mesh_cache.clear();
-                                invalidate_skeleton_transform(&mut manifest_skeleton, &path);
-                                resolve_memo.clear();
-                                emit_stage_changed(&sink, &emitted);
+                            let warm_xform = time.is_none()
+                                && (name == "xformOpOrder" || name.starts_with("xformOp:"));
+                            record_user_mutation(
+                                replay,
+                                &mut undo_journal,
+                                &mut redo_stack,
+                                &mut dirty_ledger,
+                                stage.edit_target().layer_identifier(),
+                                &path,
+                                warm_xform,
+                            );
+                            if warm_xform {
+                                warm_xform_keep(
+                                    &sink,
+                                    &mut mesh_cache,
+                                    &mut manifest_skeleton,
+                                    &mut resolve_memo,
+                                    &emitted,
+                                );
                             } else {
                                 after_mutation(
                                     &sink,
@@ -883,6 +916,7 @@ fn spawn_stage_owner_for(
                                 &mut dirty_ledger,
                                 stage.edit_target().layer_identifier(),
                                 &path,
+                                false,
                             );
                             after_mutation(
                                 &sink,
@@ -925,6 +959,7 @@ fn spawn_stage_owner_for(
                                 &mut dirty_ledger,
                                 stage.edit_target().layer_identifier(),
                                 &path,
+                                false,
                             );
                             after_mutation(
                                 &sink,
@@ -961,6 +996,7 @@ fn spawn_stage_owner_for(
                                 &mut dirty_ledger,
                                 stage.edit_target().layer_identifier(),
                                 &path,
+                                false,
                             );
                             after_mutation(
                                 &sink,
@@ -1062,15 +1098,29 @@ fn spawn_stage_owner_for(
                             Some(entry) => {
                                 dirty_ledger.record_undo(&entry.layer);
                                 let path = entry.path.clone();
+                                let warm_xform = entry.warm_xform;
                                 redo_stack.push(entry);
-                                after_mutation(
-                                    &sink,
-                                    &mut mesh_cache,
-                                    &mut manifest_skeleton,
-                                    &mut stage_tree,
-                                    &mut resolve_memo,
-                                    &path,
-                                );
+                                // Reverting a default-time xform write is the
+                                // same edit in reverse: the warm keep holds
+                                // (undo used to pay the coarse clear too).
+                                if warm_xform {
+                                    warm_xform_keep(
+                                        &sink,
+                                        &mut mesh_cache,
+                                        &mut manifest_skeleton,
+                                        &mut resolve_memo,
+                                        &path,
+                                    );
+                                } else {
+                                    after_mutation(
+                                        &sink,
+                                        &mut mesh_cache,
+                                        &mut manifest_skeleton,
+                                        &mut stage_tree,
+                                        &mut resolve_memo,
+                                        &path,
+                                    );
+                                }
                             }
                             None => {
                                 // The UndoStage reverted a transaction the
@@ -1122,15 +1172,28 @@ fn spawn_stage_owner_for(
                                 replay.clear();
                                 dirty_ledger.record_mutation(&entry.layer);
                                 let path = entry.path.clone();
+                                let warm_xform = entry.warm_xform;
                                 push_bounded(&mut undo_journal, entry);
-                                after_mutation(
-                                    &sink,
-                                    &mut mesh_cache,
-                                    &mut manifest_skeleton,
-                                    &mut stage_tree,
-                                    &mut resolve_memo,
-                                    &path,
-                                );
+                                // Re-applying a default-time xform write keeps
+                                // the warm caches, like the write itself.
+                                if warm_xform {
+                                    warm_xform_keep(
+                                        &sink,
+                                        &mut mesh_cache,
+                                        &mut manifest_skeleton,
+                                        &mut resolve_memo,
+                                        &path,
+                                    );
+                                } else {
+                                    after_mutation(
+                                        &sink,
+                                        &mut mesh_cache,
+                                        &mut manifest_skeleton,
+                                        &mut stage_tree,
+                                        &mut resolve_memo,
+                                        &path,
+                                    );
+                                }
                             } else {
                                 redo_stack.push(entry);
                             }
@@ -1190,6 +1253,7 @@ fn spawn_stage_owner_for(
                                 &mut dirty_ledger,
                                 imported_layer,
                                 "/",
+                                false,
                             );
                             after_mutation(
                                 &sink,
@@ -1643,6 +1707,26 @@ fn emit_stage_changed(sink: &Option<StageChangeSink>, path: &str) {
     }
 }
 
+/// The caches a default-time xform edit (and its undo/redo) can keep: the
+/// prim tree holds no transform-derived field and no other prim's skeleton
+/// facts depend on this one's matrix, so only the edited prim's cached static
+/// transform goes, together with the transform-dependent tessellations and the
+/// path resolutions.
+fn warm_xform_keep(
+    sink: &Option<StageChangeSink>,
+    mesh_cache: &mut MeshCache,
+    manifest_skeleton: &mut Option<ManifestSkeleton>,
+    resolve_memo: &mut ResolveMemo,
+    path: &str,
+) {
+    // shortcut: coarse clear — tessellation may bake transform-dependent
+    // skinning
+    mesh_cache.clear();
+    invalidate_skeleton_transform(manifest_skeleton, path);
+    resolve_memo.clear();
+    emit_stage_changed(sink, path);
+}
+
 /// Undo the one cached fact a default-time xform write can falsify: the edited
 /// prim's static local matrix. `None` sends the walks back to the per-call
 /// `local_transform`, which reads the live stage. A path the kept facts miss
@@ -1668,7 +1752,8 @@ fn invalidate_skeleton_transform(skeleton: &mut Option<ManifestSkeleton>, path: 
 /// produced no diff ops authored nothing, so it left no UndoStage entry
 /// either — nothing joins the journal (the ledger still counts it, matching
 /// the pre-undo behavior of marking the edit target dirty on every
-/// successful arm).
+/// successful arm). `warm_xform` rides along so the undo/redo arms can keep
+/// the caches the mutation itself kept.
 fn record_user_mutation(
     replay: &ReplayStage,
     journal: &mut VecDeque<MutationEntry>,
@@ -1676,6 +1761,7 @@ fn record_user_mutation(
     ledger: &mut LayerLedger,
     layer: &str,
     path: &str,
+    warm_xform: bool,
 ) {
     let diffs = replay.diff();
     replay.clear();
@@ -1689,6 +1775,7 @@ fn record_user_mutation(
             layer: layer.to_owned(),
             diffs,
             path: path.to_owned(),
+            warm_xform,
         },
     );
     redo.clear();
