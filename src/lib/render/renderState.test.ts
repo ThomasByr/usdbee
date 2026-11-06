@@ -1779,7 +1779,7 @@ describe("renderState pose prefetch", () => {
     expect(renderState.error).toBeNull();
   });
 
-  it("holds a playback step while a batch is in flight instead of single-fetching", async () => {
+  it("holds only on an in-flight batch (the epoch guard is the sole hold branch)", async () => {
     const group = await loadedScene();
     const pending = deferred<ArrayBuffer>();
     mockedInvoke.mockImplementation(async (cmd: string) => {
@@ -1833,6 +1833,42 @@ describe("renderState pose prefetch", () => {
     });
     const wrapper = group.children.find((child) => child.name === "/Scene/Wobble")!;
     expect(wrapper.matrix.elements[12]).toBe(4);
+  });
+
+  it("drains a queued playback step with its hold policy, not a single fetch", async () => {
+    const group = await loadedScene();
+    mockIpc(() => [wobbleAt(3)]);
+    await prefetchPoses(1); // 2..13 buffered
+
+    const posePending = deferred<ArrayBuffer>();
+    const batchPending = deferred<ArrayBuffer>();
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_animated_pose_batch") return batchPending.promise;
+      if (cmd === "get_animated_pose") return posePending.promise;
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    const step = renderState.setStageTime(17); // outside the window: in flight
+    const batch = prefetchPoses(10); // 14..19 on the wire
+    // Queued behind the active step: the drain replays it with the playback
+    // driver's policy (holdOnMiss), which is the whole point of QueuedStep.
+    const queued = renderState.setStageTime(18, true);
+    mockedInvoke.mockClear();
+
+    posePending.resolve(poseFrame([wobbleAt(4)], packedBatchGeometry(1, 1)));
+    await step;
+    await queued;
+
+    // The drain must not single-fetch code 18: it would queue in front of the
+    // batch that is about to deliver it.
+    expect(mockedInvoke).not.toHaveBeenCalled();
+    const wrapper = group.children.find((child) => child.name === "/Scene/Wobble")!;
+    expect(wrapper.matrix.elements[12]).toBe(4); // step 17 applied, 18 held
+
+    batchPending.resolve(
+      poseBatch(codes.slice(14, 20).map(() => poseFrame([wobbleAt(9)], packedBatchGeometry(1, 1)))),
+    );
+    await batch;
   });
 
   it("still single-fetches a paused scrub: nothing would retry a hold", async () => {

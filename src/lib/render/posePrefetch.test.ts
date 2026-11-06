@@ -23,11 +23,17 @@ function poses(count: number, from = 0): AnimatedPose[] {
 
 const CODES = Array.from({ length: 40 }, (_, i) => i);
 
-// A claimed batch settled with one pose per requested code.
+// A claimed batch settled with one pose per requested code. Every test that
+// claims also settles: the in-flight guard is global and only a settle (or a
+// wedged invoke) releases it, so a leftover claim would starve the next test.
 function fillAt(code: number) {
   const claimed = claimPoseBatch(CODES, code)!;
   settlePoseBatch(claimed, poses(claimed.times.length));
   return claimed;
+}
+
+function settleAll(claimed: ReturnType<typeof claimPoseBatch>) {
+  settlePoseBatch(claimed!, poses(claimed!.times.length));
 }
 
 beforeEach(() => {
@@ -48,11 +54,24 @@ describe("the look-ahead buffer", () => {
   });
 
   it("claims the next K codes after the playhead, never the playhead itself", () => {
-    expect(claimPoseBatch(CODES, 0)!.times).toEqual(CODES.slice(1, 1 + POSE_PREFETCH));
+    const claimed = claimPoseBatch(CODES, 0)!;
+    expect(claimed.times).toEqual(CODES.slice(1, 1 + POSE_PREFETCH));
+    settleAll(claimed);
+  });
+
+  it("never claims a code the buffer already holds", () => {
+    fillAt(0); // 1..12 held
+    takePose(1);
+
+    const claimed = claimPoseBatch(CODES, 1)!;
+    expect(claimed.times).toEqual(CODES.slice(13, 13 + POSE_PREFETCH));
+    settleAll(claimed);
   });
 
   it("clamps the request at the stage's last code instead of wrapping", () => {
-    expect(claimPoseBatch(CODES, 37)!.times).toEqual([38, 39]);
+    const claimed = claimPoseBatch(CODES, 37)!;
+    expect(claimed.times).toEqual([38, 39]);
+    settleAll(claimed);
   });
 
   it("claims nothing from the last code, an unauthored code, or an empty list", () => {
@@ -68,14 +87,15 @@ describe("the look-ahead buffer", () => {
     expect(poseCoverage(12)).toBe(0);
   });
 
-  it("never holds more than K codes of coverage", () => {
+  it("tops up to at most 2K - 1 codes of coverage", () => {
     fillAt(0);
     expect(poseCoverage(0)).toBe(POSE_PREFETCH);
-    // A partly consumed window re-claims; the new window stays K wide.
+    // A partly consumed window re-claims, but only the codes it does not hold:
+    // what is still held plus K fetched ones, bounded by 2K - 1.
     for (let code = 1; code <= 7; code++) takePose(code);
     fillAt(7);
-    expect(poseCoverage(7)).toBe(POSE_PREFETCH);
-    expect(poseCoverage(0)).toBeLessThanOrEqual(POSE_PREFETCH);
+    expect(poseCoverage(7)).toBe(5 + POSE_PREFETCH);
+    expect(poseCoverage(7)).toBeLessThanOrEqual(2 * POSE_PREFETCH - 1);
   });
 
   it("keeps one batch in flight at a time", () => {
@@ -85,7 +105,10 @@ describe("the look-ahead buffer", () => {
 
     settlePoseBatch(claimed!, poses(claimed!.times.length));
     invalidatePoseBuffer();
-    expect(claimPoseBatch(CODES, 0)).not.toBeNull();
+    // The settle released the guard, so the new generation can claim.
+    const fresh = claimPoseBatch(CODES, 0);
+    expect(fresh).not.toBeNull();
+    settleAll(fresh);
   });
 
   it("tops up as soon as one pose of the window is consumed", () => {
@@ -94,7 +117,10 @@ describe("the look-ahead buffer", () => {
 
     takePose(1);
     expect(poseCoverage(1)).toBe(POSE_PREFETCH - 1);
-    expect(claimPoseBatch(CODES, 1)).not.toBeNull();
+    // The 11 buffered codes are not re-transferred; the batch refills ahead.
+    const claimed = claimPoseBatch(CODES, 1)!;
+    expect(claimed.times).toEqual(CODES.slice(13, 13 + POSE_PREFETCH));
+    settleAll(claimed);
   });
 
   it("claims nothing while the top-up batch is in flight", () => {
@@ -109,14 +135,14 @@ describe("the look-ahead buffer", () => {
     settlePoseBatch(topUp!, poses(topUp!.times.length));
   });
 
-  it("stops re-claiming a tail window the buffer already holds", () => {
+  it("claims nothing once every code at the stage's tail is held", () => {
     fillAt(37); // 38,39 — a short window at the stage's end
     expect(poseCoverage(37)).toBe(2);
 
     expect(claimPoseBatch(CODES, 37)).toBeNull();
   });
 
-  it("replaces the window on fill so nothing behind the playhead lingers", () => {
+  it("drops the poses behind the playhead so nothing lingers", () => {
     fillAt(0); // 1..12
     const claimed = claimPoseBatch(CODES, 20)!;
     settlePoseBatch(claimed, poses(claimed.times.length));
@@ -151,34 +177,39 @@ describe("the look-ahead buffer", () => {
     expect(claimPoseBatch(CODES, 0)).toBeNull();
 
     invalidatePoseBuffer();
-    expect(claimPoseBatch(CODES, 0)).not.toBeNull();
+    const fresh = claimPoseBatch(CODES, 0);
+    expect(fresh).not.toBeNull();
+    settleAll(fresh);
   });
 
   it("keeps prefetching in the new generation after a stale batch fails", () => {
     const stale = claimPoseBatch(CODES, 0)!;
-    // A scrub / stage switch while that batch is still in flight.
+    // A scrub / stage switch while that batch is still in flight: the stale
+    // batch is on the wire, so no second one is claimed on top of it.
     invalidatePoseBuffer();
+    expect(claimPoseBatch(CODES, 0)).toBeNull();
+
+    // The pre-scrub batch rejects late: its failure belongs to the old epoch,
+    // so the new generation keeps prefetching.
+    settlePoseBatch(stale, null);
     const fresh = claimPoseBatch(CODES, 0)!;
     settlePoseBatch(fresh, poses(fresh.times.length)); // window 1..12
-
-    // The pre-scrub batch rejects late: its failure belongs to the old epoch.
-    settlePoseBatch(stale, null);
     expect(poseCoverage(0)).toBe(POSE_PREFETCH);
-
-    for (let code = 1; code <= 7; code++) takePose(code); // coverage 5
-    expect(claimPoseBatch(CODES, 7)).not.toBeNull();
   });
 });
 
 describe("holding a playback step on a miss", () => {
   it("holds while a batch is in flight", () => {
-    claimPoseBatch(CODES, 0); // in flight, nothing buffered yet
+    const claimed = claimPoseBatch(CODES, 0); // in flight, nothing buffered yet
     expect(holdsPoseStep(CODES, 5)).toBe(true);
+    settleAll(claimed);
   });
 
-  it("holds for a code a fresh claim can still cover", () => {
-    // No batch in flight: the driver claims on this very frame.
-    expect(holdsPoseStep(CODES, 20)).toBe(true);
+  it("does not hold on a cold buffer: a seed fetch beats an unissued claim", () => {
+    // Nothing in flight (cold start, first frame after a wrap): waiting for a
+    // claim that has not been issued costs the batch wall (~260 ms), the seed
+    // fetch ~145 ms with nothing to queue behind.
+    expect(holdsPoseStep(CODES, 20)).toBe(false);
   });
 
   it("does not hold for a pose already in hand", () => {
@@ -197,11 +228,15 @@ describe("holding a playback step on a miss", () => {
     expect(holdsPoseStep(CODES, 5)).toBe(false);
   });
 
-  it("does not hold for an unauthored code, and re-arms after an invalidation", () => {
+  it("does not hold for an unauthored code, and re-arms once a claim is issued", () => {
     expect(holdsPoseStep(CODES, 1.5)).toBe(false);
 
     fillAt(0);
     invalidatePoseBuffer();
+    expect(holdsPoseStep(CODES, 5)).toBe(false); // nothing on the wire
+
+    const claimed = claimPoseBatch(CODES, 1); // the driver claims on this frame
     expect(holdsPoseStep(CODES, 5)).toBe(true);
+    settleAll(claimed);
   });
 });

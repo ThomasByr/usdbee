@@ -295,7 +295,8 @@ describe("installPlaybackDriver pose prefetch", () => {
     expect(batchCalls()).toHaveLength(1);
 
     // One pose consumed: the window is one short, so the next frame claims
-    // again — the refill margin is no longer shorter than the batch itself.
+    // again — the refill margin is no longer shorter than the batch itself,
+    // and it asks only for the codes the buffer does not hold.
     takePose(2);
     v.onAdvanceTime!(1 / 24);
 
@@ -303,7 +304,7 @@ describe("installPlaybackDriver pose prefetch", () => {
     expect(batchCalls()).toHaveLength(2);
     expect(batchCalls()[1]![1]).toEqual({
       stageId: stageState.activeStageId,
-      times: codes.slice(3, 3 + 12),
+      times: codes.slice(14, 14 + 12),
     });
 
     // The top-up is still in flight: no third claim, however many frames run.
