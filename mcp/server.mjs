@@ -1,0 +1,271 @@
+// Dev-only MCP bridge: hosts the loopback WS port the app's dev bridge dials
+// into, and exposes those commands as MCP tools over stdio. Loopback only, no
+// auth (local dev tool; the app side is import.meta.env.DEV gated).
+import { spawn as spawnChild } from "node:child_process";
+import { EventEmitter, once } from "node:events";
+import { closeSync, openSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { WebSocketServer } from "ws";
+import { z } from "zod";
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const DEFAULT_PORT = 9330;
+const CALL_TIMEOUT_MS = 30_000;
+const APP_WAIT_MS = 120_000;
+const APP_POLL_MS = 250;
+const LOG_PATH = "/tmp/usdbee-mcp-dev.log";
+
+const vec3 = z.array(z.number()).length(3);
+
+/** Mirrors the WS command contract; the bridge validates nothing, so these are the enforcement. */
+export const TOOLS = [
+  {
+    name: "status",
+    description: "What the app has open: stage_loaded, stage_id, playing, time (USD time code).",
+    args: {},
+  },
+  {
+    name: "load_scene",
+    description: "Open a USD scene through the app's own load path (errors surface as tool errors).",
+    args: { path: z.string().describe("path to a .usd/.usda/.usdc/.usdz file") },
+  },
+  {
+    name: "unload_scene",
+    description: "Close the active stage without the dirty-scene prompt.",
+    args: {},
+  },
+  {
+    name: "inspect_scene",
+    description: "Prim/geometry/animation counts plus the top of the tree (depth-capped, first ~200 nodes).",
+    args: {
+      max_depth: z.number().int().optional().describe("depth cap, default 3"),
+    },
+  },
+  {
+    name: "search_objects",
+    description: "Case-insensitive substring search over prim paths and names.",
+    args: {
+      query: z.string().describe("substring to look for"),
+      limit: z.number().int().optional().describe("max matches, default 50"),
+    },
+  },
+  {
+    name: "transform_object",
+    description:
+      "Author a prim's local transform through the gizmo path (undo/redo and caches apply). Only the channels given are written.",
+    args: {
+      path: z.string().describe("prim path, e.g. /World/Wheel"),
+      position: vec3.optional().describe("local translation [x,y,z]"),
+      rotation: vec3.optional().describe("local rotation [x,y,z] in degrees"),
+      scale: vec3.optional().describe("local scale [x,y,z]"),
+    },
+  },
+  { name: "play", description: "Start timeline playback.", args: {} },
+  { name: "pause", description: "Pause timeline playback.", args: {} },
+  {
+    name: "set_time",
+    description: "Move the playhead to an absolute USD time code (unsnapped).",
+    args: { time: z.number() },
+  },
+  {
+    name: "get_performance",
+    description: "Frame diagnostics of the render loop, verbatim snapshot.",
+    args: {},
+  },
+  {
+    name: "reset_performance",
+    description: "Clear the frame diagnostics.",
+    args: {},
+  },
+  {
+    name: "screenshot",
+    description: "Render the viewport and return it as a PNG image.",
+    args: {},
+  },
+  {
+    name: "close_app",
+    description: "Close the running app (window state is saved first).",
+    args: {},
+  },
+  {
+    name: "open_app",
+    description: "Start the app in dev mode when nothing is running, and wait for its bridge to connect.",
+    args: {},
+  },
+];
+
+export function spawnApp() {
+  const log = openSync(LOG_PATH, "a");
+  const child = spawnChild("npm", ["run", "tauri", "dev"], {
+    cwd: REPO_ROOT,
+    detached: true,
+    stdio: ["ignore", log, log],
+  });
+  closeSync(log);
+  child.unref();
+  return child;
+}
+
+export class BridgeHost extends EventEmitter {
+  #wss = null;
+  #client = null;
+  #pending = new Map();
+  #nextId = 1;
+  #child = null;
+
+  spawn = spawnApp;
+
+  listen(port = DEFAULT_PORT) {
+    this.#wss = new WebSocketServer({ host: "127.0.0.1", port });
+    this.#wss.on("connection", (socket) => {
+      // One app at a time: a new connection replaces the old one.
+      if (this.#client && this.#client !== socket) this.#client.close();
+      this.#client = socket;
+      socket.on("message", (raw) => this.#onFrame(raw));
+      socket.on("close", () => {
+        if (this.#client === socket) this.#client = null;
+      });
+      socket.on("error", () => {});
+      this.emit("client");
+    });
+    return new Promise((resolvePort, reject) => {
+      this.#wss.once("listening", () => resolvePort(this.#wss.address().port));
+      this.#wss.once("error", reject);
+    });
+  }
+
+  get connected() {
+    return this.#client?.readyState === 1;
+  }
+
+  get spawning() {
+    return this.#child !== null && this.#child.exitCode === null;
+  }
+
+  call(cmd, args = {}, timeoutMs = CALL_TIMEOUT_MS) {
+    if (!this.connected) {
+      return Promise.reject(new Error(`usdbee app not connected to the bridge — call open_app to start it`));
+    }
+    const id = this.#nextId++;
+    return new Promise((resolveCall, rejectCall) => {
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        rejectCall(
+          new Error(
+            `${cmd} timed out after ${timeoutMs}ms — the usdbee app is probably not running or is stuck`,
+          ),
+        );
+      }, timeoutMs);
+      timer.unref?.();
+      this.#pending.set(id, { resolve: resolveCall, reject: rejectCall, timer });
+      this.#client.send(JSON.stringify({ id, cmd, args }));
+    });
+  }
+
+  async openApp({ waitMs = APP_WAIT_MS, pollMs = APP_POLL_MS } = {}) {
+    if (this.connected) return { status: "already-running", log: LOG_PATH };
+    if (this.spawning) {
+      return { status: "already-starting", log: LOG_PATH, pid: this.#child.pid };
+    }
+    const child = this.spawn();
+    this.#child = child;
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      if (this.connected) {
+        return { status: "connected", log: LOG_PATH, pid: child.pid };
+      }
+      if (child.exitCode !== null && child.exitCode !== undefined) {
+        return { status: "app-exited", log: LOG_PATH, exit_code: child.exitCode };
+      }
+      await sleep(pollMs);
+    }
+    return { status: "timeout", log: LOG_PATH, pid: child.pid };
+  }
+
+  close() {
+    for (const [, entry] of this.#pending) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error("bridge server shutting down"));
+    }
+    this.#pending.clear();
+    // The app is left running: only the host this server owns goes away.
+    this.#client?.close();
+    this.#client = null;
+    this.#wss?.close();
+    this.#wss = null;
+  }
+
+  #onFrame(raw) {
+    let frame;
+    try {
+      frame = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
+    const entry = this.#pending.get(frame?.id);
+    if (!entry) return;
+    this.#pending.delete(frame.id);
+    clearTimeout(entry.timer);
+    if (frame.ok) entry.resolve(frame.result);
+    else entry.reject(new Error(String(frame.error ?? "bridge error")));
+  }
+}
+
+export function createMcpServer(host) {
+  const server = new McpServer({ name: "usdbee", version: "0.1.0" });
+  for (const tool of TOOLS) {
+    server.registerTool(
+      tool.name,
+      { description: tool.description, inputSchema: tool.args },
+      async (args) => {
+        const result =
+          tool.name === "open_app" ? await host.openApp() : await host.call(tool.name, args ?? {});
+        if (tool.name === "screenshot") {
+          return {
+            content: [
+              {
+                type: "image",
+                data: String(result?.png_base64 ?? ""),
+                mimeType: "image/png",
+              },
+            ],
+          };
+        }
+        return {
+          content: [{ type: "text", text: JSON.stringify(result ?? {}) }],
+        };
+      },
+    );
+  }
+  return server;
+}
+
+async function main() {
+  const port = Number(process.env.MCP_PORT ?? DEFAULT_PORT);
+  const host = new BridgeHost();
+  await host.listen(port);
+  const server = createMcpServer(host);
+  const transport = new StdioServerTransport();
+  transport.onclose = () => host.close();
+  // The transport never sees stdin EOF, so shut down here: closing the host is
+  // all we owe, the app itself keeps running.
+  const shutdown = () => {
+    host.close();
+    process.exit(0);
+  };
+  process.stdin.on("end", shutdown);
+  process.stdin.on("close", shutdown);
+  await server.connect(transport);
+  process.stderr.write(`usdbee dev bridge on ws://127.0.0.1:${port}\n`);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    process.stderr.write(`${error?.stack ?? error}\n`);
+    process.exit(1);
+  });
+}

@@ -10,6 +10,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "test": "vitest run",
+    "mcp": "node mcp/server.mjs",
     "tauri": "tauri",
     "release": "release-it",
     "format": "npm run format:frontend && npm run format:backend",
@@ -33,6 +34,7 @@
     "three": "^0.183.2"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@release-it/bumper": "^7.0.5",
     "@sveltejs/adapter-static": "^3.0.6",
     "@sveltejs/kit": "^2.9.0",
@@ -43,11 +45,12 @@
     "prettier": "^3.8.1",
     "prettier-plugin-svelte": "^3.5.1",
     "release-it": "^19.2.4",
+    "rimraf": "^6.0.0",
     "svelte": "^5.0.0",
     "svelte-check": "^4.4.5",
     "typescript": "~5.6.2",
     "vite": "^6.0.3",
     "vitest": "^5.0.5",
-    "rimraf": "^6.0.0"
+    "ws": "^8.22.1"
   }
 }
