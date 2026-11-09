@@ -120,7 +120,8 @@ fn check_pose_frame(bytes: &[u8]) -> Result<usize, String> {
         let path = paths
             .get(path_id)
             .ok_or_else(|| format!("pose frame: node {} path id {}", index, path_id))?;
-        if flags & 0b110 == 0b110 && seen.insert(path) {
+        // bit0 has_geometry | bit1 geometry_animated: the batch slots.
+        if flags & 0b011 == 0b011 && seen.insert(path) {
             slots_expected += 1;
         }
         let material_id = take_u32(bytes, &mut at)? as usize;
