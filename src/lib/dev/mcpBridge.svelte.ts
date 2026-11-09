@@ -189,18 +189,30 @@ export async function dispatchCommand(
     case "load_scene": {
       const path = typeof args.path === "string" ? args.path : "";
       if (!path) throw new Error("load_scene needs a path");
-      // The tab open path swallows its failure into the shared error modal;
-      // a new modal message is the only observable load failure here.
-      const before = loadOrchestrator.modalError;
+      // The tab open path swallows its failure into the shared error modal, so
+      // a modal set by this attempt is the only observable load failure. It is
+      // cleared first because a repeat of the same failure leaves it unchanged.
+      loadOrchestrator.modalError = null;
       await tabsState.openTab(path);
       const failure = loadOrchestrator.modalError;
-      if (failure !== before && failure !== null) throw new Error(failure);
+      if (failure !== null) throw new Error(failure);
       if (stageState.status === "error") throw new Error(stageState.error ?? "load failed");
       return { ok: true };
     }
-    case "unload_scene":
-      if (stageState.activeStageId) await tabsState.closeConfirmed(stageState.activeStageId);
+    case "unload_scene": {
+      const stageId = stageState.activeStageId;
+      if (!stageId) return { ok: true };
+      // Same modal contract as load_scene: closeConfirmed reports a failed
+      // close only through the modal.
+      loadOrchestrator.modalError = null;
+      await tabsState.closeConfirmed(stageId);
+      const failure = loadOrchestrator.modalError;
+      if (failure !== null) throw new Error(failure);
+      // It also returns silently when the tab list no longer holds the stage,
+      // so the closed stage has to be confirmed through the active id.
+      if (stageState.activeStageId === stageId) throw new Error(`stage ${stageId} is still open`);
       return { ok: true };
+    }
     case "inspect_scene":
       return inspectScene(args);
     case "search_objects":

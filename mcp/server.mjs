@@ -98,11 +98,14 @@ export const TOOLS = [
   },
 ];
 
-export function spawnApp() {
+export function spawnApp(port = DEFAULT_PORT, spawn = spawnChild) {
   const log = openSync(LOG_PATH, "a");
-  const child = spawnChild("npm", ["run", "tauri", "dev"], {
+  const child = spawn("npm", ["run", "tauri", "dev"], {
     cwd: REPO_ROOT,
     detached: true,
+    // The app's dev bridge dials this same port back (VITE_MCP_PORT is the
+    // name it reads), so a non-default MCP_PORT has to reach the child.
+    env: { ...process.env, VITE_MCP_PORT: String(port) },
     stdio: ["ignore", log, log],
   });
   closeSync(log);
@@ -116,14 +119,19 @@ export class BridgeHost extends EventEmitter {
   #pending = new Map();
   #nextId = 1;
   #child = null;
+  #port = DEFAULT_PORT;
 
   spawn = spawnApp;
 
   listen(port = DEFAULT_PORT) {
     this.#wss = new WebSocketServer({ host: "127.0.0.1", port });
     this.#wss.on("connection", (socket) => {
-      // One app at a time: a new connection replaces the old one.
-      if (this.#client && this.#client !== socket) this.#client.close();
+      // One app at a time: a new connection replaces the old one, and calls
+      // in flight on the replaced socket cannot be answered by anyone now.
+      if (this.#client && this.#client !== socket) {
+        this.#failPending("bridge reconnected — the request was in flight on the replaced connection");
+        this.#client.close();
+      }
       this.#client = socket;
       socket.on("message", (raw) => this.#onFrame(raw));
       socket.on("close", () => {
@@ -133,7 +141,10 @@ export class BridgeHost extends EventEmitter {
       this.emit("client");
     });
     return new Promise((resolvePort, reject) => {
-      this.#wss.once("listening", () => resolvePort(this.#wss.address().port));
+      this.#wss.once("listening", () => {
+        this.#port = this.#wss.address().port;
+        resolvePort(this.#port);
+      });
       this.#wss.once("error", reject);
     });
   }
@@ -171,7 +182,7 @@ export class BridgeHost extends EventEmitter {
     if (this.spawning) {
       return { status: "already-starting", log: LOG_PATH, pid: this.#child.pid };
     }
-    const child = this.spawn();
+    const child = this.spawn(this.#port);
     this.#child = child;
     const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
@@ -187,16 +198,20 @@ export class BridgeHost extends EventEmitter {
   }
 
   close() {
-    for (const [, entry] of this.#pending) {
-      clearTimeout(entry.timer);
-      entry.reject(new Error("bridge server shutting down"));
-    }
-    this.#pending.clear();
+    this.#failPending("bridge server shutting down");
     // The app is left running: only the host this server owns goes away.
     this.#client?.close();
     this.#client = null;
     this.#wss?.close();
     this.#wss = null;
+  }
+
+  #failPending(message) {
+    for (const [, entry] of this.#pending) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error(message));
+    }
+    this.#pending.clear();
   }
 
   #onFrame(raw) {
@@ -247,7 +262,7 @@ export function createMcpServer(host) {
 async function main() {
   const port = Number(process.env.MCP_PORT ?? DEFAULT_PORT);
   const host = new BridgeHost();
-  await host.listen(port);
+  const boundPort = await host.listen(port);
   const server = createMcpServer(host);
   const transport = new StdioServerTransport();
   transport.onclose = () => host.close();
@@ -260,7 +275,7 @@ async function main() {
   process.stdin.on("end", shutdown);
   process.stdin.on("close", shutdown);
   await server.connect(transport);
-  process.stderr.write(`usdbee dev bridge on ws://127.0.0.1:${port}\n`);
+  process.stderr.write(`usdbee dev bridge on ws://127.0.0.1:${boundPort}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { BridgeHost, TOOLS, createMcpServer } from "./server.mjs";
+import { BridgeHost, TOOLS, createMcpServer, spawnApp } from "./server.mjs";
 
 // The contract, written out by hand (not read from TOOLS) so drift fails here.
 // "name?" = optional; "vec3" = array of 3 numbers.
@@ -207,6 +207,23 @@ describe("round-trip", () => {
     await expect(host.call("play", {})).resolves.toEqual({ ok: true });
     expect(first.received).toHaveLength(0);
   });
+
+  it("rejects calls in flight on a replaced connection", async () => {
+    const { host, url } = await makeHost();
+    hosts.push(host);
+    const first = await fakeBridge(url, () => undefined);
+    sockets.push(first.ws);
+    await waitConnected(host);
+
+    const inFlight = expect(host.call("play", {})).rejects.toThrow(/reconnected/);
+    const second = await fakeBridge(url, (frame) => ({
+      id: frame.id,
+      ok: true,
+      result: { ok: true },
+    }));
+    sockets.push(second.ws);
+    await inFlight;
+  });
 });
 
 describe("errors", () => {
@@ -302,7 +319,10 @@ describe("stdio lifecycle", () => {
       ]);
       expect(exitCode).toBe(0);
       const [stderr] = await announced;
-      expect(String(stderr)).toMatch(/ws:\/\/127\.0\.0\.1:0/);
+      // The bound port is printed, not the requested 0.
+      const match = String(stderr).match(/ws:\/\/127\.0\.0\.1:(\d+)/);
+      expect(match).not.toBeNull();
+      expect(Number(match[1])).toBeGreaterThan(0);
     } finally {
       child.kill("SIGKILL");
     }
@@ -310,6 +330,18 @@ describe("stdio lifecycle", () => {
 });
 
 describe("open_app", () => {
+  it("passes the bridge port to the spawned app's env", () => {
+    /** @type {any[][]} */
+    const calls = [];
+    spawnApp(9400, (...args) => {
+      calls.push(args);
+      return { exitCode: null, pid: 7, unref() {} };
+    });
+    const [, , options] = calls[0];
+    expect(options.env.VITE_MCP_PORT).toBe("9400");
+    expect(options.env.PATH).toBe(process.env.PATH);
+  });
+
   it("reports already-running when a bridge is connected", async () => {
     const { host, url } = await makeHost();
     hosts.push(host);
@@ -326,7 +358,7 @@ describe("open_app", () => {
   });
 
   it("spawns once and reports the timeout, then refuses to spawn again", async () => {
-    const { host } = await makeHost();
+    const { host, port } = await makeHost();
     hosts.push(host);
     /** @type {any[]} */
     const spawns = [];
@@ -336,6 +368,8 @@ describe("open_app", () => {
     };
     const first = await host.openApp({ waitMs: 120, pollMs: 20 });
     expect(spawns).toHaveLength(1);
+    // The app is told which port to dial back, even a non-default one.
+    expect(spawns[0]).toEqual([port]);
     expect(first.status).toBe("timeout");
     expect(first.log).toMatch(/usdbee-mcp-dev\.log/);
 

@@ -317,6 +317,14 @@ describe("load_scene", () => {
     await expect(call(viewer(), "load_scene", { path: "/tmp/b.usd" })).rejects.toThrow("Failed to open USD");
   });
 
+  it("surfaces a repeated failure with the same message", async () => {
+    tabs.openTab.mockImplementation(async () => {
+      orchestrator.modalError = "Failed to open USD:\n\nbroken";
+    });
+    await expect(call(viewer(), "load_scene", { path: "/tmp/b.usd" })).rejects.toThrow("Failed to open USD");
+    await expect(call(viewer(), "load_scene", { path: "/tmp/b.usd" })).rejects.toThrow("Failed to open USD");
+  });
+
   it("requires a path", async () => {
     await expect(call(viewer(), "load_scene", {})).rejects.toThrow("path");
     expect(tabs.openTab).not.toHaveBeenCalled();
@@ -325,8 +333,22 @@ describe("load_scene", () => {
 
 describe("unload_scene", () => {
   it("closes the active stage", async () => {
+    tabs.closeConfirmed.mockImplementation(async () => {
+      stage.activeStageId = 0;
+    });
     expect(await call(viewer(), "unload_scene")).toEqual({ ok: true });
     expect(tabs.closeConfirmed).toHaveBeenCalledWith(1);
+  });
+
+  it("surfaces a failed close instead of reporting ok", async () => {
+    tabs.closeConfirmed.mockImplementation(async () => {
+      orchestrator.modalError = "Failed to close stage:\n\nnope";
+    });
+    await expect(call(viewer(), "unload_scene")).rejects.toThrow("Failed to close stage");
+  });
+
+  it("surfaces a close that leaves the stage open", async () => {
+    await expect(call(viewer(), "unload_scene")).rejects.toThrow(/still open/);
   });
 
   it("is a no-op without a stage", async () => {
