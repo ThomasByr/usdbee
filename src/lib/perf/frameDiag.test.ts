@@ -10,12 +10,14 @@ import {
   onPose,
   onPoseApplied,
   onPoseDispatched,
+  onPoseHeld,
   onRaf,
   onRender,
   onPoseResync,
   onThrottled,
   percentile,
   reset,
+  setPrefetchDead,
   setRate,
   snapshot,
 } from "./frameDiag";
@@ -169,6 +171,19 @@ describe("pose pacing", () => {
     expect(s.applyMax).toBe(9);
   });
 
+  it("counts held playback steps and reports a dead prefetch path", () => {
+    expect(snapshot().heldTotal).toBe(0);
+    expect(snapshot().prefetchDead).toBe(false);
+
+    onPoseHeld();
+    onPoseHeld();
+    setPrefetchDead(true);
+
+    const s = snapshot();
+    expect(s.heldTotal).toBe(2);
+    expect(s.prefetchDead).toBe(true);
+  });
+
   it("records the pose dispatch cost", () => {
     onPoseDispatched(1.5);
     onPoseDispatched(2.5);
@@ -192,10 +207,12 @@ describe("snapshot", () => {
     "dispatchP95",
     "droppedCodes",
     "expectedPoseMs",
+    "heldTotal",
     "poseMax",
     "poseN",
     "poseP50",
     "poseP95",
+    "prefetchDead",
     "rafFps",
     "rafMax",
     "rafN",
@@ -241,6 +258,8 @@ describe("snapshot", () => {
     expect(s.droppedCodes).toBe(0);
     expect(s.applyN).toBe(0);
     expect(s.dispatchN).toBe(0);
+    expect(s.heldTotal).toBe(0);
+    expect(s.prefetchDead).toBe(false);
   });
 
   it("keeps the stage rate across a reset, so a reset while paused still reports it", () => {

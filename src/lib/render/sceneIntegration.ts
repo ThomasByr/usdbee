@@ -8,7 +8,7 @@ import {
   snapToTimeCodes,
   toPlayheadOffset,
 } from "$lib/render/renderState.svelte";
-import { invalidatePoseBuffer } from "$lib/render/posePrefetch";
+import { invalidatePoseBuffer, isPrefetchDead } from "$lib/render/posePrefetch";
 import { disposeScene } from "$lib/render/sceneBuilder";
 import { clearTextureCache } from "$lib/render/textureCache";
 import { upAxisRotation } from "$lib/stage/upAxis";
@@ -237,6 +237,7 @@ export function installPlaybackDriver(viewer: RendererKit) {
     // costs a wait for that batch, never a stall. Only a live scene looks
     // ahead — a failed load has nothing to fill.
     if (renderState.status === "ready") void prefetchPoses(next);
+    frameDiag.setPrefetchDead(isPrefetchDead());
   };
 }
 

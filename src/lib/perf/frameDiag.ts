@@ -59,6 +59,8 @@ export interface DiagSnapshot {
   dispatchP50: number;
   dispatchP95: number;
   dispatchMax: number;
+  heldTotal: number;
+  prefetchDead: boolean;
 }
 
 const rafRing = ring(FRAMES);
@@ -74,6 +76,8 @@ let lastPoseAt = -1;
 let lastCodeIdx = -1;
 let throttled = 0;
 let dropped = 0;
+let held = 0;
+let prefetchDead = false;
 let rate = 0;
 
 /** Expected pose interval for the stage rate; 0 when the rate is unknown. */
@@ -156,6 +160,16 @@ export function onPoseDispatched(ms: number) {
   push(dispatchRing, ms);
 }
 
+/** One playback step held on a buffer miss: nothing presented that frame. */
+export function onPoseHeld() {
+  held++;
+}
+
+/** The batch path is off for this generation; the driver reports it per tick. */
+export function setPrefetchDead(dead: boolean) {
+  prefetchDead = dead;
+}
+
 /** Stage rate the pose expectation derives from. */
 export function setRate(tcps: number) {
   rate = tcps;
@@ -178,6 +192,8 @@ export function reset() {
   lastCodeIdx = -1;
   throttled = 0;
   dropped = 0;
+  held = 0;
+  prefetchDead = false;
   // `rate` is a stage property, not a measurement: keep it.
 }
 
@@ -235,5 +251,7 @@ export function snapshot(): DiagSnapshot {
     dispatchP50: dispatch.p50,
     dispatchP95: dispatch.p95,
     dispatchMax: dispatch.max,
+    heldTotal: held,
+    prefetchDead,
   };
 }

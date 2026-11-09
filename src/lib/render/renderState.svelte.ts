@@ -696,6 +696,7 @@ export const renderState = $state({
       holdsPoseStep(this.timeCodes, time)
     ) {
       this.heldTime = time;
+      frameDiag.onPoseHeld();
       return Promise.resolve();
     }
     this.time = time;

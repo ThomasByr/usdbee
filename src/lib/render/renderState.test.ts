@@ -1821,6 +1821,7 @@ describe("renderState pose prefetch", () => {
     // from an external write it must adopt.
     expect(renderState.heldTime).toBe(5);
     const diag = frameDiag.snapshot();
+    expect(diag.heldTotal).toBe(1); // the hold is counted, not inferred
     expect(diag.applyN).toBe(0);
     expect(diag.dispatchN).toBe(0);
     expect(renderState.error).toBeNull();

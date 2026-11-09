@@ -1,13 +1,16 @@
 // posePrefetch tests: the playback look-ahead buffer. Pure module — no mocks,
 // no IPC; the batch fetch itself lives in renderState.
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  POSE_HOLD_DEADLINE_MS,
   POSE_PREFETCH,
   claimPoseBatch,
   holdsPoseStep,
   invalidatePoseBuffer,
+  isPrefetchDead,
   poseCoverage,
+  setHoldClockForTests,
   settlePoseBatch,
   takePose,
 } from "./posePrefetch";
@@ -228,6 +231,16 @@ describe("holding a playback step on a miss", () => {
     expect(holdsPoseStep(CODES, 5)).toBe(false);
   });
 
+  it("reports a dead prefetch path for the rest of its generation", () => {
+    expect(isPrefetchDead()).toBe(false);
+    const claimed = claimPoseBatch(CODES, 0)!;
+    settlePoseBatch(claimed, null);
+    expect(isPrefetchDead()).toBe(true);
+
+    invalidatePoseBuffer();
+    expect(isPrefetchDead()).toBe(false);
+  });
+
   it("does not hold for an unauthored code, and re-arms once a claim is issued", () => {
     expect(holdsPoseStep(CODES, 1.5)).toBe(false);
 
@@ -238,5 +251,83 @@ describe("holding a playback step on a miss", () => {
     const claimed = claimPoseBatch(CODES, 1); // the driver claims on this frame
     expect(holdsPoseStep(CODES, 5)).toBe(true);
     settleAll(claimed);
+  });
+});
+
+describe("the hold deadline", () => {
+  // The deadline is wall-clock: a hold must not outlive the batch's failure to
+  // arrive, so the module's clock is a seam here.
+  let clock = 0;
+
+  beforeEach(() => {
+    clock = 1000;
+    setHoldClockForTests(() => clock);
+  });
+
+  afterEach(() => setHoldClockForTests());
+
+  it("releases the hold once the deadline passes", () => {
+    const claimed = claimPoseBatch(CODES, 0)!; // in flight, nothing buffered
+
+    expect(holdsPoseStep(CODES, 30)).toBe(true);
+    clock += POSE_HOLD_DEADLINE_MS - 1;
+    expect(holdsPoseStep(CODES, 30)).toBe(true);
+    clock += 1;
+    // The driver may now single-fetch: a bounded hitch beats a frozen picture.
+    expect(holdsPoseStep(CODES, 30)).toBe(false);
+
+    settleAll(claimed);
+  });
+
+  it("starts a fresh deadline when the playhead advances to another code", () => {
+    const claimed = claimPoseBatch(CODES, 0)!;
+    expect(holdsPoseStep(CODES, 30)).toBe(true);
+    clock += POSE_HOLD_DEADLINE_MS;
+    expect(holdsPoseStep(CODES, 30)).toBe(false);
+
+    expect(holdsPoseStep(CODES, 31)).toBe(true);
+    clock += POSE_HOLD_DEADLINE_MS - 1;
+    expect(holdsPoseStep(CODES, 31)).toBe(true);
+
+    settleAll(claimed);
+  });
+
+  it("keeps the hold unchanged before the deadline", () => {
+    const claimed = claimPoseBatch(CODES, 0)!;
+    expect(holdsPoseStep(CODES, 30)).toBe(true);
+    clock += POSE_HOLD_DEADLINE_MS / 2;
+    expect(holdsPoseStep(CODES, 30)).toBe(true);
+
+    settleAll(claimed);
+  });
+
+  it("clears the spent deadline when the batch settles", () => {
+    const claimed = claimPoseBatch(CODES, 0)!;
+    expect(holdsPoseStep(CODES, 30)).toBe(true);
+    clock += POSE_HOLD_DEADLINE_MS;
+    expect(holdsPoseStep(CODES, 30)).toBe(false);
+
+    settleAll(claimed); // window 1..12: code 30 is still a miss
+    const next = claimPoseBatch(CODES, 10)!;
+    expect(holdsPoseStep(CODES, 30)).toBe(true); // fresh start, not sticky
+
+    settleAll(next);
+  });
+
+  it("clears the spent deadline once the buffer covers the code", () => {
+    const claimed = claimPoseBatch(CODES, 0)!;
+    expect(holdsPoseStep(CODES, 5)).toBe(true);
+    clock += POSE_HOLD_DEADLINE_MS;
+    expect(holdsPoseStep(CODES, 5)).toBe(false);
+
+    settleAll(claimed); // 5 is buffered now
+    expect(holdsPoseStep(CODES, 5)).toBe(false);
+
+    // Consumed again and a new batch is on the wire: the deadline restarts.
+    takePose(5);
+    const next = claimPoseBatch(CODES, 5)!;
+    expect(holdsPoseStep(CODES, 5)).toBe(true);
+
+    settleAll(next);
   });
 });

@@ -13,6 +13,14 @@ import type { AnimatedPose } from "./sceneBuilder";
 // bike cadence, so a refill never has to outrun playback.
 export const POSE_PREFETCH = 12;
 
+// A hold is a wait for the batch in transit, not a promise it arrives: a slow
+// batch (dev cold walk ~1.4 s) or a dead window after invalidation would
+// otherwise freeze presentation for its whole wall. Past this the driver falls
+// back to the coalesced single-pose fetch (timeStepInFlight keeps singles
+// one-at-a-time, so no transport spiral): dev cold-walk holds become ~300 ms
+// hitches instead of 1.4 s freezes, release hitches stay ~5 ms.
+export const POSE_HOLD_DEADLINE_MS = 250;
+
 // Generation of the buffer: bumped by invalidation so a batch still in flight
 // lands stale and is dropped instead of slotting pre-edit/pre-load poses.
 let epoch = 0;
@@ -27,6 +35,24 @@ let failedEpoch = -1;
 // fill merges them, so nothing valid is dropped; entries behind the playhead
 // are pruned on the next claim, which bounds the map at 2K - 1.
 let buffered = new Map<number, AnimatedPose>();
+// The code the current hold waits on and when it started waiting. Reset by
+// every path that stops holding, so a later hold on the same code starts from
+// zero instead of inheriting a spent deadline.
+let holdCode: number | null = null;
+let holdStartedAt = 0;
+// Injectable so the deadline is testable: vitest cannot fake this module's
+// clock reads.
+let holdNow: () => number = () => performance.now();
+
+/** Test seam: passing nothing restores the real clock. */
+export function setHoldClockForTests(now?: () => number) {
+  holdNow = now ?? (() => performance.now());
+}
+
+/** True while the batch path is off for this generation (last batch failed). */
+export function isPrefetchDead(): boolean {
+  return failedEpoch === epoch;
+}
 
 export interface ClaimedPoseBatch {
   epoch: number;
@@ -37,6 +63,7 @@ export interface ClaimedPoseBatch {
 export function invalidatePoseBuffer() {
   epoch++;
   buffered = new Map();
+  holdCode = null;
 }
 
 /**
@@ -104,11 +131,21 @@ export function claimPoseBatch(codes: readonly number[], code: number): ClaimedP
  * Hold does not imply a refill is coming: on a fully buffered tail window the
  * playhead's last code holds while a claim returns null. Worst case is one
  * skipped pose.
+ *
+ * Bounded: a hold that outlives POSE_HOLD_DEADLINE_MS releases the step, so a
+ * stalled batch cannot park presentation for its whole wall time.
  */
 export function holdsPoseStep(codes: readonly number[], code: number): boolean {
-  if (buffered.has(code)) return false;
-  if (codes.length === 0 || failedEpoch === epoch) return false;
-  return inFlightEpoch === epoch;
+  if (buffered.has(code) || codes.length === 0 || failedEpoch === epoch || inFlightEpoch !== epoch) {
+    holdCode = null;
+    return false;
+  }
+  const now = holdNow();
+  if (holdCode !== code) {
+    holdCode = code;
+    holdStartedAt = now;
+  }
+  return now - holdStartedAt < POSE_HOLD_DEADLINE_MS;
 }
 
 /**
@@ -117,7 +154,11 @@ export function holdsPoseStep(codes: readonly number[], code: number): boolean {
  * the batch is dropped whole rather than slotted onto the wrong codes.
  */
 export function settlePoseBatch(claimed: ClaimedPoseBatch, poses: AnimatedPose[] | null) {
-  if (inFlightEpoch === claimed.epoch) inFlightEpoch = -1;
+  if (inFlightEpoch === claimed.epoch) {
+    inFlightEpoch = -1;
+    // The batch the hold waited on has landed: its deadline is spent.
+    holdCode = null;
+  }
   // Epoch first: a batch that failed before an invalidation says nothing about
   // the generation that replaced it, and marking the new one failed would turn
   // prefetch off for the rest of the session.
