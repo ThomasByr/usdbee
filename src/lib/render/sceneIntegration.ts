@@ -182,6 +182,10 @@ export function installPlaybackDriver(viewer: RendererKit) {
   // inter-pose gap and the held code as dropped.
   let presented: number | null = null;
   viewer.onAdvanceTime = (deltaSeconds: number) => {
+    // Derived state, so it is stamped once per tick before any early return:
+    // a tick that bails out (loading, degenerate stage) would otherwise keep
+    // whatever the last full tick wrote.
+    frameDiag.setPrefetchDead(isPrefetchDead());
     // Main-thread stalls (shader compile, GPU upload) pause the render
     // loop, so THREE.Clock hands us the whole stall as one delta — clamp
     // it or the playhead teleports on the first frame after "ready".
@@ -237,7 +241,6 @@ export function installPlaybackDriver(viewer: RendererKit) {
     // costs a wait for that batch, never a stall. Only a live scene looks
     // ahead — a failed load has nothing to fill.
     if (renderState.status === "ready") void prefetchPoses(next);
-    frameDiag.setPrefetchDead(isPrefetchDead());
   };
 }
 

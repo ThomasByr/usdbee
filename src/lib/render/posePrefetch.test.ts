@@ -279,15 +279,43 @@ describe("the hold deadline", () => {
     settleAll(claimed);
   });
 
-  it("starts a fresh deadline when the playhead advances to another code", () => {
+  it("pins the deadline at 250 ms", () => {
+    // The turn-length budget is what makes a release hitch acceptable; the
+    // behaviour below is expressed against the constant, so pin its value.
+    expect(POSE_HOLD_DEADLINE_MS).toBe(250);
+  });
+
+  it("keeps one deadline across code advances within the same holding state", () => {
     const claimed = claimPoseBatch(CODES, 0)!;
     expect(holdsPoseStep(CODES, 30)).toBe(true);
     clock += POSE_HOLD_DEADLINE_MS;
     expect(holdsPoseStep(CODES, 30)).toBe(false);
 
-    expect(holdsPoseStep(CODES, 31)).toBe(true);
-    clock += POSE_HOLD_DEADLINE_MS - 1;
-    expect(holdsPoseStep(CODES, 31)).toBe(true);
+    // A new code the same batch would have carried: still the same wait, so
+    // the spent deadline stays spent instead of restarting per code.
+    expect(holdsPoseStep(CODES, 31)).toBe(false);
+
+    settleAll(claimed);
+  });
+
+  it("releases the hold after the deadline while the playhead keeps advancing", () => {
+    // The shape playback actually produces: 24 tcps at 60 fps reaches a new
+    // authored code every ~2.5 frames, so a batch that never settles would
+    // restart a per-code deadline forever. Here for the batch's whole 1.4 s
+    // wall: the hold must stop at the deadline, not at the batch's arrival.
+    const claimed = claimPoseBatch(CODES, 0)!; // in flight, never settles
+    const frameMs = 1000 / 60;
+    let continuous = 0;
+    let held = 0;
+    for (let frame = 0; frame < 84; frame++) {
+      clock += frameMs;
+      continuous += 24 / 60;
+      if (holdsPoseStep(CODES, Math.floor(continuous))) held++;
+    }
+
+    // 250 ms at 60 fps is 15 frames; a per-code deadline held 84 of 84.
+    expect(held).toBeLessThanOrEqual(Math.ceil(POSE_HOLD_DEADLINE_MS / frameMs));
+    expect(held).toBeGreaterThan(0);
 
     settleAll(claimed);
   });

@@ -17,8 +17,11 @@ export const POSE_PREFETCH = 12;
 // batch (dev cold walk ~1.4 s) or a dead window after invalidation would
 // otherwise freeze presentation for its whole wall. Past this the driver falls
 // back to the coalesced single-pose fetch (timeStepInFlight keeps singles
-// one-at-a-time, so no transport spiral): dev cold-walk holds become ~300 ms
-// hitches instead of 1.4 s freezes, release hitches stay ~5 ms.
+// one-at-a-time, so no transport spiral) for the poses the hold withheld.
+// What the fallback buys is bounded, not instant: the single queues behind the
+// batch still on the serialized transport, so the hitch is
+// (remaining batch wall) + one ~145 ms fetch. Release hitches stay ~5 ms;
+// the deadline pays off when the batch stalls without holding the transport.
 export const POSE_HOLD_DEADLINE_MS = 250;
 
 // Generation of the buffer: bumped by invalidation so a batch still in flight
@@ -35,10 +38,14 @@ let failedEpoch = -1;
 // fill merges them, so nothing valid is dropped; entries behind the playhead
 // are pruned on the next claim, which bounds the map at 2K - 1.
 let buffered = new Map<number, AnimatedPose>();
-// The code the current hold waits on and when it started waiting. Reset by
-// every path that stops holding, so a later hold on the same code starts from
-// zero instead of inheriting a spent deadline.
-let holdCode: number | null = null;
+// Whether a hold is running and when it started. The clock measures time spent
+// IN the holding state, not time on one code: during a hold the playhead still
+// advances to a new code every ~1.4 frames at 24 tcps / 60 fps, so a per-code
+// stamp would restart on every frame and never trip. Cleared by every path
+// that stops holding (buffer covers the code, batch settles, invalidation,
+// failed generation), so the next hold starts from zero instead of inheriting
+// a spent deadline.
+let holding = false;
 let holdStartedAt = 0;
 // Injectable so the deadline is testable: vitest cannot fake this module's
 // clock reads.
@@ -63,7 +70,7 @@ export interface ClaimedPoseBatch {
 export function invalidatePoseBuffer() {
   epoch++;
   buffered = new Map();
-  holdCode = null;
+  holding = false;
 }
 
 /**
@@ -133,16 +140,19 @@ export function claimPoseBatch(codes: readonly number[], code: number): ClaimedP
  * skipped pose.
  *
  * Bounded: a hold that outlives POSE_HOLD_DEADLINE_MS releases the step, so a
- * stalled batch cannot park presentation for its whole wall time.
+ * stalled batch cannot park presentation for its whole wall time. The deadline
+ * runs from the moment the hold starts, not from the requested code: the
+ * playhead reaches a new code every ~1.4 frames, so a per-code clock would
+ * never expire.
  */
 export function holdsPoseStep(codes: readonly number[], code: number): boolean {
   if (buffered.has(code) || codes.length === 0 || failedEpoch === epoch || inFlightEpoch !== epoch) {
-    holdCode = null;
+    holding = false;
     return false;
   }
   const now = holdNow();
-  if (holdCode !== code) {
-    holdCode = code;
+  if (!holding) {
+    holding = true;
     holdStartedAt = now;
   }
   return now - holdStartedAt < POSE_HOLD_DEADLINE_MS;
@@ -157,7 +167,7 @@ export function settlePoseBatch(claimed: ClaimedPoseBatch, poses: AnimatedPose[]
   if (inFlightEpoch === claimed.epoch) {
     inFlightEpoch = -1;
     // The batch the hold waited on has landed: its deadline is spent.
-    holdCode = null;
+    holding = false;
   }
   // Epoch first: a batch that failed before an invalidation says nothing about
   // the generation that replaced it, and marking the new one failed would turn
