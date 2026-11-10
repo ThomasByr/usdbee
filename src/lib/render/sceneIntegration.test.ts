@@ -20,7 +20,7 @@ import {
   syncLightRig,
 } from "./sceneIntegration";
 import { loadCachedTexture } from "./textureCache";
-import { renderState } from "./renderState.svelte";
+import { renderState, prefetchPoses } from "./renderState.svelte";
 import { invalidatePoseBuffer, poseCoverage, takePose } from "./posePrefetch";
 import * as frameDiag from "../perf/frameDiag";
 import { loadOrchestrator } from "../state/loadOrchestrator.svelte";
@@ -235,6 +235,7 @@ describe("installPlaybackDriver pose prefetch", () => {
 
   // The batch fill lands in microtasks: a macrotask flushes all of them.
   const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const singlePoseCalls = () => mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_animated_pose");
 
   beforeEach(() => {
     invalidatePoseBuffer();
@@ -293,6 +294,35 @@ describe("installPlaybackDriver pose prefetch", () => {
     // The top-up is still in flight: no third claim, however many frames run.
     for (let i = 0; i < 3; i++) v.onAdvanceTime!(1 / 24);
     expect(batchCalls()).toHaveLength(2);
+  });
+
+  it("keeps the load's pre-seed through the first play tick", async () => {
+    // What the load does: claim the window from the parked playhead.
+    await prefetchPoses(0, 24);
+    await flush();
+    expect(poseCoverage(0)).toBe(12);
+
+    const v = viewer();
+    installPlaybackDriver(v);
+    mockedInvoke.mockClear();
+    v.onAdvanceTime!(1 / 24); // presents code 1 from the seed
+
+    // The first tick resyncs the playhead; that must not drop the seed, or
+    // the frame pays a single-pose fetch and the hold deadline bites.
+    expect(singlePoseCalls()).toHaveLength(0);
+    expect(poseCoverage(1)).toBe(11);
+  });
+
+  it("still drops a window that was not claimed from the resync target", async () => {
+    await prefetchPoses(0, 24);
+    await flush();
+
+    const v = viewer();
+    installPlaybackDriver(v);
+    renderState.time = 30; // an external write: a scrub
+    v.onAdvanceTime!(0);
+
+    expect(poseCoverage(30)).toBe(0);
   });
 
   it("drops the look-ahead when the playhead is written externally", async () => {
@@ -396,6 +426,9 @@ describe("installPlaybackDriver on a held code", () => {
       throw new Error(`unexpected command: ${cmd}`);
     });
     await renderState.loadRenderScene(0);
+    // The load pre-seeds the window; these tests drive the hold a cold buffer
+    // takes (after a wrap or a scrub), so start from that state.
+    invalidatePoseBuffer();
   });
 
   // Drives playback to a code the window does not hold, with a refill in

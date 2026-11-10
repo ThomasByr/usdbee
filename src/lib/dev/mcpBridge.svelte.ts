@@ -16,6 +16,7 @@ import { tabsState } from "$lib/state/tabsState.svelte";
 import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
 import { authorLocalTransform } from "$lib/render/gizmoCommit.svelte";
 import * as frameDiag from "$lib/perf/frameDiag";
+import { pingTransport } from "$lib/dev/transportKeepAlive";
 import { renderWithShadowUpdate } from "$lib/three/shadowMapUpdate";
 import type { PrimDetails, RenderNode } from "$lib/stage/types";
 
@@ -233,6 +234,10 @@ export async function dispatchCommand(
     }
     case "get_performance":
       return frameDiag.snapshot();
+    case "ping":
+      // The keep-alive's own invoke, timed from the app side: what an idle
+      // transport charges the next caller.
+      return { ms: await pingTransport() };
     case "reset_performance":
       frameDiag.reset();
       return { ok: true };

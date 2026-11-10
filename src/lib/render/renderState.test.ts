@@ -20,7 +20,7 @@ import {
   toAbsoluteTime,
   toPlayheadOffset,
 } from "./renderState.svelte";
-import { poseCoverage, invalidatePoseBuffer } from "./posePrefetch";
+import { POSE_PREFETCH, poseCoverage, invalidatePoseBuffer } from "./posePrefetch";
 import * as frameDiag from "../perf/frameDiag";
 import { disposeScene, GEOMETRY_BATCH_SIZE } from "./sceneBuilder";
 import type { MaterialInfo, RenderNode } from "../stage/types";
@@ -1754,6 +1754,28 @@ describe("renderState pose prefetch", () => {
   beforeEach(() => {
     invalidatePoseBuffer();
     frameDiag.reset();
+  });
+
+  it("seeds the look-ahead window as soon as the load's codes land", async () => {
+    mockIpc(() => [wobbleAt(1)]);
+    const inner = mockedInvoke.getMockImplementation()!;
+    mockedInvoke.mockImplementation((async (cmd: string, args: any) =>
+      cmd === "get_time_codes" ? codes : inner(cmd, args)) as any);
+
+    await renderState.loadRenderScene();
+
+    // The claim runs while the stage is still idle: the codes fetch is
+    // detached, so this waits for it rather than for the load.
+    await vi.waitFor(() => expect(poseCoverage(0)).toBe(POSE_PREFETCH));
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose_batch", {
+      stageId: stageState.activeStageId,
+      times: codes.slice(1, 1 + POSE_PREFETCH),
+    });
+
+    // The point of the seed: the first step of playback is a buffer hit.
+    mockedInvoke.mockClear();
+    await renderState.setStageTime(1);
+    expect(mockedInvoke).not.toHaveBeenCalled();
   });
 
   it("applies a prefetched pose with no invoke and no dispatch sample", async () => {

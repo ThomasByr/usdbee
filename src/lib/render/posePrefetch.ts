@@ -52,6 +52,11 @@ let inFlightTimes: readonly number[] = [];
 // a spent deadline.
 let holding = false;
 let holdStartedAt = 0;
+// The playhead the window was last claimed from. A resync onto exactly that
+// code does not make the window stale — that is the cold-start seed meeting
+// the first play tick — and dropping it there would pay the transport's
+// first-invoke wake-up on the frame the user asked for.
+let anchoredAt: number | null = null;
 // Whether the current holding episode already gave up at its deadline: the
 // state stays armed (so the deadline is not restarted per code) but the trip
 // is only counted once.
@@ -81,6 +86,12 @@ export function invalidatePoseBuffer() {
   buffered = new Map();
   inFlightTimes = [];
   holding = false;
+  anchoredAt = null;
+}
+
+/** True when the window was claimed from `code` and still serves it. */
+export function poseBufferAnchoredAt(code: number | null): boolean {
+  return anchoredAt !== null && anchoredAt === code;
 }
 
 /**
@@ -185,6 +196,7 @@ export function claimPoseBatch(codes: readonly number[], code: number, tcps = 0)
   if (times.length === 0) return null;
   inFlightEpoch = epoch;
   inFlightTimes = times;
+  anchoredAt = code;
   return { epoch, times };
 }
 

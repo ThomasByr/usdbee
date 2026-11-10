@@ -9,7 +9,12 @@ import {
   snapToPlayableTime,
   toPlayheadOffset,
 } from "$lib/render/renderState.svelte";
-import { holeQueryTime, invalidatePoseBuffer, isPrefetchDead } from "$lib/render/posePrefetch";
+import {
+  holeQueryTime,
+  invalidatePoseBuffer,
+  isPrefetchDead,
+  poseBufferAnchoredAt,
+} from "$lib/render/posePrefetch";
 import { disposeScene } from "$lib/render/sceneBuilder";
 import { clearTextureCache } from "$lib/render/textureCache";
 import { upAxisRotation } from "$lib/stage/upAxis";
@@ -216,9 +221,11 @@ export function installPlaybackDriver(viewer: RendererKit) {
       frameDiag.setRate(tcps);
       frameDiag.onPoseResync(rewound);
       // A scrub, load or edit refresh wrote the playhead: the poses looked
-      // ahead from the one we just left no longer follow it.
+      // ahead from the one we just left no longer follow it — unless the
+      // window was claimed from exactly this code (the cold-start seed meeting
+      // the first play tick), where it does.
       frameDiag.onInvalidate("resync");
-      invalidatePoseBuffer();
+      if (!poseBufferAnchoredAt(renderState.time)) invalidatePoseBuffer();
     }
     // advanceStageTime without codes keeps the advanced value continuous
     // (wrap past end, clamp at start); the query snaps and clamps itself.

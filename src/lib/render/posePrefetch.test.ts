@@ -10,6 +10,7 @@ import {
   holdsPoseStep,
   invalidatePoseBuffer,
   isPrefetchDead,
+  poseBufferAnchoredAt,
   poseCoverage,
   setHoldClockForTests,
   settlePoseBatch,
@@ -43,6 +44,30 @@ function fillAt(code: number, codes: readonly number[] = CODES, tcps = 0) {
 function settleAll(claimed: ReturnType<typeof claimPoseBatch>) {
   settlePoseBatch(claimed!, poses(claimed!.times.length));
 }
+
+// --- Cold-start seed ---------------------------------------------------
+
+describe("the window's anchor", () => {
+  it("remembers the code the window was claimed from", () => {
+    fillAt(5);
+
+    expect(poseBufferAnchoredAt(5)).toBe(true);
+    expect(poseBufferAnchoredAt(6)).toBe(false);
+  });
+
+  it("forgets it when the window is invalidated", () => {
+    fillAt(5);
+
+    invalidatePoseBuffer();
+
+    expect(poseBufferAnchoredAt(5)).toBe(false);
+  });
+
+  it("has none before the first claim", () => {
+    expect(poseBufferAnchoredAt(0)).toBe(false);
+    expect(poseBufferAnchoredAt(null)).toBe(false);
+  });
+});
 
 beforeEach(() => {
   invalidatePoseBuffer();

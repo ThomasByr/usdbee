@@ -659,7 +659,14 @@ export const renderState = $state({
       void (async () => {
         try {
           const codes = await getTimeCodes(stageState.activeStageId);
-          if (loadId === sceneLoadId && Array.isArray(codes)) this.timeCodes = codes;
+          if (loadId === sceneLoadId && Array.isArray(codes)) {
+            this.timeCodes = codes;
+            // Seed the look-ahead window while the stage still sits idle: a
+            // play press then starts on a buffered batch instead of paying the
+            // transport's first-invoke wake-up on its first frame, which the
+            // 250 ms hold deadline cannot absorb.
+            void prefetchPoses(this.time ?? codes[0] ?? 0, stageState.stageInfo?.time_codes_per_second ?? 24);
+          }
         } catch {
           // Codes unavailable: times stay continuous.
         }

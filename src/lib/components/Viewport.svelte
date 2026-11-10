@@ -162,9 +162,17 @@
     // Dev-only MCP bridge. The dynamic import sits behind the same DEV flag
     // the bridge's own gate uses, so a release bundle carries neither.
     let stopBridge: (() => void) | null = null;
+    let stopKeepAlive: (() => void) | null = null;
     if (import.meta.env.DEV) {
       void import("$lib/dev/mcpBridge.svelte").then((bridge) => {
         stopBridge = bridge.startMcpBridge(viewer);
+      });
+      // Idle only: playback and loads invoke on their own schedule, which is
+      // what the ping exists to imitate.
+      void import("$lib/dev/transportKeepAlive").then((keepAlive) => {
+        stopKeepAlive = keepAlive.startTransportKeepAlive({
+          isIdle: () => !viewer.isPlayingAnim && renderState.status !== "loading",
+        });
       });
     }
 
@@ -197,6 +205,7 @@
 
     return () => {
       stopBridge?.();
+      stopKeepAlive?.();
       unlisteners.forEach((u) => u.then((f) => f()));
       disposeGizmo();
       viewer.dispose();
