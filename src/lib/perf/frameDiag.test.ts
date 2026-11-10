@@ -7,6 +7,7 @@ import {
   codeIndex,
   droppedBetween,
   expectedIntervalMs,
+  onHoleFrame,
   onHoldDeadline,
   onInvalidate,
   onPose,
@@ -229,6 +230,14 @@ describe("pose pacing", () => {
     expect(s.singleFallbackTotal).toBe(2);
   });
 
+  it("counts in-hole frames apart from the single-pose fallbacks", () => {
+    onHoleFrame();
+    onHoleFrame();
+    const s = snapshot();
+    expect(s.holeFrameTotal).toBe(2);
+    expect(s.singleFallbackTotal).toBe(0);
+  });
+
   it("reports the playhead's position in the authored code list", () => {
     setCodes(360, 0.5);
     onPose(0, 42);
@@ -255,6 +264,7 @@ describe("snapshot", () => {
     "droppedCodes",
     "expectedPoseMs",
     "heldTotal",
+    "holeFrameTotal",
     "invalidateEdit",
     "invalidateLoad",
     "invalidateResync",
@@ -323,6 +333,7 @@ describe("snapshot", () => {
     expect(s.invalidateLoad).toBe(0);
     expect(s.deadlineTripTotal).toBe(0);
     expect(s.singleFallbackTotal).toBe(0);
+    expect(s.holeFrameTotal).toBe(0);
     expect(s.codesN).toBe(0);
     expect(s.codeIdx).toBe(-1);
   });

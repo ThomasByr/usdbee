@@ -9,7 +9,7 @@ import {
   snapToPlayableTime,
   toPlayheadOffset,
 } from "$lib/render/renderState.svelte";
-import { invalidatePoseBuffer, isPrefetchDead } from "$lib/render/posePrefetch";
+import { holeQueryTime, invalidatePoseBuffer, isPrefetchDead } from "$lib/render/posePrefetch";
 import { disposeScene } from "$lib/render/sceneBuilder";
 import { clearTextureCache } from "$lib/render/textureCache";
 import { upAxisRotation } from "$lib/stage/upAxis";
@@ -223,8 +223,18 @@ export function installPlaybackDriver(viewer: RendererKit) {
     // advanceStageTime without codes keeps the advanced value continuous
     // (wrap past end, clamp at start); the query snaps and clamps itself.
     continuous = advanceStageTime(continuous ?? start, delta, tcps, start, end);
+    const snapped = snapToPlayableTime(continuous, renderState.timeCodes, start, end);
+    // Inside a code hole the query time is the playhead's own time on the tcps
+    // grid: hole times are wall-clock floats, so unquantized every frame is a
+    // new f64 and neither the batch keys nor the backend pose-frame cache can
+    // ever repeat. Grid times present real USD poses; nothing is interpolated.
     const next = Math.min(
-      Math.max(snapToPlayableTime(continuous, renderState.timeCodes), start),
+      Math.max(
+        frameDiag.codeIndex(renderState.timeCodes, snapped) < 0
+          ? holeQueryTime(snapped, renderState.timeCodes, tcps)
+          : snapped,
+        start,
+      ),
       end,
     );
     // A forward wrap (playback past the end) drops the playhead back to the
@@ -241,12 +251,15 @@ export function installPlaybackDriver(viewer: RendererKit) {
     lastEmitted = next;
     // Where the playhead sits in the authored code list: a park on one code
     // while frames keep ticking narrows the freeze to the codes themselves.
+    // -1 = unauthored (the playhead is inside a hole).
     const codeIdx = frameDiag.codeIndex(renderState.timeCodes, next);
     frameDiag.setCodes(
       renderState.timeCodes.length,
-      codeIdx >= 0 && codeIdx + 1 < renderState.timeCodes.length
-        ? renderState.timeCodes[codeIdx + 1]! - next
-        : 0,
+      codeIdx < 0
+        ? -1
+        : codeIdx + 1 < renderState.timeCodes.length
+          ? renderState.timeCodes[codeIdx + 1]! - next
+          : 0,
     );
     void renderState.setStageTime(next, true);
     // After the call: a played hold is already recorded by then, and only the
@@ -260,7 +273,7 @@ export function installPlaybackDriver(viewer: RendererKit) {
     // re-claims). The frame itself is already stepped above, so a cold buffer
     // costs a wait for that batch, never a stall. Only a live scene looks
     // ahead — a failed load has nothing to fill.
-    if (renderState.status === "ready") void prefetchPoses(next);
+    if (renderState.status === "ready") void prefetchPoses(next, tcps);
   };
 }
 

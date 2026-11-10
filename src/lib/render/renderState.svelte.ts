@@ -201,18 +201,21 @@ const CODE_HOLD_LIMIT_CODES = 3;
  * The playback driver's query time: the nearest authored code while the
  * playhead sits in a dense run of keys, and the playhead's own time while it
  * crosses a hole in them. USD interpolates between the authored keys, so a
- * sparse stretch keeps moving instead of parking; nothing is buffered there
- * (the look-ahead is keyed by codes), so those poses take the single-fetch
- * path for the length of the hole.
+ * sparse stretch keeps moving instead of parking; the driver quantizes that
+ * time onto the tcps grid and batches the grid times (posePrefetch).
+ *
+ * The stage bounds are part of the gap math: a key list that does not reach
+ * start_time_code / end_time_code has a hole at that seam, and snapping there
+ * would park the head / tail exactly like an interior hole did.
  */
-export function snapToPlayableTime(time: number, codes: number[]): number {
+export function snapToPlayableTime(time: number, codes: number[], start: number, end: number): number {
   if (codes.length === 0) return time;
   let index = 0;
   for (let i = 1; i < codes.length; i++) {
     if (Math.abs(codes[i]! - time) < Math.abs(codes[index]! - time)) index = i;
   }
-  const previousGap = index > 0 ? codes[index]! - codes[index - 1]! : 0;
-  const nextGap = index + 1 < codes.length ? codes[index + 1]! - codes[index]! : 0;
+  const previousGap = index > 0 ? codes[index]! - codes[index - 1]! : codes[index]! - start;
+  const nextGap = index + 1 < codes.length ? codes[index + 1]! - codes[index]! : end - codes[index]!;
   return Math.max(previousGap, nextGap) > CODE_HOLD_LIMIT_CODES ? time : codes[index]!;
 }
 
@@ -232,11 +235,12 @@ export function advanceStageTime(
 }
 
 // Playback look-ahead (round 4): while any of the K looked-ahead poses is
-// missing, ONE background batch fetches the next K authored codes. Detached
-// on purpose — the frame is stepped either way and the fill lands later; a
-// stale or failed batch is simply dropped.
-export function prefetchPoses(code: number): Promise<void> {
-  const claimed = claimPoseBatch(renderState.timeCodes, code);
+// missing, ONE background batch fetches the next K times — authored codes, or
+// the grid times of the hole the playhead is crossing. Detached on purpose —
+// the frame is stepped either way and the fill lands later; a stale or failed
+// batch is simply dropped.
+export function prefetchPoses(code: number, tcps = 0): Promise<void> {
+  const claimed = claimPoseBatch(renderState.timeCodes, code, tcps);
   if (!claimed) return Promise.resolve();
   return (async () => {
     const startedAt = performance.now();
@@ -755,6 +759,10 @@ export const renderState = $state({
         // the pose costs decode+apply (< 1 ms) instead of a transport round
         // trip. A miss takes the single-pose path below, unchanged.
         const buffered = takePose(time);
+        // An in-hole time is a real USD pose the playhead is crossing, not a
+        // fallback: counted apart so singleFallbackTotal keeps meaning starvation.
+        // An empty key list is continuous everywhere, not in a hole.
+        const inHole = this.timeCodes.length > 0 && frameDiag.codeIndex(this.timeCodes, time) < 0;
         let manifest: RenderNode[];
         let prefetched: AnimatedPose["prefetched"] | null = null;
         if (buffered) {
@@ -765,8 +773,8 @@ export const renderState = $state({
         } else {
           // Playback wanted a hold and did not get one: the batch path is
           // dead, nothing is on the wire, or the deadline expired. Scrubs
-          // (holdOnMiss false) are supposed to fetch and are not counted.
-          if (holdOnMiss) frameDiag.onSingleFallback();
+          // (holdOnMiss false) fetch on purpose, and hole frames are expected.
+          if (holdOnMiss && !inHole) frameDiag.onSingleFallback();
           const pose = await fetchers.getAnimatedPose!(time);
           // Dispatch half of the span: the bytes are in hand, decode+apply follow.
           frameDiag.onPoseDispatched(performance.now() - poseStartedAt);
@@ -778,6 +786,7 @@ export const renderState = $state({
         await updateSceneDelta(manifest, time, isStale, prefetched);
         performance.measure?.("usdbee:pose", "usdbee:pose:issued");
         frameDiag.onPoseApplied(performance.now() - poseStartedAt);
+        if (inHole) frameDiag.onHoleFrame();
         performance.clearMarks?.("usdbee:pose:issued");
         performance.clearMeasures?.("usdbee:pose");
       } catch (e) {

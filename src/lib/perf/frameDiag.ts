@@ -69,6 +69,7 @@ export interface DiagSnapshot {
   invalidateLoad: number;
   deadlineTripTotal: number;
   singleFallbackTotal: number;
+  holeFrameTotal: number;
   codeIdx: number;
   codesN: number;
   nextCodeGap: number;
@@ -99,10 +100,11 @@ let resyncs = 0;
 let rewinds = 0;
 let deadlineTrips = 0;
 let singleFallbacks = 0;
+let holeFrames = 0;
 const invalidations: Record<InvalidateReason, number> = { wrap: 0, resync: 0, edit: 0, load: 0 };
 // Playhead position relative to the authored codes: how many exist at all and
-// how far the next one is. A playhead parked on one code while frames keep
-// ticking reads as a large gap here, not as a stalled rAF loop.
+// how far the next one is (-1 = the playhead is inside a hole in the keys, so
+// there is no next code to measure to; 0 = it sits on the last code).
 let codesN = 0;
 let nextCodeGap = 0;
 
@@ -228,6 +230,15 @@ export function onSingleFallback() {
   singleFallbacks++;
 }
 
+/**
+ * One pose applied at an unauthored time, i.e. inside a code hole. Deliberate:
+ * keeping it out of singleFallbackTotal is what keeps that counter readable as
+ * starvation.
+ */
+export function onHoleFrame() {
+  holeFrames++;
+}
+
 /** Authored codes on the stage and the span to the one after the playhead. */
 export function setCodes(count: number, gap: number) {
   codesN = count;
@@ -251,6 +262,7 @@ export function reset() {
   rewinds = 0;
   deadlineTrips = 0;
   singleFallbacks = 0;
+  holeFrames = 0;
   invalidations.wrap = 0;
   invalidations.resync = 0;
   invalidations.edit = 0;
@@ -324,6 +336,7 @@ export function snapshot(): DiagSnapshot {
     invalidateLoad: invalidations.load,
     deadlineTripTotal: deadlineTrips,
     singleFallbackTotal: singleFallbacks,
+    holeFrameTotal: holeFrames,
     // -1 until the driver has presented a code.
     codeIdx: lastCodeIdx,
     codesN,

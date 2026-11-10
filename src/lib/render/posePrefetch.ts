@@ -39,6 +39,10 @@ let failedEpoch = -1;
 // fill merges them, so nothing valid is dropped; entries behind the playhead
 // are pruned on the next claim, which bounds the map at 2K - 1.
 let buffered = new Map<number, AnimatedPose>();
+// The times the batch in flight carries. The hold decision needs them: an
+// in-hole time is worth waiting for only when the hole claim computed exactly
+// that grid key.
+let inFlightTimes: readonly number[] = [];
 // Whether a hold is running and when it started. The clock measures time spent
 // IN the holding state, not time on one code: during a hold the playhead still
 // advances to a new code every ~1.4 frames at 24 tcps / 60 fps, so a per-code
@@ -75,6 +79,7 @@ export interface ClaimedPoseBatch {
 export function invalidatePoseBuffer() {
   epoch++;
   buffered = new Map();
+  inFlightTimes = [];
   holding = false;
 }
 
@@ -93,40 +98,93 @@ export function poseCoverage(code: number): number {
   return ahead;
 }
 
+/** Index of the first authored code strictly after `time` (codes.length when none). */
+function firstCodeAfter(codes: readonly number[], time: number): number {
+  let lo = 0;
+  let hi = codes.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (codes[mid]! <= time) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 /**
- * The next K authored codes after `code` that the buffer does not already
- * hold, to fetch in ONE background batch, or null while a batch runs or when
- * the playhead is not on an authored code. Clamped at the stage's last code
- * (the request never wraps; the batch after the wrap refills).
+ * The query time for a playhead inside a code hole: its own time on the tcps
+ * grid. Hole times are wall-clock derived, so unquantized every frame is a new
+ * f64 and the backend pose-frame cache (keyed by the exact f64) never hits;
+ * on the grid the same key repeats on every loop pass. The pose at a grid time
+ * is whatever USD evaluates there — no values are interpolated here. Clamped
+ * at the hole's exit code, so a rounded step cannot land past the authored key
+ * and then snap back onto it, which the driver reads as a loop wrap.
  */
-export function claimPoseBatch(codes: readonly number[], code: number): ClaimedPoseBatch | null {
+export function holeQueryTime(time: number, codes: readonly number[], tcps: number): number {
+  if (codes.length === 0 || tcps <= 0) return time;
+  const quantized = Math.round(time * tcps) / tcps;
+  const exitCode = codes[firstCodeAfter(codes, time)];
+  return exitCode !== undefined && quantized >= exitCode ? exitCode : quantized;
+}
+
+/**
+ * The next K times after `code` that the buffer does not already hold, to fetch
+ * in ONE background batch, or null while a batch runs or when there is nothing
+ * to carry. On an authored `code` those are authored codes, clamped at the
+ * stage's last code (the request never wraps; the batch after the wrap refills).
+ * Inside a hole they are the grid times `holeQueryTime` produces, clamped at
+ * the hole's exit code so one batch never spans the hole and the authored range
+ * after it.
+ */
+export function claimPoseBatch(codes: readonly number[], code: number, tcps = 0): ClaimedPoseBatch | null {
   // The guard is global, not epoch-scoped: invalidation abandons the batch it
   // interrupts but that batch is still on the serialized transport, so a second
   // claim would queue behind it (a wrap then waits two batch walls for its
   // first pose). Trade-off: a wedged invoke blocks prefetch until it settles —
   // the same exposure the non-invalidated path already has.
   if (inFlightEpoch !== -1 || failedEpoch === epoch) return null;
-  // Continuous top-up: any consumed pose re-claims, so a batch is in transit
-  // for the whole of playback. A half-full window was shorter than the batch's
-  // own wall time (~190 ms of buffer against a ~260 ms invoke), which dried
-  // the buffer out every cycle.
-  if (poseCoverage(code) >= POSE_PREFETCH) return null;
-  const index = codeIndex(codes, code);
-  if (index < 0) return null;
   // Poses the playhead has passed can never be consumed again: never fetch
-  // them, and never let them sit in the map.
+  // them, and never let them sit in the map. Both branches prune: in a hole the
+  // authored codes behind the playhead would otherwise linger to the exit.
   for (const bufferedCode of buffered.keys()) if (bufferedCode <= code) buffered.delete(bufferedCode);
-  // Only what is missing: a sliding window re-sent 6-11 poses that were
-  // already decoded (~2x the transfer at a high batch duty cycle, real cost on
-  // the serialized transport). Empty means the playhead sits on the stage's
-  // tail and every code there is held: nothing to fetch.
+
   const times: number[] = [];
-  for (let slot = index + 1; slot < codes.length && times.length < POSE_PREFETCH; slot++) {
-    const time = codes[slot]!;
-    if (!buffered.has(time)) times.push(time);
+  const index = codeIndex(codes, code);
+  if (index >= 0) {
+    // Continuous top-up: any consumed pose re-claims, so a batch is in transit
+    // for the whole of playback. A half-full window was shorter than the batch's
+    // own wall time (~190 ms of buffer against a ~260 ms invoke), which dried
+    // the buffer out every cycle.
+    if (poseCoverage(code) >= POSE_PREFETCH) return null;
+    // Only what is missing: a sliding window re-sent 6-11 poses that were
+    // already decoded (~2x the transfer at a high batch duty cycle, real cost on
+    // the serialized transport). Empty means the playhead sits on the stage's
+    // tail and every code there is held: nothing to fetch.
+    for (let slot = index + 1; slot < codes.length && times.length < POSE_PREFETCH; slot++) {
+      const time = codes[slot]!;
+      if (!buffered.has(time)) times.push(time);
+    }
+  } else {
+    if (codes.length === 0 || tcps <= 0) return null;
+    const exitCode = codes[firstCodeAfter(codes, code)] ?? Infinity;
+    // Coverage relative to the hole only: the authored codes past the exit are
+    // still ahead but cannot serve a hole time, and letting them mask the hole
+    // window would starve it for the length of the hole.
+    let ahead = 0;
+    for (const bufferedCode of buffered.keys()) {
+      if (bufferedCode > code && bufferedCode < exitCode) ahead++;
+    }
+    if (ahead >= POSE_PREFETCH) return null;
+    for (let slot = Math.floor(code * tcps) + 1; times.length < POSE_PREFETCH; slot++) {
+      const time = slot / tcps;
+      if (time >= exitCode) break;
+      // The slot arithmetic can land on the playhead's own time by a float ulp:
+      // a batch never carries the time the frame is already asking for.
+      if (time > code && !buffered.has(time)) times.push(time);
+    }
   }
   if (times.length === 0) return null;
   inFlightEpoch = epoch;
+  inFlightTimes = times;
   return { epoch, times };
 }
 
@@ -151,15 +209,13 @@ export function claimPoseBatch(codes: readonly number[], code: number): ClaimedP
  * never expire.
  */
 export function holdsPoseStep(codes: readonly number[], code: number): boolean {
-  // An unauthored time cannot come from any batch: a claim only ever carries
-  // authored codes. Waiting for one is the whole deadline spent on nothing,
-  // which is what the driver's pass through a code hole would pay per frame.
-  if (
-    buffered.has(code) ||
-    codeIndex(codes, code) < 0 ||
-    failedEpoch === epoch ||
-    inFlightEpoch !== epoch
-  ) {
+  // A hold is only worth its deadline when the batch in transit can deliver
+  // the time: an authored code is what a claim carries, and an in-hole time is
+  // carried only when the hole claim computed that exact grid key. A time no
+  // batch can carry never holds — waiting would spend the whole deadline on a
+  // pose that is not coming.
+  const carried = codeIndex(codes, code) >= 0 || inFlightTimes.includes(code);
+  if (buffered.has(code) || !carried || failedEpoch === epoch || inFlightEpoch !== epoch) {
     holding = false;
     holdTripped = false;
     return false;
@@ -186,6 +242,7 @@ export function holdsPoseStep(codes: readonly number[], code: number): boolean {
 export function settlePoseBatch(claimed: ClaimedPoseBatch, poses: AnimatedPose[] | null) {
   if (inFlightEpoch === claimed.epoch) {
     inFlightEpoch = -1;
+    inFlightTimes = [];
     // The batch the hold waited on has landed: its deadline is spent.
     holding = false;
   }

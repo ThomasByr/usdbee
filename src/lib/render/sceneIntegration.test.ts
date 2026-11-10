@@ -536,6 +536,117 @@ describe("installPlaybackDriver on a held code", () => {
     // the playhead through the hole instead of standing still for 18 codes and
     // then jumping to 40.
     expect(presented).toEqual([1, 2, 3, 4, 5]);
+    // Unauthored reads as -1, not as 0 (which means "on the last code").
+    expect(frameDiag.snapshot().nextCodeGap).toBe(-1);
+  });
+
+  it("quantizes hole times onto the tcps grid", async () => {
+    const sparse = [0, 1, 2, 3, 40, 41, 42];
+    renderState.timeCodes = sparse;
+    stageState.stageInfo = {
+      start_time_code: 0,
+      end_time_code: 42,
+      time_codes_per_second: 10,
+    } as any;
+    renderState.time = 4.35; // off the grid on purpose
+    const v = viewer();
+    installPlaybackDriver(v);
+    v.onAdvanceTime!(0);
+    await flush();
+
+    const presented = [renderState.time!];
+    for (let i = 0; i < 3; i++) {
+      v.onAdvanceTime!(0.007); // 0.07 codes per frame: under one grid step
+      presented.push(renderState.time!);
+      await flush();
+    }
+
+    // The same input times produce the same f64 keys on every loop pass, so
+    // the backend pose-frame cache (keyed by the exact f64) hits from the
+    // second pass on. A repeated time is a frame the same pose serves.
+    expect(presented).toEqual([4.4, 4.4, 4.5, 4.6]);
+    for (const time of presented) expect(Object.is(time, Math.round(time * 10) / 10)).toBe(true);
+  });
+
+  it("serves hole frames from the hole batch instead of one fetch per pose", async () => {
+    const sparse = [0, 1, 2, 3, 40, 41, 42];
+    renderState.timeCodes = sparse;
+    stageState.stageInfo = {
+      start_time_code: 0,
+      end_time_code: 42,
+      time_codes_per_second: 10,
+    } as any;
+    renderState.time = 4.5;
+    const v = viewer();
+    installPlaybackDriver(v);
+    v.onAdvanceTime!(0); // presents 4.5, then claims the hole's grid times
+    await flush();
+
+    // The claim stops at the hole's exit code: the authored range is the next
+    // claim's business, and mixing the two would span both regimes at once.
+    const batch = mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_animated_pose_batch");
+    expect(batch.at(-1)![1]).toEqual({
+      stageId: stageState.activeStageId,
+      times: [4.6, 4.7, 4.8, 4.9, 5, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7],
+    });
+
+    mockedInvoke.mockClear();
+    for (let i = 0; i < 3; i++) {
+      v.onAdvanceTime!(0.01); // one grid step per frame
+      await flush();
+    }
+    // Nothing on the wire: every hole frame came out of the batch.
+    expect(singlePoseCalls()).toHaveLength(0);
+    expect(renderState.heldTime).toBeNull();
+  });
+
+  it("crosses a hole's exit code once, without overshooting or skipping", async () => {
+    const sparse = [0, 1, 2, 3, 40, 41, 42];
+    renderState.timeCodes = sparse;
+    stageState.stageInfo = {
+      start_time_code: 0,
+      end_time_code: 42,
+      time_codes_per_second: 10,
+    } as any;
+    renderState.time = 39.5;
+    const v = viewer();
+    installPlaybackDriver(v);
+    v.onAdvanceTime!(0);
+    await flush();
+    frameDiag.reset();
+
+    const presented = [renderState.time!];
+    for (let i = 0; i < 3; i++) {
+      v.onAdvanceTime!(0.04); // 0.4 codes per frame
+      presented.push(renderState.time!);
+      await flush();
+    }
+
+    // Monotone across the exit, and the authored code after it is reached:
+    // the hole's own regime ends where snapToPlayableTime hands back to the
+    // nearest code. A rounded step past 41 that then snapped back onto it
+    // would read as a loop wrap and drop the whole window.
+    expect(presented).toEqual([39.5, 39.9, 40.3, 41]);
+    expect(frameDiag.snapshot().invalidateWrap).toBe(0);
+  });
+
+  it("does not park at the stage seam when the keys miss it", () => {
+    renderState.timeCodes = [10, 11, 12];
+    stageState.stageInfo = {
+      start_time_code: 0,
+      end_time_code: 42,
+      time_codes_per_second: 10,
+    } as any;
+    const v = viewer();
+    installPlaybackDriver(v);
+
+    renderState.time = 1;
+    v.onAdvanceTime!(0);
+    expect(renderState.time).toBe(1);
+
+    renderState.time = 41;
+    v.onAdvanceTime!(0);
+    expect(renderState.time).toBe(41);
   });
 
   it("attributes the loop wrap's invalidation to the wrap, not to a resync", () => {

@@ -1645,25 +1645,50 @@ describe("snapToPlayableTime", () => {
   const sparse = [0, 1, 2, 3, 40, 41, 42];
 
   it("snaps to the code while the playhead is inside a dense run", () => {
-    expect(snapToPlayableTime(2.3, sparse)).toBe(2);
-    expect(snapToPlayableTime(41.2, sparse)).toBe(41);
+    expect(snapToPlayableTime(2.3, sparse, 0, 42)).toBe(2);
+    expect(snapToPlayableTime(41.2, sparse, 0, 42)).toBe(41);
   });
 
   it("keeps the playhead's own time inside a code hole", () => {
     // Nearest snapping would present code 3's pose for the first 18 codes of
     // the hole (~600 ms at 30 tcps): a planted freeze, then a jump.
-    expect(snapToPlayableTime(10, sparse)).toBe(10);
-    expect(snapToPlayableTime(3.2, sparse)).toBe(3.2);
+    expect(snapToPlayableTime(10, sparse, 0, 42)).toBe(10);
+    expect(snapToPlayableTime(3.2, sparse, 0, 42)).toBe(3.2);
   });
 
   it("still snaps across a one-frame gap in the keys", () => {
     // Two codes apart is sub-frame sampling, not a hole: the pose stands for
     // ~1 code, which is what a dense run does too.
-    expect(snapToPlayableTime(4.2, [0, 1, 2, 3, 5, 6])).toBe(5);
+    expect(snapToPlayableTime(4.2, [0, 1, 2, 3, 5, 6], 0, 6)).toBe(5);
+  });
+
+  it("treats a gap of exactly the hold limit as dense", () => {
+    // The limit is the largest gap a pose may stand for: the boundary belongs
+    // to the dense side, so `>` mutated to `>=` re-parks the playhead on the
+    // bike's 3-code gaps.
+    expect(snapToPlayableTime(1.6, [0, 3], 0, 3)).toBe(3);
+    expect(snapToPlayableTime(2.6, [0, 3], 0, 6)).toBe(3);
+  });
+
+  it("treats keys that miss the stage start or end as a hole there", () => {
+    // index 0 / last used to read as gap 0, so a stage whose keys do not
+    // reach start_time_code / end_time_code parked at the first / last code
+    // for the whole head / tail: the interior bug, at the loop seam.
+    const codes = [10, 11, 12];
+    expect(snapToPlayableTime(1, codes, 0, 42)).toBe(1);
+    expect(snapToPlayableTime(41, codes, 0, 42)).toBe(41);
+
+    // Keys that do reach the seam keep snapping as before.
+    expect(snapToPlayableTime(0.4, codes, 10, 42)).toBe(10);
+    expect(snapToPlayableTime(12.4, codes, 0, 12)).toBe(12);
   });
 
   it("passes the time through unchanged without codes", () => {
-    expect(snapToPlayableTime(4.4, [])).toBe(4.4);
+    expect(snapToPlayableTime(4.4, [], 0, 24)).toBe(4.4);
+  });
+
+  it("snaps a single-code list when the stage is that code", () => {
+    expect(snapToPlayableTime(0.4, [5], 5, 5)).toBe(5);
   });
 });
 
@@ -1952,7 +1977,8 @@ describe("renderState pose prefetch", () => {
     expect(frameDiag.snapshot().singleFallbackTotal).toBe(1);
   });
 
-  it("drains a queued playback step with its hold policy, not a single fetch", async () => {    const group = await loadedScene();
+  it("drains a queued playback step with its hold policy, not a single fetch", async () => {
+    const group = await loadedScene();
     mockIpc(() => [wobbleAt(3)]);
     await prefetchPoses(1); // 2..13 buffered
 
@@ -1985,6 +2011,22 @@ describe("renderState pose prefetch", () => {
       poseBatch(codes.slice(14, 20).map(() => poseFrame([wobbleAt(9)], packedBatchGeometry(1, 1)))),
     );
     await batch;
+  });
+
+  it("counts an in-hole step as a hole frame, not as a single fallback", async () => {
+    await loadedScene();
+    renderState.timeCodes = [0, 1, 2, 3, 40, 41, 42];
+    mockIpc(() => [wobbleAt(4)]);
+    frameDiag.reset();
+
+    await renderState.setStageTime(4.5, true); // unauthored: a hole frame
+    await renderState.setStageTime(40, true); // authored, no batch: a fallback
+
+    const diag = frameDiag.snapshot();
+    // A hole frame is intentional, not starvation: counting it as a fallback
+    // would bury the freeze signal the counter exists for.
+    expect(diag.holeFrameTotal).toBe(1);
+    expect(diag.singleFallbackTotal).toBe(1);
   });
 
   it("still single-fetches a paused scrub: nothing would retry a hold", async () => {

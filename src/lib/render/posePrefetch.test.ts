@@ -6,6 +6,7 @@ import {
   POSE_HOLD_DEADLINE_MS,
   POSE_PREFETCH,
   claimPoseBatch,
+  holeQueryTime,
   holdsPoseStep,
   invalidatePoseBuffer,
   isPrefetchDead,
@@ -27,11 +28,14 @@ function poses(count: number, from = 0): AnimatedPose[] {
 
 const CODES = Array.from({ length: 40 }, (_, i) => i);
 
+// The bike stage's shape: 0..3 dense, then a 37-code hole up to 40..42.
+const SPARSE = [0, 1, 2, 3, 40, 41, 42];
+
 // A claimed batch settled with one pose per requested code. Every test that
 // claims also settles: the in-flight guard is global and only a settle (or a
 // wedged invoke) releases it, so a leftover claim would starve the next test.
-function fillAt(code: number) {
-  const claimed = claimPoseBatch(CODES, code)!;
+function fillAt(code: number, codes: readonly number[] = CODES, tcps = 0) {
+  const claimed = claimPoseBatch(codes, code, tcps)!;
   settlePoseBatch(claimed, poses(claimed.times.length));
   return claimed;
 }
@@ -78,9 +82,8 @@ describe("the look-ahead buffer", () => {
     settleAll(claimed);
   });
 
-  it("claims nothing from the last code, an unauthored code, or an empty list", () => {
+  it("claims nothing from the last code or an empty list", () => {
     expect(claimPoseBatch(CODES, 39)).toBeNull();
-    expect(claimPoseBatch(CODES, 1.5)).toBeNull();
     expect(claimPoseBatch([], 0)).toBeNull();
   });
 
@@ -202,6 +205,92 @@ describe("the look-ahead buffer", () => {
   });
 });
 
+describe("hole times on the tcps grid", () => {
+  // Inside a hole the playhead's own time is wall-clock derived: unquantized,
+  // every frame is a new f64, so the backend pose-frame cache (keyed by the
+  // exact f64) never hits and every hole pose pays the full walk, every pass.
+  it("quantizes an in-hole time onto the grid", () => {
+    expect(Object.is(holeQueryTime(120.001, SPARSE, 30), 120)).toBe(true);
+    expect(Object.is(holeQueryTime(120.02, SPARSE, 30), 120.03333333333333)).toBe(true);
+  });
+
+  it("returns identical bits for the same grid slot on a second loop pass", () => {
+    const first = holeQueryTime(120.001, SPARSE, 30);
+    const second = holeQueryTime(120.009, SPARSE, 30); // next pass, other float
+    expect(Object.is(first, second)).toBe(true);
+
+    // And the batch's keys are the very values the driver asks for, so the
+    // frame cache hits on the second pass.
+    const claimed = claimPoseBatch(SPARSE, holeQueryTime(119.97, SPARSE, 30), 30)!;
+    expect(Object.is(claimed.times[0], first)).toBe(true);
+    settleAll(claimed);
+  });
+
+  it("clamps the grid time at the hole's exit code", () => {
+    // An exit code in the upper half of its grid cell: the time below it rounds
+    // UP past it, and presenting a pose beyond the authored key then snapping
+    // back onto it is what the driver reads as a loop wrap.
+    expect(holeQueryTime(40.037, [0, 40.038, 41], 100)).toBe(40.038);
+  });
+
+  it("passes the time through without codes or a rate", () => {
+    expect(holeQueryTime(1.234, [], 30)).toBe(1.234);
+    expect(holeQueryTime(1.234, SPARSE, 0)).toBe(1.234);
+  });
+});
+
+describe("claiming a hole batch", () => {
+  it("claims the grid times strictly after the playhead", () => {
+    const claimed = claimPoseBatch(SPARSE, 4, 10)!;
+    expect(claimed.times).toHaveLength(POSE_PREFETCH);
+    expect(claimed.times[0]).toBe(4.1);
+    expect(claimed.times[POSE_PREFETCH - 1]).toBe(5.2);
+    expect(claimed.times).not.toContain(4);
+    settleAll(claimed);
+  });
+
+  it("clamps the hole batch at the exit code instead of crossing it", () => {
+    const claimed = claimPoseBatch(SPARSE, 39.5, 10)!;
+    expect(claimed.times).toEqual([39.6, 39.7, 39.8, 39.9]);
+    expect(claimed.times).not.toContain(40);
+    settleAll(claimed);
+  });
+
+  it("re-claims only what the hole window does not hold", () => {
+    const claimed = claimPoseBatch(SPARSE, 4, 10)!; // 4.1..5.2 buffered
+    settleAll(claimed);
+
+    expect(claimPoseBatch(SPARSE, 4, 10)).toBeNull();
+    takePose(4.1);
+    const topUp = claimPoseBatch(SPARSE, 4.1, 10)!;
+    // The 11 keys still held are not re-transferred; the window refills ahead.
+    expect(topUp.times[0]).toBe(5.3);
+    expect(topUp.times).not.toContain(5.2);
+    settleAll(topUp);
+  });
+
+  it("claims a hole batch even with authored poses buffered past the exit", () => {
+    const codes = [0, 1, 2, 3, ...Array.from({ length: 20 }, (_, i) => 40 + i)];
+    fillAt(0, codes, 10); // 1,2,3 and 40..48
+    fillAt(40, codes, 10); // tops the authored window up past the exit
+    expect(poseCoverage(6.5)).toBeGreaterThanOrEqual(POSE_PREFETCH);
+
+    // Those poses cannot serve a hole time, so they must not mask the window.
+    const claimed = claimPoseBatch(codes, 6.5, 10)!;
+    expect(claimed.times[0]).toBe(6.6);
+    settleAll(claimed);
+  });
+
+  it("prunes the poses behind the playhead on the hole path too", () => {
+    fillAt(18); // 19..30 buffered
+    const claimed = claimPoseBatch(CODES, 20.5, 24)!;
+
+    expect(takePose(19)).toBeNull();
+    expect(claimed.times[0]).toBe(20.541666666666668);
+    settleAll(claimed);
+  });
+});
+
 describe("holding a playback step on a miss", () => {
   it("holds while a batch is in flight", () => {
     const claimed = claimPoseBatch(CODES, 0); // in flight, nothing buffered yet
@@ -261,6 +350,18 @@ describe("holding a playback step on a miss", () => {
     // A time inside a hole in the authored keys: no claim ever asks for it, so
     // holding would spend the deadline waiting for a pose that is not coming.
     expect(holdsPoseStep(CODES, 20.5)).toBe(false);
+
+    settleAll(claimed);
+  });
+
+  it("holds for an in-hole time the hole batch carries, and only for those", () => {
+    const claimed = claimPoseBatch(SPARSE, 4, 10)!; // 4.1..5.2 on the wire
+
+    expect(holdsPoseStep(SPARSE, 4.1)).toBe(true);
+    expect(holdsPoseStep(SPARSE, 5.2)).toBe(true);
+    // Off the grid, or past the batch's window: no batch can carry it.
+    expect(holdsPoseStep(SPARSE, 4.05)).toBe(false);
+    expect(holdsPoseStep(SPARSE, 20)).toBe(false);
 
     settleAll(claimed);
   });
@@ -352,6 +453,15 @@ describe("the hold deadline", () => {
     expect(holdsPoseStep(CODES, 30)).toBe(true);
     clock += POSE_HOLD_DEADLINE_MS / 2;
     expect(holdsPoseStep(CODES, 30)).toBe(true);
+
+    settleAll(claimed);
+  });
+
+  it("bounds a hole hold by the same deadline", () => {
+    const claimed = claimPoseBatch(SPARSE, 4, 10)!; // 4.1..5.2 on the wire
+    expect(holdsPoseStep(SPARSE, 4.1)).toBe(true);
+    clock += POSE_HOLD_DEADLINE_MS;
+    expect(holdsPoseStep(SPARSE, 4.1)).toBe(false);
 
     settleAll(claimed);
   });
