@@ -570,12 +570,20 @@ fn variant_selection_on_a_referenced_layer_dirties_that_layer() {
 fn set_value_time_sample_reads_back_and_clears_caches() {
     let (state, _events) = owner_with_events();
     open_via_owner(&state, "animated.usda");
+    // Let the idle-gap warmup finish first: while it is still filling caches
+    // the stage-wide tessellation counter is not attributable to this test.
+    state.wait_for_warmup();
 
     // Prime the tessellation cache with one geometry fetch (Still authors
     // default-time points; Wobble's are sampled, so default time has none).
     request_geometry_data(&state.sender(), "/Scene/Still", None).expect("geometry fetches");
     let before = state.mesh_tessellations();
-    assert_eq!(before, 1);
+    request_geometry_data(&state.sender(), "/Scene/Still", None).expect("geometry re-fetches");
+    assert_eq!(
+        state.mesh_tessellations(),
+        before,
+        "a warm fetch tessellates nothing"
+    );
 
     // `size` has samples at 1 and 24; authoring at frame 10 must read back
     // exactly 3.0 at frame 10 (time codes are frames, not seconds).
@@ -592,9 +600,12 @@ fn set_value_time_sample_reads_back_and_clears_caches() {
     let size = attribute(&details, "size");
     assert_eq!(size.value.data, serde_json::json!(3.0));
 
-    // The mutation cleared the mesh cache: the same fetch re-tessellates.
+    // The mutation cleared the mesh cache: the same fetch re-tessellates. The
+    // warmup restarts with it, so its own fill is drained first.
+    state.wait_for_warmup();
+    let cleared = state.mesh_tessellations();
     request_geometry_data(&state.sender(), "/Scene/Still", None).expect("geometry refetches");
-    assert_eq!(state.mesh_tessellations(), before + 1);
+    assert_eq!(state.mesh_tessellations(), cleared + 1);
 }
 
 #[test]

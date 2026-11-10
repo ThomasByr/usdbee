@@ -37,6 +37,25 @@ impl TestOwner {
             .expect("a stage should be open")
     }
 
+    /// Block until the owner's idle-gap warmup has pre-evaluated every authored
+    /// time code. Once it returns, the process-wide cache counters belong to the
+    /// test's own requests again — the point of waiting rather than sleeping.
+    pub fn wait_for_warmup(&self) {
+        let sender = self.sender();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let (warmed, total) =
+                usdbee_lib::stage::request_warmup_progress(&sender).expect("progress should reply");
+            if total > 0 && warmed >= total {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "warmup stalled at {warmed}/{total}"
+            );
+        }
+    }
+
     pub fn stage_tree_serializations(&self) -> usize {
         self.state
             .stage_tree_serializations(self.id.get())

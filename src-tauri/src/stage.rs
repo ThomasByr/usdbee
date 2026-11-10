@@ -80,6 +80,12 @@ pub enum StageRequest {
     GetTimeCodes {
         reply: mpsc::Sender<Result<Vec<f64>, String>>,
     },
+    // How much of the authored code list the idle-gap warmup has pre-evaluated
+    // since the last invalidation: `(warmed, total)`, both 0 when nothing is
+    // queued yet. Progress only; the warmup itself needs no request.
+    GetWarmupProgress {
+        reply: mpsc::Sender<Result<(usize, usize), String>>,
+    },
     GetGeometry {
         path: String,
         time: Option<f64>,
@@ -634,7 +640,36 @@ fn spawn_stage_owner_for(
         // (close_stage or a failed open's cleanup).
         let mut session_path: Option<PathBuf> = None;
         let mut extraction_dir: Option<PathBuf> = None;
-        while let Ok(request) = receiver.recv() {
+        // The idle-gap warmup queue: the authored codes still to pre-evaluate
+        // and how many are done. `None` = nothing queued (nothing walked yet
+        // in this epoch, or an invalidation dropped it); refilled from the
+        // manifest skeleton on the next idle gap.
+        let mut warm: Option<(Vec<f64>, usize)> = None;
+        loop {
+            let request = match receiver.try_recv() {
+                Ok(request) => request,
+                // Idle: spend one gap on one warm pose, then poll again so a
+                // command that arrived meanwhile is served before the next.
+                Err(mpsc::TryRecvError::Empty)
+                    if warm_one_step(
+                        current_stage.as_deref(),
+                        &mut mesh_cache,
+                        &mut pose_frames,
+                        &mut resolve_memo,
+                        &mut transform_memo,
+                        &mut xform_queries,
+                        &mut manifest_skeleton,
+                        &mut warm,
+                    ) =>
+                {
+                    continue;
+                }
+                Err(mpsc::TryRecvError::Empty) => match receiver.recv() {
+                    Ok(request) => request,
+                    Err(_) => break,
+                },
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            };
             match request {
                 StageRequest::Open {
                     path,
@@ -673,6 +708,7 @@ fn spawn_stage_owner_for(
                         pose_frames.clear();
                         transform_memo.clear();
                         xform_queries.clear();
+                        warm = None;
                         manifest_skeleton = None;
                         stage_tree = None;
                         resolve_memo.clear();
@@ -858,6 +894,16 @@ fn spawn_stage_owner_for(
                     };
                     let _ = reply.send(response);
                 }
+                StageRequest::GetWarmupProgress { reply } => {
+                    let response = match current_stage {
+                        Some(_) => Ok(warm
+                            .as_ref()
+                            .map(|(codes, cursor)| (*cursor, codes.len()))
+                            .unwrap_or((0, 0))),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
                 StageRequest::GetMaterial { path, reply } => {
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
@@ -941,6 +987,7 @@ fn spawn_stage_owner_for(
                                     &mut resolve_memo,
                                     &mut transform_memo,
                                     &mut xform_queries,
+                                    &mut warm,
                                     &emitted,
                                 );
                             } else {
@@ -953,6 +1000,7 @@ fn spawn_stage_owner_for(
                                     &mut resolve_memo,
                                     &mut transform_memo,
                                     &mut xform_queries,
+                                    &mut warm,
                                     &emitted,
                                 );
                             }
@@ -995,6 +1043,7 @@ fn spawn_stage_owner_for(
                                 &mut resolve_memo,
                                 &mut transform_memo,
                                 &mut xform_queries,
+                                &mut warm,
                                 &path,
                             );
                         }
@@ -1041,6 +1090,7 @@ fn spawn_stage_owner_for(
                                 &mut resolve_memo,
                                 &mut transform_memo,
                                 &mut xform_queries,
+                                &mut warm,
                                 &path,
                             );
                         }
@@ -1081,6 +1131,7 @@ fn spawn_stage_owner_for(
                                 &mut resolve_memo,
                                 &mut transform_memo,
                                 &mut xform_queries,
+                                &mut warm,
                                 &path,
                             );
                         }
@@ -1189,6 +1240,7 @@ fn spawn_stage_owner_for(
                                         &mut resolve_memo,
                                         &mut transform_memo,
                                         &mut xform_queries,
+                                        &mut warm,
                                         &path,
                                     );
                                 } else {
@@ -1201,6 +1253,7 @@ fn spawn_stage_owner_for(
                                         &mut resolve_memo,
                                         &mut transform_memo,
                                         &mut xform_queries,
+                                        &mut warm,
                                         &path,
                                     );
                                 }
@@ -1220,6 +1273,7 @@ fn spawn_stage_owner_for(
                                     &mut resolve_memo,
                                     &mut transform_memo,
                                     &mut xform_queries,
+                                    &mut warm,
                                     "/",
                                 );
                             }
@@ -1271,6 +1325,7 @@ fn spawn_stage_owner_for(
                                         &mut resolve_memo,
                                         &mut transform_memo,
                                         &mut xform_queries,
+                                        &mut warm,
                                         &path,
                                     );
                                 } else {
@@ -1283,6 +1338,7 @@ fn spawn_stage_owner_for(
                                         &mut resolve_memo,
                                         &mut transform_memo,
                                         &mut xform_queries,
+                                        &mut warm,
                                         &path,
                                     );
                                 }
@@ -1356,6 +1412,7 @@ fn spawn_stage_owner_for(
                                 &mut resolve_memo,
                                 &mut transform_memo,
                                 &mut xform_queries,
+                                &mut warm,
                                 "/",
                             );
                         }
@@ -1767,6 +1824,73 @@ fn edit_emission_path(stage: &Stage, path: &str) -> String {
     }
 }
 
+/// The idle-gap warmup queue: the authored codes still to pre-evaluate, and how
+/// many are done. `None` = nothing queued, which is also what every
+/// invalidation site restores — the queue is rebuilt from the manifest
+/// skeleton on the next idle gap.
+type Warmup = Option<(Vec<f64>, usize)>;
+
+/// Pre-evaluate the next not-yet-warm authored code, one pose per call so the
+/// owner loop can serve a command between any two. Returns whether a step ran
+/// (false = nothing queued, nothing to queue, or the list is done), which is
+/// the caller's signal to block on the queue instead of spinning.
+#[allow(clippy::too_many_arguments)]
+fn warm_one_step(
+    stage: Option<&Stage>,
+    mesh_cache: &mut MeshCache,
+    pose_frames: &mut PoseFrameCache,
+    resolve_memo: &mut ResolveMemo,
+    transforms: &mut TransformMemo,
+    xform_queries: &mut XformQueries,
+    manifest_skeleton: &mut Option<ManifestSkeleton>,
+    warm: &mut Warmup,
+) -> bool {
+    let Some(stage) = stage else {
+        // No stage behind the queue (unloaded, or never opened): the skeleton
+        // cannot be built, so blocking is the right move.
+        *warm = None;
+        return false;
+    };
+    if warm.is_none() {
+        if manifest_skeleton.is_none() {
+            // The first manifest needs this build anyway; a failure leaves the
+            // caches as they were and simply ends this warmup.
+            *manifest_skeleton = ManifestSkeleton::build(stage).ok();
+        }
+        let Some(skeleton) = manifest_skeleton.as_ref() else {
+            *warm = Some((Vec::new(), 0));
+            return false;
+        };
+        *warm = Some((skeleton.time_codes.clone(), 0));
+    }
+    let Some((codes, cursor)) = warm else {
+        return false;
+    };
+    if *cursor >= codes.len() {
+        return false;
+    }
+    let time = codes[*cursor];
+    *cursor += 1;
+    let warmed = pose_frame_bytes(
+        stage,
+        mesh_cache,
+        pose_frames,
+        resolve_memo,
+        transforms,
+        xform_queries,
+        manifest_skeleton,
+        Some(time),
+    );
+    if let Err(error) = warmed {
+        // A code that cannot be evaluated would fail the same way on playback;
+        // stop burning idle gaps on it. Not silent: it is the only signal the
+        // warmup hit something the walk cannot read.
+        eprintln!("usdbee: warmup stopped at time {}: {}", time, error);
+        *cursor = codes.len();
+    }
+    true
+}
+
 /// Post-success bookkeeping every mutation arm shares: the coarse cache
 /// clears (tessellations, manifest skeleton, prim tree, resolve memo) and the
 /// `usd-stage-changed` emission for the edited path. The dirty mark and the
@@ -1784,6 +1908,7 @@ fn after_mutation(
     resolve_memo: &mut ResolveMemo,
     transforms: &mut TransformMemo,
     xform_queries: &mut XformQueries,
+    warm: &mut Warmup,
     path: &str,
 ) {
     // shortcut: coarse clear — any edit invalidates every cached
@@ -1802,6 +1927,8 @@ fn after_mutation(
     resolve_memo.clear();
     transforms.clear();
     xform_queries.clear();
+    // The caches this queue fills are gone: re-warm from the first code.
+    *warm = None;
     emit_stage_changed(sink, path);
 }
 
@@ -1830,6 +1957,7 @@ fn warm_xform_keep(
     resolve_memo: &mut ResolveMemo,
     transforms: &mut TransformMemo,
     xform_queries: &mut XformQueries,
+    warm: &mut Warmup,
     path: &str,
 ) {
     // shortcut: coarse clear — tessellation may bake transform-dependent
@@ -1846,6 +1974,9 @@ fn warm_xform_keep(
     // or a redo is the one thing this cache must never do.
     transforms.clear();
     xform_queries.clear();
+    // The frames and tessellations this queue filled are gone: re-warm from the
+    // first code under the kept skeleton.
+    *warm = None;
     emit_stage_changed(sink, path);
 }
 
@@ -4395,8 +4526,8 @@ fn write_pose_node(
 }
 
 /// One pose frame, cached: the delta walk at `time`, the geometry batch over
-/// the deforming paths, and the framing of both. The whole `GetAnimatedPose`
-/// arm, so a warm code costs one cache lookup.
+/// the deforming paths, and the framing of both. Shared by the `GetAnimatedPose`
+/// arm and the idle-gap warmup, so a warm code costs one cache lookup.
 #[allow(clippy::too_many_arguments)]
 fn pose_frame_bytes(
     stage: &Stage,
@@ -4677,6 +4808,21 @@ pub fn request_time_codes(sender: &mpsc::Sender<StageRequest>) -> Result<Vec<f64
     let (reply, response) = mpsc::channel();
     sender
         .send(StageRequest::GetTimeCodes { reply })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+/// Warmup progress for one stage: `(codes pre-evaluated, codes queued)` since
+/// the last invalidation. `(0, 0)` means nothing is queued yet, which is also
+/// what an edit or a fresh open leaves behind.
+pub fn request_warmup_progress(
+    sender: &mpsc::Sender<StageRequest>,
+) -> Result<(usize, usize), String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::GetWarmupProgress { reply })
         .map_err(|_| "stage service unavailable".to_string())?;
     response
         .recv()
