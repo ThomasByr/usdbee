@@ -28,7 +28,7 @@ use crate::parser::{dependency_scan_from_stage, DependencyScan};
 use crate::skinning::{skel_joint_transforms_vary, SkelAnimMemo};
 use crate::tessellation::{pack_geometry, tessellate_prim};
 use crate::values::{
-    local_transform, serialize_details, value_payload_to_sdf, PrimDetails, ValuePayload,
+    local_transform, serialize_details, value_payload_to_sdf, PrimDetails, ValuePayload, XformQuery,
 };
 
 pub enum StageRequest {
@@ -596,6 +596,11 @@ fn spawn_stage_owner_for(
         // animated half of the walk's transform, memoized across calls and
         // cleared wherever the caches clear.
         let mut transform_memo = new_transform_memo();
+        // Composed xform sources by prim path: the queries replay one resolved
+        // source across time codes instead of re-walking the composition graph
+        // per (prim, time). Self-invalidating, so only `Open` clears it (the
+        // entries hold the stage they belong to).
+        let mut xform_queries = XformQueries::new();
         // The time-independent manifest skeleton, built by the first manifest
         // call after an open; cleared on Open (like the geometry MeshCache).
         let mut manifest_skeleton: Option<ManifestSkeleton> = None;
@@ -667,6 +672,7 @@ fn spawn_stage_owner_for(
                         mesh_cache.clear();
                         pose_frames.clear();
                         transform_memo.clear();
+                        xform_queries.clear();
                         manifest_skeleton = None;
                         stage_tree = None;
                         resolve_memo.clear();
@@ -745,7 +751,7 @@ fn spawn_stage_owner_for(
                             let skeleton = manifest_skeleton
                                 .as_ref()
                                 .ok_or_else(|| "manifest skeleton build failed".to_string())?;
-                            let mut ctx = WalkCtx::new(&mut transform_memo);
+                            let mut ctx = WalkCtx::new(&mut transform_memo, &mut xform_queries);
                             render_children(
                                 skeleton,
                                 &skeleton.root_children,
@@ -768,7 +774,7 @@ fn spawn_stage_owner_for(
                             let skeleton = manifest_skeleton
                                 .as_ref()
                                 .ok_or_else(|| "manifest skeleton build failed".to_string())?;
-                            let mut ctx = WalkCtx::new(&mut transform_memo);
+                            let mut ctx = WalkCtx::new(&mut transform_memo, &mut xform_queries);
                             delta_children(
                                 skeleton,
                                 &skeleton.root_children,
@@ -836,43 +842,16 @@ fn spawn_stage_owner_for(
                 StageRequest::GetAnimatedPose { time, reply } => {
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
-                            if let Some(frame) = pose_frames.get(time) {
-                                return Ok(frame.to_vec());
-                            }
-                            if manifest_skeleton.is_none() {
-                                manifest_skeleton = Some(ManifestSkeleton::build(stage)?);
-                            }
-                            let skeleton = manifest_skeleton
-                                .as_ref()
-                                .ok_or_else(|| "manifest skeleton build failed".to_string())?;
-                            let nodes = {
-                                let mut ctx = WalkCtx::new(&mut transform_memo);
-                                delta_children(
-                                    skeleton,
-                                    &skeleton.root_children,
-                                    time,
-                                    false,
-                                    &mut ctx,
-                                    false,
-                                    false,
-                                )?
-                            };
-                            let paths = animated_geometry_paths(&nodes);
-                            let slots: Vec<Result<Arc<[u8]>, String>> = paths
-                                .iter()
-                                .map(|path| {
-                                    geometry_bytes(
-                                        stage,
-                                        &mut mesh_cache,
-                                        &mut resolve_memo,
-                                        path,
-                                        time,
-                                    )
-                                })
-                                .collect();
-                            let frame = frame_pose(&nodes, &slots)?;
-                            pose_frames.insert(time, Arc::from(frame.as_slice()));
-                            Ok(frame)
+                            pose_frame_bytes(
+                                stage,
+                                &mut mesh_cache,
+                                &mut pose_frames,
+                                &mut resolve_memo,
+                                &mut transform_memo,
+                                &mut xform_queries,
+                                &mut manifest_skeleton,
+                                time,
+                            )
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -961,6 +940,7 @@ fn spawn_stage_owner_for(
                                     &mut manifest_skeleton,
                                     &mut resolve_memo,
                                     &mut transform_memo,
+                                    &mut xform_queries,
                                     &emitted,
                                 );
                             } else {
@@ -972,6 +952,7 @@ fn spawn_stage_owner_for(
                                     &mut stage_tree,
                                     &mut resolve_memo,
                                     &mut transform_memo,
+                                    &mut xform_queries,
                                     &emitted,
                                 );
                             }
@@ -1013,6 +994,7 @@ fn spawn_stage_owner_for(
                                 &mut stage_tree,
                                 &mut resolve_memo,
                                 &mut transform_memo,
+                                &mut xform_queries,
                                 &path,
                             );
                         }
@@ -1058,6 +1040,7 @@ fn spawn_stage_owner_for(
                                 &mut stage_tree,
                                 &mut resolve_memo,
                                 &mut transform_memo,
+                                &mut xform_queries,
                                 &path,
                             );
                         }
@@ -1097,6 +1080,7 @@ fn spawn_stage_owner_for(
                                 &mut stage_tree,
                                 &mut resolve_memo,
                                 &mut transform_memo,
+                                &mut xform_queries,
                                 &path,
                             );
                         }
@@ -1204,6 +1188,7 @@ fn spawn_stage_owner_for(
                                         &mut manifest_skeleton,
                                         &mut resolve_memo,
                                         &mut transform_memo,
+                                        &mut xform_queries,
                                         &path,
                                     );
                                 } else {
@@ -1215,6 +1200,7 @@ fn spawn_stage_owner_for(
                                         &mut stage_tree,
                                         &mut resolve_memo,
                                         &mut transform_memo,
+                                        &mut xform_queries,
                                         &path,
                                     );
                                 }
@@ -1233,6 +1219,7 @@ fn spawn_stage_owner_for(
                                     &mut stage_tree,
                                     &mut resolve_memo,
                                     &mut transform_memo,
+                                    &mut xform_queries,
                                     "/",
                                 );
                             }
@@ -1283,6 +1270,7 @@ fn spawn_stage_owner_for(
                                         &mut manifest_skeleton,
                                         &mut resolve_memo,
                                         &mut transform_memo,
+                                        &mut xform_queries,
                                         &path,
                                     );
                                 } else {
@@ -1294,6 +1282,7 @@ fn spawn_stage_owner_for(
                                         &mut stage_tree,
                                         &mut resolve_memo,
                                         &mut transform_memo,
+                                        &mut xform_queries,
                                         &path,
                                     );
                                 }
@@ -1366,6 +1355,7 @@ fn spawn_stage_owner_for(
                                 &mut stage_tree,
                                 &mut resolve_memo,
                                 &mut transform_memo,
+                                &mut xform_queries,
                                 "/",
                             );
                         }
@@ -1793,6 +1783,7 @@ fn after_mutation(
     stage_tree: &mut Option<Vec<PrimNode>>,
     resolve_memo: &mut ResolveMemo,
     transforms: &mut TransformMemo,
+    xform_queries: &mut XformQueries,
     path: &str,
 ) {
     // shortcut: coarse clear — any edit invalidates every cached
@@ -1810,6 +1801,7 @@ fn after_mutation(
     *stage_tree = None;
     resolve_memo.clear();
     transforms.clear();
+    xform_queries.clear();
     emit_stage_changed(sink, path);
 }
 
@@ -1827,6 +1819,9 @@ fn emit_stage_changed(sink: &Option<StageChangeSink>, path: &str) {
 /// facts depend on this one's matrix, so only the edited prim's cached static
 /// transform goes, together with the transform-dependent tessellations and the
 /// path resolutions.
+// The nine arguments are the owner-thread caches this keep must reach; a
+// bundle struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 fn warm_xform_keep(
     sink: &Option<StageChangeSink>,
     mesh_cache: &mut MeshCache,
@@ -1834,6 +1829,7 @@ fn warm_xform_keep(
     manifest_skeleton: &mut Option<ManifestSkeleton>,
     resolve_memo: &mut ResolveMemo,
     transforms: &mut TransformMemo,
+    xform_queries: &mut XformQueries,
     path: &str,
 ) {
     // shortcut: coarse clear — tessellation may bake transform-dependent
@@ -1849,6 +1845,7 @@ fn warm_xform_keep(
     // whole map goes: serving a pre-edit pose after a gizmo commit, an undo
     // or a redo is the one thing this cache must never do.
     transforms.clear();
+    xform_queries.clear();
     emit_stage_changed(sink, path);
 }
 
@@ -3267,7 +3264,7 @@ fn prototype_children(
         let type_name = prototype.type_name.clone();
         // A prototype root whose own xformOpOrder samples moves: the build
         // leaves its static transform unset, so the per-time read stands in.
-        let proto_xform = node_transform(prototype, time, ctx.transforms)?;
+        let proto_xform = node_transform(prototype, time, ctx.transforms, ctx.queries)?;
         // The prototype root's own xform is folded into every
         // instance matrix, so sampled proto xformOps animate the
         // child as much as the instancer's own arrays do.
@@ -3388,13 +3385,15 @@ type PrototypeMemo = HashMap<(sdf::Path, bool, SubtreeMode), Vec<RenderNode>>;
 struct WalkCtx<'a> {
     prototypes: PrototypeMemo,
     transforms: &'a mut TransformMemo,
+    queries: &'a mut XformQueries,
 }
 
 impl<'a> WalkCtx<'a> {
-    fn new(transforms: &'a mut TransformMemo) -> Self {
+    fn new(transforms: &'a mut TransformMemo, queries: &'a mut XformQueries) -> Self {
         Self {
             prototypes: PrototypeMemo::new(),
             transforms,
+            queries,
         }
     }
 }
@@ -3515,7 +3514,7 @@ fn render_children(
             .ok_or_else(|| format!("cached manifest facts missing for prim {}", child))?;
         let deforms = facts.renders_geometry && facts.self_deforms;
         let moves = ancestor_moves || facts.self_moves;
-        let transform = node_transform(facts, time, ctx.transforms)?;
+        let transform = node_transform(facts, time, ctx.transforms, ctx.queries)?;
         if facts.excluded {
             // Purpose proxy/guide is a cached fact: the prim itself emits
             // nothing and its descendants flatten up with its transform
@@ -3593,7 +3592,7 @@ fn delta_children(
             continue;
         }
         let moves = ancestor_moves || facts.self_moves;
-        let transform = node_transform(facts, time, ctx.transforms)?;
+        let transform = node_transform(facts, time, ctx.transforms, ctx.queries)?;
         if facts.excluded {
             // The lift composes this transform into the descendants' local
             // matrices, so its own motion forces the whole level along; its
@@ -3778,6 +3777,7 @@ fn node_transform(
     facts: &SkeletonFacts,
     time: Option<f64>,
     transforms: &mut TransformMemo,
+    queries: &mut XformQueries,
 ) -> Result<gf::Matrix4d, String> {
     if let Some(matrix) = facts.static_transform {
         return Ok(matrix);
@@ -3786,7 +3786,15 @@ fn node_transform(
     if let Some(matrix) = transforms.get(path.as_str(), time) {
         return Ok(*matrix);
     }
-    let matrix = local_transform(&facts.prim, time)?.unwrap_or(gf::Matrix4d::IDENTITY);
+    if !queries.contains_key(path.as_str()) {
+        queries.insert(path.to_string(), XformQuery::new(&facts.prim));
+    }
+    let query = queries
+        .get_mut(path.as_str())
+        .ok_or_else(|| format!("xform query missing for {}", path))?;
+    let matrix = query
+        .local_transform(time)?
+        .unwrap_or(gf::Matrix4d::IDENTITY);
     transforms.insert(
         path.to_string(),
         time,
@@ -3806,7 +3814,8 @@ pub fn serialize_render_manifest(
     // and semantics are unchanged either way — a pure perf refactor.
     let skeleton = ManifestSkeleton::build(stage)?;
     let mut transforms = new_transform_memo();
-    let mut ctx = WalkCtx::new(&mut transforms);
+    let mut queries = new_xform_queries();
+    let mut ctx = WalkCtx::new(&mut transforms, &mut queries);
     render_children(&skeleton, &skeleton.root_children, time, false, &mut ctx)
 }
 
@@ -3816,7 +3825,8 @@ pub fn serialize_animated_manifest(
 ) -> Result<Vec<RenderNode>, String> {
     let skeleton = ManifestSkeleton::build(stage)?;
     let mut transforms = new_transform_memo();
-    let mut ctx = WalkCtx::new(&mut transforms);
+    let mut queries = new_xform_queries();
+    let mut ctx = WalkCtx::new(&mut transforms, &mut queries);
     delta_children(
         &skeleton,
         &skeleton.root_children,
@@ -4089,6 +4099,16 @@ fn new_transform_memo() -> TransformMemo {
     // authored codes without ever clearing, and eviction only costs a
     // recomputed matrix.
     KeyedCache::with_limits(64 * 1024 * 1024, 131_072)
+}
+
+/// Per-prim cached xform composition queries, keyed by prim path. Cleared on
+/// `Open` only: an entry holds the stage it was built from, while the queries
+/// themselves already re-resolve when the prim's revision moves (the crate
+/// stamps each memo with it), so an edit needs no clear here.
+type XformQueries = HashMap<String, XformQuery>;
+
+fn new_xform_queries() -> XformQueries {
+    XformQueries::new()
 }
 
 /// Rewrite a frontend-requested prim path to the prim the request actually
@@ -4372,6 +4392,51 @@ fn write_pose_node(
         }
     }
     Ok(())
+}
+
+/// One pose frame, cached: the delta walk at `time`, the geometry batch over
+/// the deforming paths, and the framing of both. The whole `GetAnimatedPose`
+/// arm, so a warm code costs one cache lookup.
+#[allow(clippy::too_many_arguments)]
+fn pose_frame_bytes(
+    stage: &Stage,
+    mesh_cache: &mut MeshCache,
+    pose_frames: &mut PoseFrameCache,
+    resolve_memo: &mut ResolveMemo,
+    transforms: &mut TransformMemo,
+    xform_queries: &mut XformQueries,
+    manifest_skeleton: &mut Option<ManifestSkeleton>,
+    time: Option<f64>,
+) -> Result<Vec<u8>, String> {
+    if let Some(frame) = pose_frames.get(time) {
+        return Ok(frame.to_vec());
+    }
+    if manifest_skeleton.is_none() {
+        *manifest_skeleton = Some(ManifestSkeleton::build(stage)?);
+    }
+    let skeleton = manifest_skeleton
+        .as_ref()
+        .ok_or_else(|| "manifest skeleton build failed".to_string())?;
+    let nodes = {
+        let mut ctx = WalkCtx::new(transforms, xform_queries);
+        delta_children(
+            skeleton,
+            &skeleton.root_children,
+            time,
+            false,
+            &mut ctx,
+            false,
+            false,
+        )?
+    };
+    let paths = animated_geometry_paths(&nodes);
+    let slots: Vec<Result<Arc<[u8]>, String>> = paths
+        .iter()
+        .map(|path| geometry_bytes(stage, mesh_cache, resolve_memo, path, time))
+        .collect();
+    let frame = frame_pose(&nodes, &slots)?;
+    pose_frames.insert(time, Arc::from(frame.as_slice()));
+    Ok(frame)
 }
 
 /// The merged pose response, one invoke per pose:

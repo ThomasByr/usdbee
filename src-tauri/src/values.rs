@@ -3,7 +3,7 @@ use std::fmt;
 
 use openusd::gf;
 use openusd::sdf::{self, AssetPath, ListOp, Value, ValueTypeName};
-use openusd::usd::{Attribute, Prim, Stage, TimeCode};
+use openusd::usd::{Attribute, AttributeQuery, Prim, Stage, TimeCode};
 use serde::{Deserialize, Serialize};
 
 /// One resolved USD value as a tagged union: `type` names the value family
@@ -823,11 +823,7 @@ fn composition_arcs(stage: &Stage, prim: &Prim) -> Vec<String> {
 /// accumulator, giving the USD contract that the first listed op applies
 /// last.
 pub fn local_transform(prim: &Prim, time: Option<f64>) -> Result<Option<gf::Matrix4d>, String> {
-    Ok(match compose_xform(prim, time)? {
-        ComposedXform::NoOps => Some(gf::Matrix4d::IDENTITY),
-        ComposedXform::Unsupported => None,
-        ComposedXform::Matrix(matrix) => Some(matrix),
-    })
+    XformQuery::new(prim).local_transform(time)
 }
 
 /// The outcome of composing a prim's `xformOpOrder`.
@@ -850,31 +846,124 @@ enum OpOutcome {
     Unrecognized,
 }
 
-fn compose_xform(prim: &Prim, time: Option<f64>) -> Result<ComposedXform, String> {
-    let order = prim
-        .attribute("xformOpOrder")
-        .get_at::<Value>(time.map(TimeCode::new))
-        .map_err(err)?;
-    let Some(Value::TokenVec(ops)) = order else {
-        return Ok(ComposedXform::NoOps);
-    };
-    let mut acc = gf::Matrix4d::IDENTITY;
-    for op in ops {
-        let op = op.as_str();
-        if op == "!resetXformStack!" {
-            acc = gf::Matrix4d::IDENTITY;
-            continue;
-        }
-        let outcome = op_transform(prim, op, time)?;
-        match outcome {
-            OpOutcome::Matrix(matrix) => acc = matrix * acc,
-            ref other => {
-                eprintln!("{}", xform_warning(op, &prim.path().to_string(), other));
-                return Ok(ComposedXform::Unsupported);
-            }
+/// One prim's `xformOpOrder` and op sources as cached composition queries.
+///
+/// `AttributeQuery` resolves an attribute's winning opinion once and stamps
+/// the memo with the prim's revision, so every later time code is an
+/// interpolation instead of another opinion walk — the difference between
+/// ~116 ms and a few ms for the first pass over a long clip in dev. The memo
+/// self-invalidates: an edit to the prim rebuilds it, an edit elsewhere
+/// leaves it standing, so this needs no clear of its own.
+///
+/// The op list is rebuilt lazily (`xformOpOrder` is almost never sampled, so
+/// normally one read fills it and the rest are reused).
+pub(crate) struct XformQuery {
+    prim: Prim,
+    order: AttributeQuery,
+    ops: Vec<(String, AttributeQuery)>,
+}
+
+impl XformQuery {
+    pub(crate) fn new(prim: &Prim) -> Self {
+        Self {
+            prim: prim.clone(),
+            order: prim.attribute("xformOpOrder").query(),
+            ops: Vec::new(),
         }
     }
-    Ok(ComposedXform::Matrix(acc))
+
+    /// The local transform through the cached queries; same contract as
+    /// [`local_transform`].
+    pub(crate) fn local_transform(
+        &mut self,
+        time: Option<f64>,
+    ) -> Result<Option<gf::Matrix4d>, String> {
+        Ok(match self.compose_xform(time)? {
+            ComposedXform::NoOps => Some(gf::Matrix4d::IDENTITY),
+            ComposedXform::Unsupported => None,
+            ComposedXform::Matrix(matrix) => Some(matrix),
+        })
+    }
+
+    fn compose_xform(&mut self, time: Option<f64>) -> Result<ComposedXform, String> {
+        let order = self
+            .order
+            .get_at::<Value>(time.map(TimeCode::new))
+            .map_err(err)?;
+        let Some(Value::TokenVec(ops)) = order else {
+            return Ok(ComposedXform::NoOps);
+        };
+        let mut acc = gf::Matrix4d::IDENTITY;
+        for op in ops {
+            let op = op.as_str();
+            if op == "!resetXformStack!" {
+                acc = gf::Matrix4d::IDENTITY;
+                continue;
+            }
+            let outcome = self.op_transform(op, time)?;
+            match outcome {
+                OpOutcome::Matrix(matrix) => acc = matrix * acc,
+                ref other => {
+                    eprintln!(
+                        "{}",
+                        xform_warning(op, &self.prim.path().to_string(), other)
+                    );
+                    return Ok(ComposedXform::Unsupported);
+                }
+            }
+        }
+        Ok(ComposedXform::Matrix(acc))
+    }
+
+    /// The cached query for one op, built on first sight. The op list can be
+    /// sampled, so a name may only appear at some times; querying whatever was
+    /// already built keeps that case as cheap as the static one.
+    fn op(&mut self, name: &str) -> &AttributeQuery {
+        let index = match self.ops.iter().position(|(op, _)| op == name) {
+            Some(index) => index,
+            None => {
+                self.ops
+                    .push((name.to_string(), self.prim.attribute(name).query()));
+                self.ops.len() - 1
+            }
+        };
+        &self.ops[index].1
+    }
+
+    /// One op of the order evaluated through its cached query.
+    fn op_transform(&mut self, op: &str, time: Option<f64>) -> Result<OpOutcome, String> {
+        let (op, invert) = strip_inversion(op);
+        let Some(name) = op.strip_prefix("xformOp:") else {
+            return Ok(OpOutcome::Unrecognized);
+        };
+        let Some(value) = self
+            .op(op)
+            .get_at::<Value>(time.map(TimeCode::new))
+            .map_err(err)?
+        else {
+            return Ok(OpOutcome::NoValue);
+        };
+        let base = name.split(':').next().unwrap_or(name);
+        Ok(decode_op(base, invert, &value))
+    }
+}
+
+/// The op name split from the `!inverted!`/`!invert!` prefix the Maya pivot
+/// pattern pairs around an op.
+fn strip_inversion(op: &str) -> (&str, bool) {
+    match op
+        .strip_prefix("!inverted!")
+        .or_else(|| op.strip_prefix("!invert!"))
+    {
+        Some(op) => (op, true),
+        None => (op, false),
+    }
+}
+
+/// `compose_xform` on a throwaway query: the one-shot callers (details,
+/// world transform) that read a prim once.
+fn compose_xform(prim: &Prim, time: Option<f64>) -> Result<ComposedXform, String> {
+    XformQuery::new(prim).compose_xform(time)
 }
 
 fn xform_warning(op: &str, path: &str, outcome: &OpOutcome) -> String {
@@ -899,24 +988,10 @@ pub(crate) fn resets_xform_stack(prim: &Prim, time: Option<f64>) -> Result<bool,
 /// Suffixed ops (`xformOp:translate:pivot`) evaluate as their base op, and
 /// `!inverted!` entries evaluate as the inverse of their op's matrix (the
 /// Maya pivot pattern pairs the two around the in-between ops).
-fn op_transform(prim: &Prim, op: &str, time: Option<f64>) -> Result<OpOutcome, String> {
-    let (op, invert) = match op
-        .strip_prefix("!inverted!")
-        .or_else(|| op.strip_prefix("!invert!"))
-    {
-        Some(op) => (op, true),
-        None => (op, false),
-    };
-    let Some(name) = op.strip_prefix("xformOp:") else {
-        return Ok(OpOutcome::Unrecognized);
-    };
-    let Some(value) = prim
-        .attribute(op)
-        .value_at::<Value>(time.map(TimeCode::new))
-        .map_err(err)?
-    else {
-        return Ok(OpOutcome::NoValue);
-    };
+///
+/// One op value decoded to its matrix: the evaluator's coverage, independent of
+/// how the value was composed.
+fn decode_op(base: &str, invert: bool, value: &Value) -> OpOutcome {
     let vec3 = |value: &Value| -> Option<[f64; 3]> {
         match value {
             Value::Vec3d(v) => Some([v.x, v.y, v.z]),
@@ -938,8 +1013,7 @@ fn op_transform(prim: &Prim, op: &str, time: Option<f64>) -> Result<OpOutcome, S
     };
     // Suffixes (`xformOp:translate:pivot`) evaluate as the base op; the
     // decoded value and the matrix come from the base name alone.
-    let base = name.split(':').next().unwrap_or(name);
-    let matrix = match (base, &value) {
+    let matrix = match (base, value) {
         ("translate", v) => vec3(v).map(gf::Matrix4d::translation),
         ("scale", v) => vec3(v).map(gf::Matrix4d::scale),
         ("rotateX", v) => degrees(v).map(|d| rotate(b'X', d)),
@@ -951,10 +1025,10 @@ fn op_transform(prim: &Prim, op: &str, time: Option<f64>) -> Result<OpOutcome, S
         (name, v) if name.starts_with("rotate") && name.len() == "rotate".len() + 3 => {
             let order = &name.as_bytes()["rotate".len()..];
             if !order.iter().all(|axis| matches!(axis, b'X' | b'Y' | b'Z')) {
-                return Ok(OpOutcome::Unrecognized);
+                return OpOutcome::Unrecognized;
             }
             let Some([x, y, z]) = vec3(v) else {
-                return Ok(OpOutcome::Unrecognized);
+                return OpOutcome::Unrecognized;
             };
             let angle = |axis: u8| match axis {
                 b'X' => x,
@@ -973,13 +1047,13 @@ fn op_transform(prim: &Prim, op: &str, time: Option<f64>) -> Result<OpOutcome, S
         _ => None,
     };
     match (matrix, invert) {
-        (Some(matrix), false) => Ok(OpOutcome::Matrix(matrix)),
+        (Some(matrix), false) => OpOutcome::Matrix(matrix),
         // A singular op matrix has no inverse; treat it as unrecognized
         // rather than dropping the inversion.
-        (Some(matrix), true) => Ok(matrix
+        (Some(matrix), true) => matrix
             .inverse()
-            .map_or(OpOutcome::Unrecognized, OpOutcome::Matrix)),
-        (None, _) => Ok(OpOutcome::Unrecognized),
+            .map_or(OpOutcome::Unrecognized, OpOutcome::Matrix),
+        (None, _) => OpOutcome::Unrecognized,
     }
 }
 
@@ -1227,7 +1301,9 @@ mod tests {
         // Samples are authored at 1s+ only, so default time has no value: a
         // distinct outcome from an op the evaluator cannot decode.
         assert!(matches!(
-            op_transform(&time_orient, "xformOp:orient", None).unwrap(),
+            XformQuery::new(&time_orient)
+                .op_transform("xformOp:orient", None)
+                .unwrap(),
             OpOutcome::NoValue
         ));
         assert!(
@@ -1239,7 +1315,9 @@ mod tests {
             .prim("/World/Unsupported")
             .unwrap_or_else(|e| panic!("/World/Unsupported resolvable: {e}"));
         assert!(matches!(
-            op_transform(&unsupported, "xformOp:flip", None).unwrap(),
+            XformQuery::new(&unsupported)
+                .op_transform("xformOp:flip", None)
+                .unwrap(),
             OpOutcome::Unrecognized
         ));
         assert!(xform_warning(
@@ -1301,7 +1379,9 @@ mod tests {
         let prim = stage
             .prim("/World/FloatRotate")
             .unwrap_or_else(|e| panic!("/World/FloatRotate resolvable: {e}"));
-        let matrix = op_transform(&prim, "xformOp:rotateY", None).unwrap();
+        let matrix = XformQuery::new(&prim)
+            .op_transform("xformOp:rotateY", None)
+            .unwrap();
         let OpOutcome::Matrix(matrix) = matrix else {
             panic!("float rotateY evaluates: {matrix:?}")
         };
@@ -1309,6 +1389,52 @@ mod tests {
             &gf::Matrix4d::rotation_y(90.0_f64.to_radians()).0,
             &matrix.0,
         );
+    }
+
+    #[test]
+    fn cached_queries_replay_the_same_matrices_at_every_time() {
+        let stage = xforms_stage();
+        // Every op shape the evaluator handles: no ops, translate, triplet
+        // rotations, suffixed pivots, `!inverted!`, `!resetXformStack!`, an
+        // unsupported op and a sampled quat. The sampled one is the point:
+        // its source is resolved once and replayed across times, so a replay
+        // that disagreed with a fresh composition would show there first.
+        let paths = [
+            "/World",
+            "/World/TripletZYX",
+            "/World/SinglesZYX",
+            "/World/Reset",
+            "/World/Pivoted",
+            "/World/MayaPivot",
+            "/World/MayaPivotInvert",
+            "/World/Unsupported",
+            "/World/TimeOrient",
+            "/World/FloatRotate",
+        ];
+        for path in paths {
+            let prim = stage
+                .prim(path)
+                .unwrap_or_else(|e| panic!("{path} resolvable: {e}"));
+            let mut query = XformQuery::new(&prim);
+            for time in [1.0, 2.0, 0.0, 1.0, 2.5, 1.0] {
+                let seconds = Some(time);
+                assert_eq!(
+                    query
+                        .local_transform(seconds)
+                        .unwrap()
+                        .map(|matrix| matrix.0),
+                    local_transform(&prim, seconds)
+                        .unwrap()
+                        .map(|matrix| matrix.0),
+                    "{path} at {time}"
+                );
+            }
+            assert_eq!(
+                query.local_transform(None).unwrap().map(|matrix| matrix.0),
+                local_transform(&prim, None).unwrap().map(|matrix| matrix.0),
+                "{path} at the default time"
+            );
+        }
     }
 
     fn xforms_stage() -> Stage {
