@@ -86,6 +86,14 @@ pub enum StageRequest {
     GetWarmupProgress {
         reply: mpsc::Sender<Result<(usize, usize), String>>,
     },
+    // Dev/test hook, never sent by the app: turn the idle-gap warmup off so a
+    // probe or a test measures caches it filled itself. Turning it off also
+    // drops what it warmed (a cold read has to be cold at the first code), so
+    // the next request pays full price.
+    SetWarmupEnabled {
+        enabled: bool,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
     GetGeometry {
         path: String,
         time: Option<f64>,
@@ -645,22 +653,25 @@ fn spawn_stage_owner_for(
         // in this epoch, or an invalidation dropped it); refilled from the
         // manifest skeleton on the next idle gap.
         let mut warm: Warmup = None;
+        // The warmup's only off switch (dev/test): see SetWarmupEnabled.
+        let mut warmup_enabled = true;
         loop {
             let request = match receiver.try_recv() {
                 Ok(request) => request,
                 // Idle: spend one gap on one warm pose, then poll again so a
                 // command that arrived meanwhile is served before the next.
                 Err(mpsc::TryRecvError::Empty)
-                    if warm_one_step(
-                        current_stage.as_deref(),
-                        &mut mesh_cache,
-                        &mut pose_frames,
-                        &mut resolve_memo,
-                        &mut transform_memo,
-                        &mut xform_queries,
-                        &mut manifest_skeleton,
-                        &mut warm,
-                    ) =>
+                    if warmup_enabled
+                        && warm_one_step(
+                            current_stage.as_deref(),
+                            &mut mesh_cache,
+                            &mut pose_frames,
+                            &mut resolve_memo,
+                            &mut transform_memo,
+                            &mut xform_queries,
+                            &mut manifest_skeleton,
+                            &mut warm,
+                        ) =>
                 {
                     continue;
                 }
@@ -904,6 +915,19 @@ fn spawn_stage_owner_for(
                     };
                     let _ = reply.send(response);
                 }
+                StageRequest::SetWarmupEnabled { enabled, reply } => {
+                    warmup_enabled = enabled;
+                    if !enabled {
+                        // A warm frame or mesh the probe did not ask for would
+                        // make its "cold" pass partly warm: drop them with the
+                        // queue.
+                        warm = None;
+                        mesh_cache.clear();
+                        pose_frames.clear();
+                        transform_memo.clear();
+                    }
+                    let _ = reply.send(Ok(()));
+                }
                 StageRequest::GetMaterial { path, reply } => {
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
@@ -986,7 +1010,6 @@ fn spawn_stage_owner_for(
                                     &mut manifest_skeleton,
                                     &mut resolve_memo,
                                     &mut transform_memo,
-                                    &mut xform_queries,
                                     &mut warm,
                                     &emitted,
                                 );
@@ -999,7 +1022,6 @@ fn spawn_stage_owner_for(
                                     &mut stage_tree,
                                     &mut resolve_memo,
                                     &mut transform_memo,
-                                    &mut xform_queries,
                                     &mut warm,
                                     &emitted,
                                 );
@@ -1042,7 +1064,6 @@ fn spawn_stage_owner_for(
                                 &mut stage_tree,
                                 &mut resolve_memo,
                                 &mut transform_memo,
-                                &mut xform_queries,
                                 &mut warm,
                                 &path,
                             );
@@ -1089,7 +1110,6 @@ fn spawn_stage_owner_for(
                                 &mut stage_tree,
                                 &mut resolve_memo,
                                 &mut transform_memo,
-                                &mut xform_queries,
                                 &mut warm,
                                 &path,
                             );
@@ -1130,7 +1150,6 @@ fn spawn_stage_owner_for(
                                 &mut stage_tree,
                                 &mut resolve_memo,
                                 &mut transform_memo,
-                                &mut xform_queries,
                                 &mut warm,
                                 &path,
                             );
@@ -1239,7 +1258,6 @@ fn spawn_stage_owner_for(
                                         &mut manifest_skeleton,
                                         &mut resolve_memo,
                                         &mut transform_memo,
-                                        &mut xform_queries,
                                         &mut warm,
                                         &path,
                                     );
@@ -1252,7 +1270,6 @@ fn spawn_stage_owner_for(
                                         &mut stage_tree,
                                         &mut resolve_memo,
                                         &mut transform_memo,
-                                        &mut xform_queries,
                                         &mut warm,
                                         &path,
                                     );
@@ -1272,7 +1289,6 @@ fn spawn_stage_owner_for(
                                     &mut stage_tree,
                                     &mut resolve_memo,
                                     &mut transform_memo,
-                                    &mut xform_queries,
                                     &mut warm,
                                     "/",
                                 );
@@ -1324,7 +1340,6 @@ fn spawn_stage_owner_for(
                                         &mut manifest_skeleton,
                                         &mut resolve_memo,
                                         &mut transform_memo,
-                                        &mut xform_queries,
                                         &mut warm,
                                         &path,
                                     );
@@ -1337,7 +1352,6 @@ fn spawn_stage_owner_for(
                                         &mut stage_tree,
                                         &mut resolve_memo,
                                         &mut transform_memo,
-                                        &mut xform_queries,
                                         &mut warm,
                                         &path,
                                     );
@@ -1411,7 +1425,6 @@ fn spawn_stage_owner_for(
                                 &mut stage_tree,
                                 &mut resolve_memo,
                                 &mut transform_memo,
-                                &mut xform_queries,
                                 &mut warm,
                                 "/",
                             );
@@ -1867,13 +1880,11 @@ fn warm_one_step(
         return false;
     };
     if warm.is_none() {
-        if manifest_skeleton.is_none() {
-            // The first manifest needs this build anyway; a failure leaves the
-            // caches as they were and simply ends this warmup.
-            *manifest_skeleton = ManifestSkeleton::build(stage).ok();
-        }
+        // A step must stay one pose. Building the skeleton here would put a
+        // full-stage walk inside the first step, and a command arriving
+        // mid-build cannot preempt it; warm up only once the request that
+        // needs the skeleton anyway has built it.
         let Some(skeleton) = manifest_skeleton.as_ref() else {
-            *warm = Some((Vec::new(), 0, 0));
             return false;
         };
         *warm = Some((skeleton.time_codes.clone(), 0, 0));
@@ -1920,7 +1931,7 @@ fn warm_one_step(
 /// `usd-stage-changed` emission for the edited path. The dirty mark and the
 /// undo journal live in `record_user_mutation` (mutation arms) or the
 /// undo/redo arms' own ledger updates.
-// The eight arguments are the owner-thread caches this clear must reach; a
+// The seven arguments are the owner-thread caches this clear must reach; a
 // bundle struct would only rename them.
 #[allow(clippy::too_many_arguments)]
 fn after_mutation(
@@ -1931,7 +1942,6 @@ fn after_mutation(
     stage_tree: &mut Option<Vec<PrimNode>>,
     resolve_memo: &mut ResolveMemo,
     transforms: &mut TransformMemo,
-    xform_queries: &mut XformQueries,
     warm: &mut Warmup,
     path: &str,
 ) {
@@ -1949,8 +1959,10 @@ fn after_mutation(
     // The tree may change shape too (variant switches, authored children).
     *stage_tree = None;
     resolve_memo.clear();
+    // The xform queries stay: each one is stamped with its prim's revision and
+    // re-resolves when an edit moves it, so re-clearing here would only re-pay
+    // the source resolution this commit removed from every drag frame.
     transforms.clear();
-    xform_queries.clear();
     // The caches this queue fills are gone: re-warm from the first code.
     *warm = None;
     emit_stage_changed(sink, path);
@@ -1969,8 +1981,10 @@ fn emit_stage_changed(sink: &Option<StageChangeSink>, path: &str) {
 /// prim tree holds no transform-derived field and no other prim's skeleton
 /// facts depend on this one's matrix, so only the edited prim's cached static
 /// transform goes, together with the transform-dependent tessellations and the
-/// path resolutions.
-// The nine arguments are the owner-thread caches this keep must reach; a
+/// path resolutions. The xform queries survive too — the crate restales the
+/// edited prim's value revision, which is what their cached source is stamped
+/// against.
+// The eight arguments are the owner-thread caches this keep must reach; a
 // bundle struct would only rename them.
 #[allow(clippy::too_many_arguments)]
 fn warm_xform_keep(
@@ -1980,7 +1994,6 @@ fn warm_xform_keep(
     manifest_skeleton: &mut Option<ManifestSkeleton>,
     resolve_memo: &mut ResolveMemo,
     transforms: &mut TransformMemo,
-    xform_queries: &mut XformQueries,
     warm: &mut Warmup,
     path: &str,
 ) {
@@ -1997,7 +2010,9 @@ fn warm_xform_keep(
     // whole map goes: serving a pre-edit pose after a gizmo commit, an undo
     // or a redo is the one thing this cache must never do.
     transforms.clear();
-    xform_queries.clear();
+    // The xform queries stay: they re-resolve when the edited prim's revision
+    // moves (see `XformQueries`), which is the whole reason the memo above is
+    // the only thing this path clears.
     // The frames and tessellations this queue filled are gone: re-warm from the
     // first code under the kept skeleton.
     *warm = None;
@@ -4871,6 +4886,22 @@ pub fn request_time_codes(sender: &mpsc::Sender<StageRequest>) -> Result<Vec<f64
     let (reply, response) = mpsc::channel();
     sender
         .send(StageRequest::GetTimeCodes { reply })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+/// Turn the idle-gap warmup on or off for one stage (dev/test hook: the app
+/// never calls it). Off also drops what it warmed, so a measurement starts
+/// from the caches it owns; on lets the next idle gap queue the code list.
+pub fn request_set_warmup_enabled(
+    sender: &mpsc::Sender<StageRequest>,
+    enabled: bool,
+) -> Result<(), String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::SetWarmupEnabled { enabled, reply })
         .map_err(|_| "stage service unavailable".to_string())?;
     response
         .recv()

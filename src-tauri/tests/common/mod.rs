@@ -37,9 +37,19 @@ impl TestOwner {
             .expect("a stage should be open")
     }
 
+    /// Switch the owner's idle-gap warmup off (dev/test hook, `None` on the
+    /// app side) and drop what it warmed, so the cache counters and the frame
+    /// cache below are the test's own.
+    pub fn disable_warmup(&self) {
+        usdbee_lib::stage::request_set_warmup_enabled(&self.sender(), false)
+            .expect("warmup should switch off");
+    }
+
     /// Block until the owner's idle-gap warmup has pre-evaluated every authored
     /// time code. Once it returns, the process-wide cache counters belong to the
     /// test's own requests again — the point of waiting rather than sleeping.
+    /// A stage whose manifest skeleton no one built yet never queues (see
+    /// `warm_one_step`), so ask for a manifest first.
     pub fn wait_for_warmup(&self) {
         let sender = self.sender();
         let deadline = std::time::Instant::now() + Duration::from_secs(60);

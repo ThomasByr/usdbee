@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use usdbee_lib::stage::{
     noop_sink, open_stage, request_animated_manifest, request_animated_pose,
-    request_geometry_batch, request_time_codes, RenderNode, StageState,
+    request_geometry_batch, request_set_warmup_enabled, request_time_codes, RenderNode, StageState,
 };
 
 fn ms(duration: Duration) -> f64 {
@@ -230,6 +230,10 @@ fn main() {
         .open(&open_path, is_usdz, None, extraction.as_deref())
         .unwrap();
     let sender = state.sender(info.stage_id).unwrap();
+    // True cold numbers: the idle-gap warmup would otherwise warm the codes
+    // ahead of the probe's requests (it runs in every gap between them), so
+    // loop 1 would measure a partly warm pass. Off drops what it warmed too.
+    request_set_warmup_enabled(&sender, false).unwrap();
     let mut codes = request_time_codes(&sender).unwrap();
     codes.sort_by(|a, b| a.partial_cmp(b).unwrap());
     codes.dedup();

@@ -121,6 +121,11 @@ fn a_warmed_code_serves_its_frame_from_the_cache() {
     state.open(&fixture("many_codes.usda"));
     let sender = state.sender();
 
+    // Warming waits for the skeleton the first manifest request builds (a warm
+    // step must stay one pose), so ask for the codes first.
+    let codes = request_time_codes(&sender).expect("time codes");
+    assert_eq!(codes.len(), 240, "the fixture authors one code per frame");
+
     let (warmed, total) = wait_until_warm(&sender);
     assert_eq!(warmed, total);
 
@@ -191,6 +196,59 @@ fn an_edit_mid_warmup_lands_no_stale_frame() {
     );
 }
 
+// An edit drops the queue with the caches, and the pass must restart at the
+// FIRST code: keeping the cursor would leave every code before it cold for the
+// rest of the session. The edit here authors no time samples (a default-time
+// visibility write), so the code list survives it and the reset is observable.
+#[test]
+fn an_edit_restarts_the_queue_at_the_first_code() {
+    let state = common::spawn_stage_owner();
+    state.open(&fixture("many_codes.usda"));
+    let sender = state.sender();
+
+    let codes = request_time_codes(&sender).expect("time codes");
+    let first = codes[0];
+
+    // Let the pass get under way: the cursor must be past the first code for
+    // the restart to be what puts it back in the caches.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let progress = request_warmup_progress(&sender).expect("progress should reply");
+        if progress.1 > 0 && progress.0 >= 4 && progress.0 < progress.1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the queue never started: {progress:?}"
+        );
+    }
+
+    request_set_attribute_value(
+        &sender,
+        "/Scene/Slider",
+        "visibility",
+        &payload("token", serde_json::json!("invisible")),
+        None,
+    )
+    .expect("the edit should commit");
+
+    // The edit dropped the skeleton with the caches; warming waits for the
+    // request that rebuilds it (a warm step is one pose, never a build).
+    request_time_codes(&sender).expect("time codes");
+
+    let (warmed, total) = wait_until_warm(&sender);
+    assert_eq!(warmed, total);
+    assert_eq!(total, codes.len(), "the edit kept the code list");
+
+    let hits = state.pose_frame_hits();
+    request_animated_pose(&sender, Some(first)).expect("pose should reply");
+    assert_eq!(
+        state.pose_frame_hits(),
+        hits + 1,
+        "the restarted pass warmed the first code too"
+    );
+}
+
 #[test]
 fn a_command_is_served_while_the_queue_is_still_pending() {
     let state = common::spawn_stage_owner();
@@ -199,11 +257,22 @@ fn a_command_is_served_while_the_queue_is_still_pending() {
 
     // Sent straight after the open reply, so the owner has had only a couple
     // of idle gaps: 240 codes cannot be warm yet, and the pose must not wait
-    // for them.
+    // for them. The queue is filled on the next idle gap, which the pose reply
+    // does not guarantee has happened yet: poll for it (each poll is itself a
+    // command, so the pass advances at most one code per poll).
     request_animated_pose(&sender, Some(3.0)).expect("pose should reply");
 
-    let (warmed, total) = request_warmup_progress(&sender).expect("progress should reply");
-    assert!(total > 0, "the queue should be filled by now");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (warmed, total) = loop {
+        let progress = request_warmup_progress(&sender).expect("progress should reply");
+        if progress.1 > 0 {
+            break progress;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the queue should be filled by now"
+        );
+    };
     assert!(
         warmed < total,
         "the pose preempted the warmup instead of queueing behind it: {warmed}/{total}"
