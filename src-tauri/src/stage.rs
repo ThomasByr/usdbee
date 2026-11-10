@@ -3036,6 +3036,10 @@ fn samples_scene_motion(
         .type_name()
         .map_err(stage_err)?
         .is_some_and(|token| token == "PointInstancer");
+    let is_skel_animation = prim
+        .type_name()
+        .map_err(stage_err)?
+        .is_some_and(|token| token == "SkelAnimation");
     let mut transform = false;
     let mut geometry = false;
     let mut visibility = false;
@@ -3100,6 +3104,17 @@ fn samples_scene_motion(
                 prim.path(),
                 error
             ),
+        }
+    }
+    // A SkelAnimation's joint transform samples drive bound geometry through
+    // the skinning path, so they are authored codes playback can resolve even
+    // though none of them matches a scene-motion family above.
+    if is_skel_animation {
+        for name in ["translations", "rotations", "scales"] {
+            let attribute = prim.attribute(name);
+            if attribute.num_time_samples().map_err(stage_err)? > 0 {
+                sampled_attrs.push(attribute);
+            }
         }
     }
     Ok((transform, geometry, visibility))

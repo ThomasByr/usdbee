@@ -541,6 +541,19 @@ fn time_codes_union_every_animated_attribute() {
     assert_eq!(codes, vec![0.0, 1.0, 10.0, 24.0]);
 }
 
+// A SkelAnimation's joint transform samples are authored codes playback can
+// resolve (the skinning path reads them at the requested time), even though
+// they sit on a prim whose attributes match no scene-motion family.
+#[test]
+fn time_codes_include_skel_animation_samples() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "skel_anim_codes.usda");
+
+    // Wobble's points give 0 and 10; Swing's translations 3 and 7.
+    let codes = request_time_codes(&state.sender()).expect("time codes should serialize");
+    assert_eq!(codes, vec![0.0, 3.0, 7.0, 10.0]);
+}
+
 #[test]
 fn time_codes_empty_for_a_static_stage() {
     let state = spawn_stage_owner();

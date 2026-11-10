@@ -1,0 +1,68 @@
+#usda 1.0
+(
+    defaultPrim = "Rig"
+    startTimeCode = 0
+    endTimeCode = 10
+    timeCodesPerSecond = 24
+)
+
+def SkelRoot "Rig"
+{
+    def Skeleton "Skel" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        uniform token[] joints = ["A", "A/B"]
+        uniform matrix4d[] bindTransforms = [
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+        ]
+        uniform matrix4d[] restTransforms = [
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+            ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+        ]
+        prepend rel skel:animationSource = </Rig/Anims/Swing>
+    }
+
+    def Scope "Anims"
+    {
+        def SkelAnimation "Swing"
+        {
+            uniform token[] joints = ["A", "A/B"]
+            float3[] translations.timeSamples = {
+                3: [(0, 0, 0), (2, 0, 0)],
+                7: [(0, 0, 0), (2, 0, 1)]
+            }
+            quatf[] rotations = [(1, 0, 0, 0), (1, 0, 0, 0)]
+            half3[] scales = [(1, 1, 1), (1, 1, 1)]
+        }
+    }
+
+    def Mesh "Hose" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(2, 0, 0), (4, 0, 0), (4, 0, 0)]
+        int[] primvars:skel:jointIndices = [0, 1, 1] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        float[] primvars:skel:jointWeights = [1, 1, 1] (
+            elementSize = 1
+            interpolation = "vertex"
+        )
+        prepend rel skel:skeleton = </Rig/Skel>
+    }
+
+    def Mesh "Wobble"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points.timeSamples = {
+            0: [(0, 0, 0), (1, 0, 0), (1, 1, 0)],
+            10: [(0, 0, 0), (2, 0, 0), (2, 1, 0)]
+        }
+    }
+}
