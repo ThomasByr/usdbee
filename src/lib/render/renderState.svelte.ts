@@ -588,6 +588,11 @@ export const renderState = $state({
   // on purpose; the playback driver reads this to tell that lag apart from an
   // external write it must adopt.
   heldTime: null as number | null,
+  // Whether a pose step currently holds the transport. A paused scrub fires
+  // one step per drag step, so it is busy even though nothing is playing.
+  get isTimeStepInFlight() {
+    return timeStepInFlight;
+  },
 
   // Builds the render scene from the manifest of the currently open stage.
   // Returns null when the response was superseded (or the fetch failed) —

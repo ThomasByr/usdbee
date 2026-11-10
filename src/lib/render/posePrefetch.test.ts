@@ -67,6 +67,24 @@ describe("the window's anchor", () => {
     expect(poseBufferAnchoredAt(0)).toBe(false);
     expect(poseBufferAnchoredAt(null)).toBe(false);
   });
+
+  it("forgets it when the batch that claimed it failed", () => {
+    const claimed = claimPoseBatch(CODES, 5)!;
+    settlePoseBatch(claimed, null);
+
+    // The anchor outliving the failure closes the only cheap retry: a resync
+    // onto the same code skips the invalidation, so the epoch never bumps and
+    // prefetch stays off for the rest of the session.
+    expect(isPrefetchDead()).toBe(true);
+    expect(poseBufferAnchoredAt(5)).toBe(false);
+  });
+
+  it("forgets it when the batch lands a desync instead of poses", () => {
+    const claimed = claimPoseBatch(CODES, 5)!;
+    settlePoseBatch(claimed, poses(1));
+
+    expect(poseBufferAnchoredAt(5)).toBe(false);
+  });
 });
 
 beforeEach(() => {

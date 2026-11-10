@@ -21,7 +21,7 @@ import {
 } from "./sceneIntegration";
 import { loadCachedTexture } from "./textureCache";
 import { renderState, prefetchPoses } from "./renderState.svelte";
-import { invalidatePoseBuffer, poseCoverage, takePose } from "./posePrefetch";
+import { invalidatePoseBuffer, isPrefetchDead, poseCoverage, takePose } from "./posePrefetch";
 import * as frameDiag from "../perf/frameDiag";
 import { loadOrchestrator } from "../state/loadOrchestrator.svelte";
 import { stageState } from "../stage/stageState.svelte";
@@ -311,6 +311,42 @@ describe("installPlaybackDriver pose prefetch", () => {
     // the frame pays a single-pose fetch and the hold deadline bites.
     expect(singlePoseCalls()).toHaveLength(0);
     expect(poseCoverage(1)).toBe(11);
+  });
+
+  it("does not count the seed's kept window as an invalidation", async () => {
+    await prefetchPoses(0, 24);
+    await flush();
+    expect(poseCoverage(0)).toBe(12);
+
+    const v = viewer();
+    installPlaybackDriver(v);
+    frameDiag.reset();
+    v.onAdvanceTime!(1 / 24); // resyncs the playhead onto the seed's own code
+
+    // The window was kept, so the counter cannot claim it was dropped: the
+    // diag has to tell "thrown away" from "kept" to stay readable.
+    const diag = frameDiag.snapshot();
+    expect(diag.resyncTotal).toBe(1);
+    expect(diag.invalidateResync).toBe(0);
+  });
+
+  it("revives the batch path when a failed window's own code is resynced onto", async () => {
+    mockedInvoke.mockImplementationOnce(async () => {
+      throw new Error("stage busy");
+    });
+    await prefetchPoses(0, 24); // the load's seed, and it fails
+    await flush();
+    expect(isPrefetchDead()).toBe(true);
+
+    const v = viewer();
+    installPlaybackDriver(v);
+    mockedInvoke.mockClear();
+    v.onAdvanceTime!(0); // resync onto the failed window's own code
+
+    // The same-code resync is the only cheap epoch bump: if the anchor
+    // survives the failure, prefetch stays dead for the session.
+    expect(isPrefetchDead()).toBe(false);
+    expect(batchCalls()).toHaveLength(1);
   });
 
   it("still drops a window that was not claimed from the resync target", async () => {

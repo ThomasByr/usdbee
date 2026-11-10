@@ -264,10 +264,17 @@ export function settlePoseBatch(claimed: ClaimedPoseBatch, poses: AnimatedPose[]
   if (claimed.epoch !== epoch) return;
   if (poses === null) {
     failedEpoch = epoch;
+    // The anchor must not outlive a batch that carried nothing: the resync
+    // onto its own code would skip the invalidation, which is the only cheap
+    // epoch bump left, and prefetch would stay off for the rest of the
+    // session.
+    anchoredAt = null;
     return;
   }
   if (poses.length !== claimed.times.length) {
     console.warn(`usdbee: pose prefetch dropped, ${poses.length} poses for ${claimed.times.length} codes`);
+    // Nothing landed, so the window is not servable: same leak as a failure.
+    anchoredAt = null;
     return;
   }
   // Merge, not replace: the claim deliberately left the codes it already held

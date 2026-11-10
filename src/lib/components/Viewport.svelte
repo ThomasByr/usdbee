@@ -163,15 +163,22 @@
     // the bridge's own gate uses, so a release bundle carries neither.
     let stopBridge: (() => void) | null = null;
     let stopKeepAlive: (() => void) | null = null;
+    // The imports land in a promise: an unmount before that must not leave an
+    // interval (or a socket) with nothing left to stop it.
+    let disposed = false;
     if (import.meta.env.DEV) {
       void import("$lib/dev/mcpBridge.svelte").then((bridge) => {
+        if (disposed) return;
         stopBridge = bridge.startMcpBridge(viewer);
       });
       // Idle only: playback and loads invoke on their own schedule, which is
-      // what the ping exists to imitate.
+      // what the ping exists to imitate. A scrub is a schedule of its own: one
+      // pose step per drag step, so the transport is not quiet between them.
       void import("$lib/dev/transportKeepAlive").then((keepAlive) => {
+        if (disposed) return;
         stopKeepAlive = keepAlive.startTransportKeepAlive({
-          isIdle: () => !viewer.isPlayingAnim && renderState.status !== "loading",
+          isIdle: () =>
+            !viewer.isPlayingAnim && renderState.status !== "loading" && !renderState.isTimeStepInFlight,
         });
       });
     }
@@ -204,6 +211,7 @@
     ];
 
     return () => {
+      disposed = true;
       stopBridge?.();
       stopKeepAlive?.();
       unlisteners.forEach((u) => u.then((f) => f()));

@@ -224,8 +224,13 @@ export function installPlaybackDriver(viewer: RendererKit) {
       // ahead from the one we just left no longer follow it — unless the
       // window was claimed from exactly this code (the cold-start seed meeting
       // the first play tick), where it does.
-      frameDiag.onInvalidate("resync");
-      if (!poseBufferAnchoredAt(renderState.time)) invalidatePoseBuffer();
+      // The window was kept (the seed meeting its own playhead), so nothing
+      // was dropped: counting this as an invalidation would make the diag say
+      // the window was thrown away when it was not.
+      if (!poseBufferAnchoredAt(renderState.time)) {
+        frameDiag.onInvalidate("resync");
+        invalidatePoseBuffer();
+      }
     }
     // advanceStageTime without codes keeps the advanced value continuous
     // (wrap past end, clamp at start); the query snaps and clamps itself.
