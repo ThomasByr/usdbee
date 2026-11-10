@@ -151,7 +151,15 @@ export function claimPoseBatch(codes: readonly number[], code: number): ClaimedP
  * never expire.
  */
 export function holdsPoseStep(codes: readonly number[], code: number): boolean {
-  if (buffered.has(code) || codes.length === 0 || failedEpoch === epoch || inFlightEpoch !== epoch) {
+  // An unauthored time cannot come from any batch: a claim only ever carries
+  // authored codes. Waiting for one is the whole deadline spent on nothing,
+  // which is what the driver's pass through a code hole would pay per frame.
+  if (
+    buffered.has(code) ||
+    codeIndex(codes, code) < 0 ||
+    failedEpoch === epoch ||
+    inFlightEpoch !== epoch
+  ) {
     holding = false;
     holdTripped = false;
     return false;

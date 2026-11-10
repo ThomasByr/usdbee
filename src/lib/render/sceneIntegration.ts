@@ -6,6 +6,7 @@ import {
   advanceStageTime,
   prefetchPoses,
   snapToTimeCodes,
+  snapToPlayableTime,
   toPlayheadOffset,
 } from "$lib/render/renderState.svelte";
 import { invalidatePoseBuffer, isPrefetchDead } from "$lib/render/posePrefetch";
@@ -222,7 +223,10 @@ export function installPlaybackDriver(viewer: RendererKit) {
     // advanceStageTime without codes keeps the advanced value continuous
     // (wrap past end, clamp at start); the query snaps and clamps itself.
     continuous = advanceStageTime(continuous ?? start, delta, tcps, start, end);
-    const next = Math.min(Math.max(snapToTimeCodes(continuous, renderState.timeCodes), start), end);
+    const next = Math.min(
+      Math.max(snapToPlayableTime(continuous, renderState.timeCodes), start),
+      end,
+    );
     // A forward wrap (playback past the end) drops the playhead back to the
     // start while end-of-loop poses are still buffered. They can never be
     // consumed (the playhead already passed them) but they still count as

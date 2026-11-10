@@ -189,6 +189,33 @@ export function snapToTimeCodes(time: number, codes: number[]): number {
   return best;
 }
 
+// How many codes a pose may stand for. Nearest-code snapping holds a pose for
+// half the gap on either side of its code, so up to a couple of codes is
+// sub-frame sampling (< 33 ms at 30 tcps). Past this the authored keys are
+// sparse and the hold is the clip standing still: the bike stage has holes of
+// 37 and 44 codes, i.e. 616 and 732 ms parked on the code before the hole
+// (measured), then a jump across it.
+const CODE_HOLD_LIMIT_CODES = 3;
+
+/**
+ * The playback driver's query time: the nearest authored code while the
+ * playhead sits in a dense run of keys, and the playhead's own time while it
+ * crosses a hole in them. USD interpolates between the authored keys, so a
+ * sparse stretch keeps moving instead of parking; nothing is buffered there
+ * (the look-ahead is keyed by codes), so those poses take the single-fetch
+ * path for the length of the hole.
+ */
+export function snapToPlayableTime(time: number, codes: number[]): number {
+  if (codes.length === 0) return time;
+  let index = 0;
+  for (let i = 1; i < codes.length; i++) {
+    if (Math.abs(codes[i]! - time) < Math.abs(codes[index]! - time)) index = i;
+  }
+  const previousGap = index > 0 ? codes[index]! - codes[index - 1]! : 0;
+  const nextGap = index + 1 < codes.length ? codes[index + 1]! - codes[index]! : 0;
+  return Math.max(previousGap, nextGap) > CODE_HOLD_LIMIT_CODES ? time : codes[index]!;
+}
+
 export function advanceStageTime(
   current: number,
   deltaSeconds: number,

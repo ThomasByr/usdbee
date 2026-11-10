@@ -508,6 +508,35 @@ describe("installPlaybackDriver on a held code", () => {
     expect(diag.invalidateWrap).toBe(0);
   });
 
+  it("presents through a code hole instead of parking on the code before it", async () => {
+    // Sparse keys, as the bike stage has them: 0..3 dense, then a 37-code
+    // hole. Nearest snapping holds code 3's pose for the hole's first half,
+    // which reads as a ~600 ms freeze followed by a jump to 40.
+    const sparse = [0, 1, 2, 3, 40, 41, 42];
+    renderState.timeCodes = sparse;
+    stageState.stageInfo = {
+      start_time_code: 0,
+      end_time_code: 42,
+      time_codes_per_second: 10,
+    } as any;
+    renderState.time = 0;
+    const v = viewer();
+    installPlaybackDriver(v);
+    v.onAdvanceTime!(0); // presents 0
+    await flush(); // its look-ahead lands: 1..3 and 40..42 buffered
+
+    const presented: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      v.onAdvanceTime!(0.1); // 10 tcps x 0.1 s = one code per frame
+      presented.push(renderState.time!);
+      await flush();
+    }
+
+    // Every frame reached a new time: past the buffered codes the pose follows
+    // the playhead through the hole instead of standing still for 18 codes and
+    // then jumping to 40.
+    expect(presented).toEqual([1, 2, 3, 4, 5]);
+  });
 
   it("attributes the loop wrap's invalidation to the wrap, not to a resync", () => {
     const loop = Array.from({ length: 40 }, (_, i) => i);

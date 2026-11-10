@@ -254,6 +254,16 @@ describe("holding a playback step on a miss", () => {
     settleAll(claimed);
   });
 
+  it("does not hold for a time the batch on the wire cannot carry", () => {
+    const claimed = claimPoseBatch(CODES, 0)!; // in flight, nothing buffered yet
+    expect(holdsPoseStep(CODES, 5)).toBe(true);
+
+    // A time inside a hole in the authored keys: no claim ever asks for it, so
+    // holding would spend the deadline waiting for a pose that is not coming.
+    expect(holdsPoseStep(CODES, 20.5)).toBe(false);
+
+    settleAll(claimed);
+  });
 });
 
 describe("the hold deadline", () => {

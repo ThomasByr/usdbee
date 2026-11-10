@@ -16,6 +16,7 @@ import {
   prefetchPoses,
   renderState,
   snapToTimeCodes,
+  snapToPlayableTime,
   toAbsoluteTime,
   toPlayheadOffset,
 } from "./renderState.svelte";
@@ -1638,6 +1639,33 @@ describe("advanceStageTime", () => {
   });
 });
 
+describe("snapToPlayableTime", () => {
+  // A sparse-keyed clip: 0..3 densely, then a 37-code hole, then 40..42. The
+  // bike stage has exactly this shape (holes of 37 and 44 codes).
+  const sparse = [0, 1, 2, 3, 40, 41, 42];
+
+  it("snaps to the code while the playhead is inside a dense run", () => {
+    expect(snapToPlayableTime(2.3, sparse)).toBe(2);
+    expect(snapToPlayableTime(41.2, sparse)).toBe(41);
+  });
+
+  it("keeps the playhead's own time inside a code hole", () => {
+    // Nearest snapping would present code 3's pose for the first 18 codes of
+    // the hole (~600 ms at 30 tcps): a planted freeze, then a jump.
+    expect(snapToPlayableTime(10, sparse)).toBe(10);
+    expect(snapToPlayableTime(3.2, sparse)).toBe(3.2);
+  });
+
+  it("still snaps across a one-frame gap in the keys", () => {
+    // Two codes apart is sub-frame sampling, not a hole: the pose stands for
+    // ~1 code, which is what a dense run does too.
+    expect(snapToPlayableTime(4.2, [0, 1, 2, 3, 5, 6])).toBe(5);
+  });
+
+  it("passes the time through unchanged without codes", () => {
+    expect(snapToPlayableTime(4.4, [])).toBe(4.4);
+  });
+});
 
 describe("snapToTimeCodes", () => {
   it("snaps a scrub time to the nearest authored code", () => {
