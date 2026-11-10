@@ -870,9 +870,9 @@ fn spawn_stage_owner_for(
                                     )
                                 })
                                 .collect();
-                            let frame: Arc<[u8]> = frame_pose(&nodes, &slots)?.into();
-                            pose_frames.insert(time, frame.clone());
-                            Ok(frame.to_vec())
+                            let frame = frame_pose(&nodes, &slots)?;
+                            pose_frames.insert(time, Arc::from(frame.as_slice()));
+                            Ok(frame)
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -3867,9 +3867,14 @@ impl<V> KeyedCache<V> {
     }
 
     /// Insert (or refresh) one entry charged `bytes`, then evict the oldest
-    /// entries until both limits hold again. The newest entry always stays,
-    /// even when it alone exceeds the budget: the caller just asked for it.
+    /// entries until both limits hold again. An entry charged more than the
+    /// whole budget is refused: keeping it would park it outside the
+    /// accounting, where one pathological entry could hold unbounded memory.
+    /// The caller still serves what it just built, it just is not cached.
     fn insert(&mut self, path: String, time: Option<f64>, value: V, bytes: usize) {
+        if bytes > self.byte_budget {
+            return;
+        }
         let bits = time.map(f64::to_bits);
         if let Some((_, previous)) = self
             .time_buckets
@@ -3922,8 +3927,9 @@ impl<V> KeyedCache<V> {
 /// keys. The packed form is cached rather than the mesh: every reader wants
 /// those bytes, and re-packing a hit (a byte-wise per-vertex loop in
 /// unoptimized builds, 6.3 ms per 14-prim batch in dev) was pure waste. The
-/// charge is the packed length, the same order as `MeshData::size_bytes`
-/// (identical arrays behind a 20-byte header).
+/// charge is the packed length, and a mesh packed larger than the whole
+/// budget is not cached at all (`KeyedCache::insert` refuses it), so one
+/// pathological prim cannot sit outside the accounting.
 pub struct MeshCache {
     entries: KeyedCache<Arc<[u8]>>,
     // Shared with StageState so tessellation-filling work can be counted
@@ -3942,9 +3948,12 @@ impl MeshCache {
     // CarbonFrameBike authors 281 time codes for 14 deforming prims (3,934
     // entries, 150.7 MiB of MeshData measured, capacities included), and a
     // mid-loop clear made every step re-tessellate all 14 (54 ms/step in dev,
-    // 4.6 ms in release). 256 MiB fits that loop with headroom; the entry
-    // ceiling bounds a scene of many tiny meshes (8,192 holds the loop's
-    // 3,934 entries and Kitchen_set_instanced's 1,462 prototype meshes).
+    // 4.6 ms in release). The charge is the packed byte length, not
+    // `MeshData::size_bytes`: no Vec capacity rides along, so these entries
+    // cost no more than that measurement. 256 MiB fits the loop with headroom;
+    // the entry ceiling bounds a scene of many tiny meshes (8,192 holds the
+    // loop's 3,934 entries and Kitchen_set_instanced's 1,462 prototype
+    // meshes).
     const BYTE_BUDGET: usize = 256 * 1024 * 1024;
     const ENTRY_CEILING: usize = 8192;
 
@@ -5267,10 +5276,10 @@ mod keyed_cache_tests {
     }
 
     // Synthetic per-entry charges: the byte budget, not the entry ceiling,
-    // must drive eviction, and the newest insert must survive even alone
-    // over budget.
+    // must drive eviction, and an entry charged more than the whole budget is
+    // refused rather than kept uncharged.
     #[test]
-    fn byte_budget_evicts_oldest_and_keeps_newest() {
+    fn byte_budget_evicts_oldest_and_refuses_an_oversized_entry() {
         let mut cache = KeyedCache::with_limits(1000, 100);
         for name in ["a", "b", "c"] {
             cache.insert(key(name), None, name.to_string(), 400);
@@ -5283,9 +5292,9 @@ mod keyed_cache_tests {
         assert_eq!(cache.get("c", None), Some(&"c".to_string()));
 
         cache.insert(key("huge"), None, "huge".to_string(), 4096);
-        assert_eq!(cache.get("huge", None), Some(&"huge".to_string()));
-        assert_eq!(cache.len(), 1);
-        assert_eq!(cache.bytes, 4096);
+        assert!(cache.get("huge", None).is_none(), "oversized is refused");
+        assert_eq!(cache.len(), 2, "the fitting entries stayed");
+        assert_eq!(cache.bytes, 800);
 
         cache.clear();
         assert_eq!(cache.bytes, 0);
@@ -5506,5 +5515,21 @@ mod pose_frame_cache_tests {
         cache.clear();
         assert_eq!(cache.len(), 0);
         assert!(cache.get(Some(4.0)).is_none());
+    }
+
+    // An entry charged more than the whole budget is never cached: keeping it
+    // would hold it outside the accounting, so one pathological frame could
+    // use unbounded memory. The request is still served, just not cached.
+    #[test]
+    fn an_entry_over_the_whole_budget_is_refused() {
+        let mut cache = PoseFrameCache::with_limits(8, 8);
+        cache.insert(Some(1.0), frame(1));
+        cache.insert(Some(2.0), Arc::from(vec![2u8; 9]));
+        assert_eq!(cache.len(), 1, "the oversized frame was refused");
+        assert!(
+            cache.get(Some(2.0)).is_none(),
+            "the oversized frame is not cached"
+        );
+        assert!(cache.get(Some(1.0)).is_some(), "the fitting frame survived");
     }
 }

@@ -1532,3 +1532,61 @@ fn a_pose_after_an_edit_never_serves_the_cached_frame() {
     assert_eq!(after, again, "the post-edit frame is cached");
     assert_eq!(state.pose_frame_hits(), 1);
 }
+
+// A transform-only edit takes the warm path (`warm_xform_keep`, which keeps
+// the tree and the manifest skeleton), so it must clear the frame cache
+// itself: those frames embed the edited prim's matrix.
+#[test]
+fn a_pose_after_a_warm_xform_edit_never_serves_the_cached_frame() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+    let codes = request_time_codes(&state.sender()).expect("time codes should serialize");
+    let time = codes[codes.len() / 2];
+
+    // Pulse authors only xformOp:translate; give it an authored rotate as well
+    // so a warm edit has a matrix element to change.
+    request_set_attribute_value(
+        &state.sender(),
+        "/Scene/Pulse",
+        "xformOp:rotateXYZ",
+        &payload("float3", serde_json::json!([0, 0, 30])),
+        None,
+    )
+    .expect("creating the rotate should succeed");
+    request_set_attribute_value(
+        &state.sender(),
+        "/Scene/Pulse",
+        "xformOpOrder",
+        &payload(
+            "token_array",
+            serde_json::json!(["xformOp:translate", "xformOp:rotateXYZ"]),
+        ),
+        None,
+    )
+    .expect("authoring the order should succeed");
+
+    let before = request_animated_pose(&state.sender(), Some(time)).expect("pose should serialize");
+    let _ = request_animated_pose(&state.sender(), Some(time)).expect("pose should serialize");
+    assert_eq!(state.pose_frame_hits(), 1, "the frame is warm");
+
+    // A default-time xform op write: the warm path, no tree or skeleton rebuild.
+    request_set_attribute_value(
+        &state.sender(),
+        "/Scene/Pulse",
+        "xformOp:rotateXYZ",
+        &payload("float3", serde_json::json!([0, 0, 60])),
+        None,
+    )
+    .expect("the rotate edit should succeed");
+
+    let after = request_animated_pose(&state.sender(), Some(time)).expect("pose should serialize");
+    assert_ne!(
+        before, after,
+        "the warm edit must reach the next pose, not serve the cached frame"
+    );
+    assert_eq!(
+        state.pose_frame_hits(),
+        1,
+        "the warm edit cleared the frame cache"
+    );
+}
