@@ -1459,3 +1459,76 @@ fn batch_pose_keeps_duplicate_times() {
     assert_eq!(frames.len(), 2, "duplicate times are the caller's contract");
     assert_eq!(frames[0], frames[1], "both duplicates carry the same frame");
 }
+
+// The frame cache's contract: a repeated playhead time is answered from the
+// assembled frame — same bytes, one counted hit, nothing re-tessellated and
+// no delta walk (a miss would grow the tessellation count only on a cold
+// mesh, so the hit count is the timing-independent proof).
+#[test]
+fn pose_frame_cache_serves_a_repeated_time_from_the_assembled_frame() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+    let codes = request_time_codes(&state.sender()).expect("time codes should serialize");
+    let time = codes[codes.len() / 2];
+
+    let first = request_animated_pose(&state.sender(), Some(time)).expect("pose should serialize");
+    let tessellations = state.mesh_tessellations();
+    assert_eq!(state.pose_frame_hits(), 0, "the first pose is a miss");
+
+    let second =
+        request_animated_pose(&state.sender(), Some(time)).expect("repeat pose should serialize");
+    assert_eq!(first, second, "the cached frame is byte-identical");
+    assert_eq!(
+        state.pose_frame_hits(),
+        1,
+        "the repeat was a frame cache hit"
+    );
+    assert_eq!(
+        state.mesh_tessellations(),
+        tessellations,
+        "a hit tessellates nothing"
+    );
+
+    // A different time is its own frame: a miss, not a hit.
+    let other = codes[0];
+    if other != time {
+        let _ = request_animated_pose(&state.sender(), Some(other))
+            .expect("another time should serialize");
+        assert_eq!(state.pose_frame_hits(), 1, "a new time is a miss");
+    }
+}
+
+// The one failure mode that matters: a cached frame whose inputs changed.
+// Every mutation clears the frame cache through the MeshCache's clear path, so
+// the pose after an edit is re-assembled and reflects the edit.
+#[test]
+fn a_pose_after_an_edit_never_serves_the_cached_frame() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "animated.usda");
+    let codes = request_time_codes(&state.sender()).expect("time codes should serialize");
+    let time = codes[codes.len() / 2];
+
+    let before = request_animated_pose(&state.sender(), Some(time)).expect("pose should serialize");
+    request_set_attribute_value(
+        &state.sender(),
+        "/Scene/Pulse",
+        "visibility",
+        &payload("token", serde_json::json!("invisible")),
+        None,
+    )
+    .expect("visibility should be editable");
+
+    let after = request_animated_pose(&state.sender(), Some(time)).expect("pose should serialize");
+    assert_ne!(before, after, "the edit must reach the next pose");
+    assert_eq!(
+        state.pose_frame_hits(),
+        0,
+        "the edit cleared the frame cache"
+    );
+
+    // The re-assembled frame is cached in turn.
+    let again =
+        request_animated_pose(&state.sender(), Some(time)).expect("repeat pose should serialize");
+    assert_eq!(after, again, "the post-edit frame is cached");
+    assert_eq!(state.pose_frame_hits(), 1);
+}

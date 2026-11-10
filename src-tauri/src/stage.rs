@@ -26,7 +26,7 @@ use crate::fetcher::get_usdbee_cache_dir;
 use crate::materials::{material_info, MaterialInfo};
 use crate::parser::{dependency_scan_from_stage, DependencyScan};
 use crate::skinning::{skel_joint_transforms_vary, SkelAnimMemo};
-use crate::tessellation::{pack_geometry, tessellate_prim, MeshData};
+use crate::tessellation::{pack_geometry, tessellate_prim};
 use crate::values::{
     local_transform, serialize_details, value_payload_to_sdf, PrimDetails, ValuePayload,
 };
@@ -357,6 +357,10 @@ struct StageHandle {
     // tests can tell a kept stage_tree from a rebuilt one (the warm-path
     // pins). Cold clears and rebuilds leave it where it was.
     tree_serializations: Arc<AtomicUsize>,
+    // Pose frame cache hits since the last Open: a repeated playhead time
+    // served from the assembled frame instead of a fresh delta walk, which
+    // is what the frame-cache pins assert without timing anything.
+    pose_frame_hits: Arc<AtomicUsize>,
 }
 
 impl StageState {
@@ -398,6 +402,15 @@ impl StageState {
             .ok_or_else(|| format!("no stage {}", stage_id))
     }
 
+    pub fn pose_frame_hits(&self, stage_id: u64) -> Result<usize, String> {
+        self.stages
+            .lock()
+            .map_err(|_| "stage map lock poisoned".to_string())?
+            .get(&stage_id)
+            .map(|handle| handle.pose_frame_hits.load(Ordering::Relaxed))
+            .ok_or_else(|| format!("no stage {}", stage_id))
+    }
+
     /// The dependency scan of one open stage, from its own owner: the scan
     /// walks the layers the owner parsed, so the caller pays no second
     /// parse of the root layer.
@@ -427,12 +440,14 @@ impl StageState {
         let (sender, receiver) = mpsc::channel();
         let tessellations = Arc::new(AtomicUsize::new(0));
         let tree_serializations = Arc::new(AtomicUsize::new(0));
+        let pose_frame_hits = Arc::new(AtomicUsize::new(0));
         spawn_stage_owner_for(
             stage_id,
             self.sink.clone(),
             receiver,
             tessellations.clone(),
             tree_serializations.clone(),
+            pose_frame_hits.clone(),
         );
         self.stages
             .lock()
@@ -443,6 +458,7 @@ impl StageState {
                     sender: sender.clone(),
                     tessellations,
                     tree_serializations,
+                    pose_frame_hits,
                 },
             );
         let (reply, response) = mpsc::channel();
@@ -553,8 +569,10 @@ fn spawn_stage_owner_for(
     receiver: mpsc::Receiver<StageRequest>,
     tessellations: Arc<AtomicUsize>,
     tree_serializations: Arc<AtomicUsize>,
+    pose_frame_hits: Arc<AtomicUsize>,
 ) {
     let owner_counter = tessellations.clone();
+    let owner_frame_hits = pose_frame_hits.clone();
     thread::spawn(move || {
         // Bind the map-level (id, paths) sink to this stage's id so the
         // loop's emission call sites stay one-arg.
@@ -571,6 +589,9 @@ fn spawn_stage_owner_for(
         let mut current_stage: Option<UndoStage> = None;
         let mut current_replay: Option<ReplayStage> = None;
         let mut mesh_cache = MeshCache::with_counter(owner_counter.clone());
+        // Assembled pose frames by queried time, on the same lifecycle as the
+        // mesh cache: a warm pose is then a lookup plus the reply's one copy.
+        let mut pose_frames = PoseFrameCache::with_counter(owner_frame_hits.clone());
         // Sampled local matrices by (prim, time), beside the mesh cache: the
         // animated half of the walk's transform, memoized across calls and
         // cleared wherever the caches clear.
@@ -644,6 +665,7 @@ fn spawn_stage_owner_for(
                         stage_source_usdz =
                             source_usdz.or_else(|| direct_usdz.then_some(path.clone()));
                         mesh_cache.clear();
+                        pose_frames.clear();
                         transform_memo.clear();
                         manifest_skeleton = None;
                         stage_tree = None;
@@ -652,6 +674,7 @@ fn spawn_stage_owner_for(
                         undo_journal.clear();
                         redo_stack.clear();
                         owner_counter.store(0, Ordering::Relaxed);
+                        owner_frame_hits.store(0, Ordering::Relaxed);
                         tree_serializations.store(0, Ordering::Relaxed);
                         // The session layer file this open created: the
                         // owner deletes it on Shutdown (the ride-along
@@ -781,6 +804,7 @@ fn spawn_stage_owner_for(
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
                             geometry_bytes(stage, &mut mesh_cache, &mut resolve_memo, &path, time)
+                                .map(|packed| packed.to_vec())
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -812,6 +836,9 @@ fn spawn_stage_owner_for(
                 StageRequest::GetAnimatedPose { time, reply } => {
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            if let Some(frame) = pose_frames.get(time) {
+                                return Ok(frame.to_vec());
+                            }
                             if manifest_skeleton.is_none() {
                                 manifest_skeleton = Some(ManifestSkeleton::build(stage)?);
                             }
@@ -831,7 +858,7 @@ fn spawn_stage_owner_for(
                                 )?
                             };
                             let paths = animated_geometry_paths(&nodes);
-                            let slots = paths
+                            let slots: Vec<Result<Arc<[u8]>, String>> = paths
                                 .iter()
                                 .map(|path| {
                                     geometry_bytes(
@@ -843,7 +870,9 @@ fn spawn_stage_owner_for(
                                     )
                                 })
                                 .collect();
-                            frame_pose(&nodes, frame_batch(slots))
+                            let frame: Arc<[u8]> = frame_pose(&nodes, &slots)?.into();
+                            pose_frames.insert(time, frame.clone());
+                            Ok(frame.to_vec())
                         }))
                         .unwrap_or_else(panic_reply),
                         None => Err("no stage open".to_string()),
@@ -928,6 +957,7 @@ fn spawn_stage_owner_for(
                                 warm_xform_keep(
                                     &sink,
                                     &mut mesh_cache,
+                                    &mut pose_frames,
                                     &mut manifest_skeleton,
                                     &mut resolve_memo,
                                     &mut transform_memo,
@@ -937,6 +967,7 @@ fn spawn_stage_owner_for(
                                 after_mutation(
                                     &sink,
                                     &mut mesh_cache,
+                                    &mut pose_frames,
                                     &mut manifest_skeleton,
                                     &mut stage_tree,
                                     &mut resolve_memo,
@@ -977,6 +1008,7 @@ fn spawn_stage_owner_for(
                             after_mutation(
                                 &sink,
                                 &mut mesh_cache,
+                                &mut pose_frames,
                                 &mut manifest_skeleton,
                                 &mut stage_tree,
                                 &mut resolve_memo,
@@ -1021,6 +1053,7 @@ fn spawn_stage_owner_for(
                             after_mutation(
                                 &sink,
                                 &mut mesh_cache,
+                                &mut pose_frames,
                                 &mut manifest_skeleton,
                                 &mut stage_tree,
                                 &mut resolve_memo,
@@ -1059,6 +1092,7 @@ fn spawn_stage_owner_for(
                             after_mutation(
                                 &sink,
                                 &mut mesh_cache,
+                                &mut pose_frames,
                                 &mut manifest_skeleton,
                                 &mut stage_tree,
                                 &mut resolve_memo,
@@ -1166,6 +1200,7 @@ fn spawn_stage_owner_for(
                                     warm_xform_keep(
                                         &sink,
                                         &mut mesh_cache,
+                                        &mut pose_frames,
                                         &mut manifest_skeleton,
                                         &mut resolve_memo,
                                         &mut transform_memo,
@@ -1175,6 +1210,7 @@ fn spawn_stage_owner_for(
                                     after_mutation(
                                         &sink,
                                         &mut mesh_cache,
+                                        &mut pose_frames,
                                         &mut manifest_skeleton,
                                         &mut stage_tree,
                                         &mut resolve_memo,
@@ -1192,6 +1228,7 @@ fn spawn_stage_owner_for(
                                 after_mutation(
                                     &sink,
                                     &mut mesh_cache,
+                                    &mut pose_frames,
                                     &mut manifest_skeleton,
                                     &mut stage_tree,
                                     &mut resolve_memo,
@@ -1242,6 +1279,7 @@ fn spawn_stage_owner_for(
                                     warm_xform_keep(
                                         &sink,
                                         &mut mesh_cache,
+                                        &mut pose_frames,
                                         &mut manifest_skeleton,
                                         &mut resolve_memo,
                                         &mut transform_memo,
@@ -1251,6 +1289,7 @@ fn spawn_stage_owner_for(
                                     after_mutation(
                                         &sink,
                                         &mut mesh_cache,
+                                        &mut pose_frames,
                                         &mut manifest_skeleton,
                                         &mut stage_tree,
                                         &mut resolve_memo,
@@ -1322,6 +1361,7 @@ fn spawn_stage_owner_for(
                             after_mutation(
                                 &sink,
                                 &mut mesh_cache,
+                                &mut pose_frames,
                                 &mut manifest_skeleton,
                                 &mut stage_tree,
                                 &mut resolve_memo,
@@ -1742,9 +1782,13 @@ fn edit_emission_path(stage: &Stage, path: &str) -> String {
 /// `usd-stage-changed` emission for the edited path. The dirty mark and the
 /// undo journal live in `record_user_mutation` (mutation arms) or the
 /// undo/redo arms' own ledger updates.
+// The eight arguments are the owner-thread caches this clear must reach; a
+// bundle struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 fn after_mutation(
     sink: &Option<StageChangeSink>,
     mesh_cache: &mut MeshCache,
+    pose_frames: &mut PoseFrameCache,
     manifest_skeleton: &mut Option<ManifestSkeleton>,
     stage_tree: &mut Option<Vec<PrimNode>>,
     resolve_memo: &mut ResolveMemo,
@@ -1754,6 +1798,10 @@ fn after_mutation(
     // shortcut: coarse clear — any edit invalidates every cached
     // tessellation; per-path eviction when edits grow edit-target awareness
     mesh_cache.clear();
+    // Assembled frames embed that geometry and the edit's transforms: every
+    // one of them may be stale, and serving a pre-edit pose is the one thing
+    // this cache must never do.
+    pose_frames.clear();
     // shortcut: coarse clear — any edit can change composed
     // types/purpose/bindings, so the whole manifest skeleton rebuilds;
     // fine until edits become frequent
@@ -1782,6 +1830,7 @@ fn emit_stage_changed(sink: &Option<StageChangeSink>, path: &str) {
 fn warm_xform_keep(
     sink: &Option<StageChangeSink>,
     mesh_cache: &mut MeshCache,
+    pose_frames: &mut PoseFrameCache,
     manifest_skeleton: &mut Option<ManifestSkeleton>,
     resolve_memo: &mut ResolveMemo,
     transforms: &mut TransformMemo,
@@ -1790,6 +1839,9 @@ fn warm_xform_keep(
     // shortcut: coarse clear — tessellation may bake transform-dependent
     // skinning
     mesh_cache.clear();
+    // The frames embed those tessellations and the edited prim's matrix, so
+    // the same coarse clear applies.
+    pose_frames.clear();
     invalidate_skeleton_transform(manifest_skeleton, path);
     resolve_memo.clear();
     // The memo holds the pre-edit matrix for exactly the time codes the write
@@ -3851,9 +3903,14 @@ impl<V> KeyedCache<V> {
 }
 
 /// Tessellation cache owned by the stage-owner thread: (prim path, time as
-/// queried) -> mesh. `None` and `Some(t)` are distinct keys.
+/// queried) -> the prim's packed geometry. `None` and `Some(t)` are distinct
+/// keys. The packed form is cached rather than the mesh: every reader wants
+/// those bytes, and re-packing a hit (a byte-wise per-vertex loop in
+/// unoptimized builds, 6.3 ms per 14-prim batch in dev) was pure waste. The
+/// charge is the packed length, the same order as `MeshData::size_bytes`
+/// (identical arrays behind a 20-byte header).
 pub struct MeshCache {
-    entries: KeyedCache<Arc<MeshData>>,
+    entries: KeyedCache<Arc<[u8]>>,
     // Shared with StageState so tessellation-filling work can be counted
     // from outside the owner thread.
     tessellations: Arc<AtomicUsize>,
@@ -3887,14 +3944,14 @@ impl MeshCache {
         }
     }
 
-    pub fn get(&self, path: &str, time: Option<f64>) -> Option<Arc<MeshData>> {
+    pub fn get(&self, path: &str, time: Option<f64>) -> Option<Arc<[u8]>> {
         self.entries.get(path, time).cloned()
     }
 
-    pub fn insert(&mut self, path: String, time: Option<f64>, mesh: Arc<MeshData>) {
+    pub fn insert(&mut self, path: String, time: Option<f64>, packed: Arc<[u8]>) {
         self.tessellations.fetch_add(1, Ordering::Relaxed);
-        let bytes = mesh.size_bytes();
-        self.entries.insert(path, time, mesh, bytes);
+        let bytes = packed.len();
+        self.entries.insert(path, time, packed, bytes);
     }
 
     pub fn clear(&mut self) {
@@ -3909,6 +3966,88 @@ impl MeshCache {
         self.entries.is_empty()
     }
 }
+
+/// Owner-thread cache of fully assembled pose frames keyed by their exact
+/// queried time (`None` or the f64 bits; exact keys are as safe here as in
+/// the MeshCache because playback asks for authored time codes). A warm pose
+/// used to re-walk the 190-node delta tree, re-pack the deforming mesh and
+/// copy the frame twice, all from data the other caches already held
+/// (2.9 ms/pose in dev); the response bytes are a pure function of
+/// (stage, time) for as long as those caches stand, so the whole frame is
+/// what gets cached. A hit is a map lookup and the one copy the reply needs.
+pub struct PoseFrameCache {
+    entries: KeyedCache<Arc<[u8]>>,
+    // Shared with StageState so a hit can be counted from outside the owner
+    // thread (the timing-independent proof the dedup pins use).
+    hits: Arc<AtomicUsize>,
+}
+
+impl Default for PoseFrameCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PoseFrameCache {
+    // Measured on the bike (190 delta nodes, one deforming prim): a frame is
+    // ~15 KiB of node table + path and material tables plus ~24 KiB of
+    // geometry, call it 45 KiB. 64 MiB holds ~1,450 frames, i.e. five full
+    // passes over the clip's 281 authored codes, so a loop replayed twice
+    // never re-assembles a frame it already has. The entry ceiling bounds a
+    // scene of many tiny frames; the byte budget binds first on real ones.
+    const BYTE_BUDGET: usize = 64 * 1024 * 1024;
+    const ENTRY_CEILING: usize = 4096;
+
+    pub fn new() -> Self {
+        Self::with_counter(Arc::new(AtomicUsize::new(0)))
+    }
+
+    pub fn with_counter(hits: Arc<AtomicUsize>) -> Self {
+        Self {
+            entries: KeyedCache::with_limits(Self::BYTE_BUDGET, Self::ENTRY_CEILING),
+            hits,
+        }
+    }
+
+    /// The counter-free constructor the eviction pins drive with tiny limits.
+    #[cfg(test)]
+    fn with_limits(byte_budget: usize, entry_ceiling: usize) -> Self {
+        Self {
+            entries: KeyedCache::with_limits(byte_budget, entry_ceiling),
+            hits: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn get(&mut self, time: Option<f64>) -> Option<Arc<[u8]>> {
+        match self.entries.get(POSE_FRAME_PATH, time).cloned() {
+            Some(frame) => {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                Some(frame)
+            }
+            None => None,
+        }
+    }
+
+    fn insert(&mut self, time: Option<f64>, frame: Arc<[u8]>) {
+        let bytes = frame.len();
+        self.entries
+            .insert(POSE_FRAME_PATH.to_string(), time, frame, bytes);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// Pose frames are keyed by time alone; the path half of the keyed cache
+/// stays empty. One stage per owner thread, so no path discriminator is
+/// needed.
+const POSE_FRAME_PATH: &str = "";
 
 /// Owner-thread memo of sampled local matrices: (prim path, queried time) ->
 /// matrix. The skeleton hoists every prim whose xformOps author no samples
@@ -4065,14 +4204,30 @@ fn resolved_render_path(
 const BATCH_MAGIC: u32 = 0x5553_4247;
 const BATCH_VERSION: u32 = 1;
 
-fn frame_batch(slots: Vec<Result<Vec<u8>, String>>) -> Vec<u8> {
-    let mut out = Vec::with_capacity(12 + slots.len() * 4);
+fn frame_batch<S: AsRef<[u8]>>(slots: Vec<Result<S, String>>) -> Vec<u8> {
+    let payload: usize = slots
+        .iter()
+        .map(|slot| match slot {
+            Ok(bytes) => bytes.as_ref().len(),
+            Err(error) => error.len(),
+        })
+        .sum();
+    let mut out = Vec::with_capacity(12 + slots.len() * 8 + payload);
+    write_batch(&mut out, &slots);
+    out
+}
+
+/// The batch envelope and its slots, written straight into `out`: the pose
+/// frame calls this last so its geometry lands in the final buffer instead of
+/// a batch buffer that is then copied behind the node table.
+fn write_batch<S: AsRef<[u8]>>(out: &mut Vec<u8>, slots: &[Result<S, String>]) {
     out.extend(BATCH_MAGIC.to_le_bytes());
     out.extend(BATCH_VERSION.to_le_bytes());
     out.extend((slots.len() as u32).to_le_bytes());
     for slot in slots {
         match slot {
             Ok(bytes) => {
+                let bytes = bytes.as_ref();
                 out.extend(0u32.to_le_bytes());
                 out.extend((bytes.len() as u32).to_le_bytes());
                 out.extend(bytes);
@@ -4080,15 +4235,14 @@ fn frame_batch(slots: Vec<Result<Vec<u8>, String>>) -> Vec<u8> {
             Err(error) => {
                 out.extend(1u32.to_le_bytes());
                 out.extend((error.len() as u32).to_le_bytes());
-                out.extend(error.into_bytes());
+                out.extend(error.as_bytes());
             }
         }
         // USDB frames are already a multiple of 4 (u32 header + f32/u32
         // data), but error messages are arbitrary UTF-8; zero-pad so slot
         // boundaries never depend on payload alignment.
-        pad_to_4(&mut out);
+        pad_to_4(out);
     }
-    out
 }
 
 /// Zero-pad to the next 4-byte boundary. Every length prefix in these frames
@@ -4206,7 +4360,10 @@ fn write_pose_node(
 /// delta tree with paths and material bindings deduplicated into their
 /// tables, so a playback step ships no JSON and no repeated strings.
 /// shortcut: the merged pose batches ALL geometry_animated prims with no slot cap (the old 32-slice batching is gone), upgrade to a capped batch + per-prim fallback when a stage with more than ~32 deforming prims appears.
-fn frame_pose(nodes: &[RenderNode], mut batch: Vec<u8>) -> Result<Vec<u8>, String> {
+fn frame_pose(
+    nodes: &[RenderNode],
+    slots: &[Result<Arc<[u8]>, String>],
+) -> Result<Vec<u8>, String> {
     let mut flat = Vec::with_capacity(nodes.len());
     flatten_pose(nodes, &mut flat);
     let mut ids: HashMap<&str, u32> = HashMap::with_capacity(flat.len());
@@ -4235,8 +4392,16 @@ fn frame_pose(nodes: &[RenderNode], mut batch: Vec<u8>) -> Result<Vec<u8>, Strin
         .iter()
         .map(|binding| align4(4 + binding.len()))
         .sum();
-    let mut out =
-        Vec::with_capacity(12 + table_len + binding_bytes + flat.len() * 80 + batch.len());
+    let payload: usize = slots
+        .iter()
+        .map(|slot| match slot {
+            Ok(bytes) => align4(bytes.len()),
+            Err(error) => align4(error.len()),
+        })
+        .sum();
+    let mut out = Vec::with_capacity(
+        12 + table_len + binding_bytes + flat.len() * 80 + payload + slots.len() * 8,
+    );
     out.extend((table.len() as u32).to_le_bytes());
     for path in &table {
         out.extend((path.len() as u32).to_le_bytes());
@@ -4257,7 +4422,7 @@ fn frame_pose(nodes: &[RenderNode], mut batch: Vec<u8>) -> Result<Vec<u8>, Strin
             .map_or(POSE_NO_MATERIAL, |binding| binding_ids[binding]);
         write_pose_node(&mut out, node, ids[node.path.as_str()], material_id, index)?;
     }
-    out.append(&mut batch);
+    write_batch(&mut out, slots);
     Ok(out)
 }
 
@@ -4297,10 +4462,10 @@ fn geometry_bytes(
     memo: &mut ResolveMemo,
     path: &str,
     time: Option<f64>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Arc<[u8]>, String> {
     let prim_path = resolved_render_path(stage, memo, path)?;
-    if let Some(mesh) = cache.get(prim_path.as_str(), time) {
-        return Ok(pack_geometry(&mesh));
+    if let Some(packed) = cache.get(prim_path.as_str(), time) {
+        return Ok(packed);
     }
     let key = prim_path.to_string();
     let prim = stage
@@ -4311,9 +4476,9 @@ fn geometry_bytes(
     }
     match tessellate_prim(&prim, time)? {
         Some(mesh) => {
-            let mesh = Arc::new(mesh);
-            cache.insert(key, time, mesh.clone());
-            Ok(pack_geometry(&mesh))
+            let packed: Arc<[u8]> = pack_geometry(&mesh).into();
+            cache.insert(key, time, packed.clone());
+            Ok(packed)
         }
         None => Err(format!("no geometry at {}", path)),
     }
@@ -5150,11 +5315,18 @@ mod pose_frame_tests {
     }
 
     // An empty delta still frames a readable header: no paths, no materials,
-    // no nodes, just the geometry batch tail (here empty).
+    // no nodes, then the geometry batch envelope with no slots.
     #[test]
     fn frame_pose_emits_an_empty_table_for_an_empty_delta() {
-        let frame = frame_pose(&[], Vec::new()).unwrap();
-        assert_eq!(frame, [0u8; 12], "empty path + material tables, zero nodes");
+        let frame = frame_pose(&[], &[]).unwrap();
+        let mut expected = vec![0u8; 12];
+        expected.extend(BATCH_MAGIC.to_le_bytes());
+        expected.extend(BATCH_VERSION.to_le_bytes());
+        expected.extend(0u32.to_le_bytes());
+        assert_eq!(
+            frame, expected,
+            "empty path + material tables, zero nodes, empty batch"
+        );
     }
 
     // The node record, field by field, at its documented offsets.
@@ -5167,7 +5339,7 @@ mod pose_frame_tests {
         root.type_name = "Points".to_string();
         root.material = Some("/Looks/Mat".to_string());
         root.instances = vec![identity()];
-        let frame = frame_pose(&[root], Vec::new()).unwrap();
+        let frame = frame_pose(&[root], &[]).unwrap();
 
         // Path table: count, then per path a u32 length + utf8.
         let mut at = 0;
@@ -5231,7 +5403,11 @@ mod pose_frame_tests {
         );
         assert_eq!(frame[leaf + 11], 1, "visible leaf");
         assert_eq!(u32_at(&frame, leaf + 12), POSE_NO_MATERIAL, "no binding");
-        assert_eq!(frame.len(), leaf + 16 + 64, "no trailing bytes");
+        let tail = leaf + 16 + 64;
+        assert_eq!(frame.len(), tail + 12, "then the geometry batch envelope");
+        assert_eq!(u32_at(&frame, tail), BATCH_MAGIC);
+        assert_eq!(u32_at(&frame, tail + 4), BATCH_VERSION);
+        assert_eq!(u32_at(&frame, tail + 8), 0, "no geometry slots here");
     }
 
     // A zero-child root list: as many roots as nodes, none pointing at a child.
@@ -5240,7 +5416,7 @@ mod pose_frame_tests {
         let roots: Vec<RenderNode> = (0..3)
             .map(|index| node(&format!("/R{index}"), Vec::new()))
             .collect();
-        let frame = frame_pose(&roots, Vec::new()).unwrap();
+        let frame = frame_pose(&roots, &[]).unwrap();
         let table_end = 4 + roots.iter().map(|root| 4 + root.path.len()).sum::<usize>();
         let mut at = (table_end + 3) & !3;
         assert_eq!(u32_at(&frame, at), 0, "no bindings on these roots");
@@ -5252,7 +5428,7 @@ mod pose_frame_tests {
             assert_eq!(u32_at(&frame, at + 4), POSE_LEAF, "root {index} is a leaf");
             at += 80;
         }
-        assert_eq!(at, frame.len(), "no trailing bytes");
+        assert_eq!(at + 12, frame.len(), "then the geometry batch envelope");
     }
 
     // Payload budget: a bike pose is ~190 delta nodes with ~30-byte paths, ~31
@@ -5274,12 +5450,46 @@ mod pose_frame_tests {
             })
             .collect();
         let root = node("/Hummingbird", children);
-        let frame = frame_pose(&[root], Vec::new()).unwrap();
+        let frame = frame_pose(&[root], &[]).unwrap();
         assert!(
             frame.len() < 28 * 1024,
             "200-node pose frame is {} B, over the ~24 KB budget",
             frame.len()
         );
         println!("200-node pose frame: {} B", frame.len());
+    }
+}
+
+#[cfg(test)]
+mod pose_frame_cache_tests {
+    use super::PoseFrameCache;
+    use std::sync::Arc;
+
+    fn frame(byte: u8) -> Arc<[u8]> {
+        Arc::from(vec![byte; 4])
+    }
+
+    // The frame cache is byte-bounded like the MeshCache: over budget it
+    // evicts the oldest assembled frame, and a hit returns the same bytes.
+    #[test]
+    fn byte_budget_evicts_the_oldest_frame_and_a_hit_returns_it() {
+        let mut cache = PoseFrameCache::with_limits(12, 8);
+        cache.insert(Some(1.0), frame(1));
+        cache.insert(Some(2.0), frame(2));
+        cache.insert(Some(3.0), frame(3));
+        assert_eq!(cache.len(), 3, "three 4-byte frames fit 12 bytes");
+        assert_eq!(cache.get(Some(2.0)).as_deref(), Some(&[2u8; 4][..]));
+
+        cache.insert(Some(4.0), frame(4));
+        assert_eq!(cache.len(), 3, "the newest frame made room for itself");
+        assert!(
+            cache.get(Some(1.0)).is_none(),
+            "the oldest frame went first"
+        );
+        assert!(cache.get(Some(4.0)).is_some());
+
+        cache.clear();
+        assert_eq!(cache.len(), 0);
+        assert!(cache.get(Some(4.0)).is_none());
     }
 }

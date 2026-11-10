@@ -39,6 +39,12 @@ fn f32_le(bytes: &[u8], index: usize) -> f32 {
     f32::from_le_bytes(bytes[index..index + 4].try_into().unwrap())
 }
 
+/// One packed geometry payload, the form the MeshCache stores now that a hit
+/// must not re-pack.
+fn stub_packed() -> Arc<[u8]> {
+    pack_geometry(&stub_mesh()).into()
+}
+
 fn stub_mesh() -> Arc<MeshData> {
     Arc::new(MeshData {
         positions: vec![[0.0, 0.0, 0.0]],
@@ -409,7 +415,7 @@ fn mesh_cache_evicts_oldest_entries_instead_of_clearing() {
     // step re-tessellated). Past that cap the map must stay warm.
     let mut cache = MeshCache::new();
     for i in 0..5000 {
-        cache.insert(format!("/M{}", i), None, stub_mesh());
+        cache.insert(format!("/M{}", i), None, stub_packed());
     }
     assert_eq!(cache.len(), 5000, "no clear at the old 2,048-entry cap");
     assert!(cache.get("/M0", None).is_some(), "old keys stay");
@@ -418,7 +424,7 @@ fn mesh_cache_evicts_oldest_entries_instead_of_clearing() {
     // Past the entry ceiling the OLDEST keys go one by one; a full clear
     // would leave exactly one entry behind.
     for i in 5000..8200 {
-        cache.insert(format!("/M{}", i), None, stub_mesh());
+        cache.insert(format!("/M{}", i), None, stub_packed());
     }
     assert!(
         cache.len() > 2048,
@@ -434,7 +440,7 @@ fn mesh_cache_evicts_oldest_entries_instead_of_clearing() {
 #[test]
 fn mesh_cache_distinguishes_none_and_some_time_keys() {
     let mut cache = MeshCache::new();
-    cache.insert("/M".into(), None, stub_mesh());
+    cache.insert("/M".into(), None, stub_packed());
     assert!(cache.get("/M", Some(1.0)).is_none());
     assert!(cache.get("/M", None).is_some());
 }
@@ -443,7 +449,7 @@ fn mesh_cache_distinguishes_none_and_some_time_keys() {
 fn mesh_cache_clear_empties_everything() {
     // The stage owner clears on every Open; this pins the clear semantics.
     let mut cache = MeshCache::new();
-    cache.insert("/M".into(), None, stub_mesh());
+    cache.insert("/M".into(), None, stub_packed());
     cache.clear();
     assert_eq!(cache.len(), 0);
     assert!(cache.get("/M", None).is_none());
@@ -453,9 +459,9 @@ fn mesh_cache_clear_empties_everything() {
 fn mesh_cache_refresh_of_capped_entry_does_not_clear() {
     let mut cache = MeshCache::new();
     for i in 0..256 {
-        cache.insert(format!("/M{}", i), None, stub_mesh());
+        cache.insert(format!("/M{}", i), None, stub_packed());
     }
-    cache.insert("/M0".into(), None, stub_mesh());
+    cache.insert("/M0".into(), None, stub_packed());
     assert_eq!(
         cache.len(),
         256,

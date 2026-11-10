@@ -43,6 +43,12 @@ impl TestOwner {
             .expect("a stage should be open")
     }
 
+    pub fn pose_frame_hits(&self) -> usize {
+        self.state
+            .pose_frame_hits(self.id.get())
+            .expect("a stage should be open")
+    }
+
     /// Open a stage through the full flow (is_usdz origin flag, source
     /// archive, cleanup-owned extraction dir) and track its id.
     pub fn open_flow(
