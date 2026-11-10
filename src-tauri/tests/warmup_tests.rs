@@ -112,6 +112,85 @@ fn warmed_frames_are_the_poses_playback_gets_after_an_edit() {
     );
 }
 
+// The warm step assembles the whole frame, not just the attribute composition:
+// playback's first pass over a warmed code must find both the packed meshes and
+// the encoded frame in the caches, i.e. no tessellation and a frame-cache hit.
+#[test]
+fn a_warmed_code_serves_its_frame_from_the_cache() {
+    let state = common::spawn_stage_owner();
+    state.open(&fixture("many_codes.usda"));
+    let sender = state.sender();
+
+    let (warmed, total) = wait_until_warm(&sender);
+    assert_eq!(warmed, total);
+
+    let hits = state.pose_frame_hits();
+    let tessellations = state.mesh_tessellations();
+    let first = request_animated_pose(&sender, Some(7.0)).expect("pose should reply");
+    let again = request_animated_pose(&sender, Some(7.0)).expect("pose should reply");
+
+    assert_eq!(first, again, "a cached frame is byte-identical");
+    assert_eq!(
+        state.mesh_tessellations(),
+        tessellations,
+        "the warm step already tessellated this code"
+    );
+    assert_eq!(
+        state.pose_frame_hits(),
+        hits + 2,
+        "both poses are frame-cache hits, so the warm step assembled the frame"
+    );
+}
+
+// An edit landing mid-pass drops the queue with the caches. The frame playback
+// gets right after the edit must be the post-edit one: a stale frame landing
+// after the clear would serve pre-edit geometry for a whole loop.
+#[test]
+fn an_edit_mid_warmup_lands_no_stale_frame() {
+    let state = common::spawn_stage_owner();
+    state.open(&fixture("many_codes.usda"));
+    let sender = state.sender();
+
+    let before = request_animated_pose(&sender, Some(5.0)).expect("pose should reply");
+    // Catch the queue mid-pass: it is only filled on an idle gap, so poll until
+    // one has happened and most of the 240 codes are still pending.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let midpass = loop {
+        let progress = request_warmup_progress(&sender).expect("progress should reply");
+        if progress.1 > 0 && progress.0 < progress.1 {
+            break progress;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the queue never started: {progress:?}"
+        );
+    };
+    assert!(
+        midpass.0 < midpass.1,
+        "the queue should still be mid-pass: {midpass:?}"
+    );
+
+    request_set_attribute_value(
+        &sender,
+        "/Scene/Slider",
+        "xformOp:translate",
+        &payload("vec3d", serde_json::json!([7.0, 0.0, 0.0])),
+        Some(5.0),
+    )
+    .expect("the edit should commit");
+
+    let edited = request_animated_pose(&sender, Some(5.0)).expect("pose should reply");
+    assert_ne!(edited, before, "the edit must reach the frame right away");
+
+    let (warmed, total) = wait_until_warm(&sender);
+    assert_eq!(warmed, total);
+    assert_eq!(
+        request_animated_pose(&sender, Some(5.0)).expect("pose should reply"),
+        edited,
+        "the restarted pass warmed the post-edit bytes"
+    );
+}
+
 #[test]
 fn a_command_is_served_while_the_queue_is_still_pending() {
     let state = common::spawn_stage_owner();

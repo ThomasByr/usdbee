@@ -644,7 +644,7 @@ fn spawn_stage_owner_for(
         // and how many are done. `None` = nothing queued (nothing walked yet
         // in this epoch, or an invalidation dropped it); refilled from the
         // manifest skeleton on the next idle gap.
-        let mut warm: Option<(Vec<f64>, usize)> = None;
+        let mut warm: Warmup = None;
         loop {
             let request = match receiver.try_recv() {
                 Ok(request) => request,
@@ -898,7 +898,7 @@ fn spawn_stage_owner_for(
                     let response = match current_stage {
                         Some(_) => Ok(warm
                             .as_ref()
-                            .map(|(codes, cursor)| (*cursor, codes.len()))
+                            .map(|(codes, cursor, _)| (*cursor, codes.len()))
                             .unwrap_or((0, 0))),
                         None => Err("no stage open".to_string()),
                     };
@@ -1824,11 +1824,26 @@ fn edit_emission_path(stage: &Stage, path: &str) -> String {
     }
 }
 
-/// The idle-gap warmup queue: the authored codes still to pre-evaluate, and how
-/// many are done. `None` = nothing queued, which is also what every
-/// invalidation site restores — the queue is rebuilt from the manifest
+/// The idle-gap warmup queue: the authored codes still to pre-evaluate, how
+/// many are done, and what the last step cost in cache bytes (the estimate the
+/// next step's fit check uses). `None` = nothing queued, which is also what
+/// every invalidation site restores — the queue is rebuilt from the manifest
 /// skeleton on the next idle gap.
-type Warmup = Option<(Vec<f64>, usize)>;
+///
+/// The queue is the authored code list, never the in-hole grid: playback
+/// quantizes its request times onto authored codes, so those are the keys that
+/// fill `pose_frames`, and a grid time reached mid-pass warms itself on that
+/// pass.
+type Warmup = Option<(Vec<f64>, usize, usize)>;
+
+/// Whether one more warm step of `charge` bytes fits both caches without
+/// evicting. A step that would evict drops the oldest entry, which is the code
+/// playback reaches next, so the warmup stops instead of churning what it just
+/// warmed. `charge` is the previous step's cost: a stage's meshes are the same
+/// size at every code, so one step predicts the next.
+fn warm_fits(mesh_cache: &MeshCache, pose_frames: &PoseFrameCache, charge: usize) -> bool {
+    mesh_cache.fits(charge) && pose_frames.fits(charge)
+}
 
 /// Pre-evaluate the next not-yet-warm authored code, one pose per call so the
 /// owner loop can serve a command between any two. Returns whether a step ran
@@ -1858,19 +1873,27 @@ fn warm_one_step(
             *manifest_skeleton = ManifestSkeleton::build(stage).ok();
         }
         let Some(skeleton) = manifest_skeleton.as_ref() else {
-            *warm = Some((Vec::new(), 0));
+            *warm = Some((Vec::new(), 0, 0));
             return false;
         };
-        *warm = Some((skeleton.time_codes.clone(), 0));
+        *warm = Some((skeleton.time_codes.clone(), 0, 0));
     }
-    let Some((codes, cursor)) = warm else {
+    let Some((codes, cursor, charge)) = warm else {
         return false;
     };
     if *cursor >= codes.len() {
         return false;
     }
+    if !warm_fits(mesh_cache, pose_frames, *charge) {
+        // The caches are full of frames playback still needs: a further step
+        // would evict the oldest one. Done, not stalled — the codes left were
+        // never going to fit.
+        *cursor = codes.len();
+        return false;
+    }
     let time = codes[*cursor];
     *cursor += 1;
+    let before = mesh_cache.charge() + pose_frames.charge();
     let warmed = pose_frame_bytes(
         stage,
         mesh_cache,
@@ -1881,6 +1904,7 @@ fn warm_one_step(
         manifest_skeleton,
         Some(time),
     );
+    *charge = (mesh_cache.charge() + pose_frames.charge()).saturating_sub(before);
     if let Err(error) = warmed {
         // A code that cannot be evaluated would fail the same way on playback;
         // stop burning idle gaps on it. Not silent: it is the only signal the
@@ -4061,6 +4085,16 @@ impl<V> KeyedCache<V> {
     fn is_empty(&self) -> bool {
         self.len == 0
     }
+
+    /// Free space before the next insert would evict. The oldest entry is the
+    /// one playback reaches next, so a warner checks this instead of churning.
+    fn headroom(&self) -> usize {
+        self.byte_budget.saturating_sub(self.bytes)
+    }
+
+    fn has_entry_room(&self) -> bool {
+        self.len < self.entry_ceiling
+    }
 }
 
 /// Tessellation cache owned by the stage-owner thread: (prim path, time as
@@ -4109,6 +4143,20 @@ impl MeshCache {
         }
     }
 
+    /// The eviction and warmup-budget pins drive the limits with these.
+    #[cfg(test)]
+    fn with_limits(byte_budget: usize, entry_ceiling: usize) -> Self {
+        Self {
+            entries: KeyedCache::with_limits(byte_budget, entry_ceiling),
+            tessellations: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Whether one more entry charged `bytes` fits without evicting.
+    fn fits(&self, bytes: usize) -> bool {
+        self.entries.has_entry_room() && bytes <= self.entries.headroom()
+    }
+
     pub fn get(&self, path: &str, time: Option<f64>) -> Option<Arc<[u8]>> {
         self.entries.get(path, time).cloned()
     }
@@ -4125,6 +4173,11 @@ impl MeshCache {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Bytes charged to the cache, so a warm step can price the next one.
+    fn charge(&self) -> usize {
+        self.entries.bytes
     }
 
     pub fn is_empty(&self) -> bool {
@@ -4197,6 +4250,16 @@ impl PoseFrameCache {
         let bytes = frame.len();
         self.entries
             .insert(POSE_FRAME_PATH.to_string(), time, frame, bytes);
+    }
+
+    /// Whether one more frame charged `bytes` fits without evicting.
+    fn fits(&self, bytes: usize) -> bool {
+        self.entries.has_entry_room() && bytes <= self.entries.headroom()
+    }
+
+    /// Bytes charged to the cache, so a warm step can price the next one.
+    fn charge(&self) -> usize {
+        self.entries.bytes
     }
 
     fn clear(&mut self) {
@@ -5742,5 +5805,52 @@ mod pose_frame_cache_tests {
             "the oversized frame is not cached"
         );
         assert!(cache.get(Some(1.0)).is_some(), "the fitting frame survived");
+    }
+}
+
+#[cfg(test)]
+mod warmup_budget_tests {
+    use super::{warm_fits, MeshCache, PoseFrameCache};
+    use std::sync::Arc;
+
+    fn frame(bytes: usize) -> Arc<[u8]> {
+        Arc::from(vec![0u8; bytes])
+    }
+
+    // A warm step inserts a code's meshes plus its frame (~40 KiB on the bike).
+    // When the next step would not fit, the insert evicts the oldest entry —
+    // the code playback reaches next — so the warm step declines instead of
+    // churning what it just warmed.
+    #[test]
+    fn a_full_cache_refuses_the_next_warm_step() {
+        let mut mesh = MeshCache::with_limits(100, 8);
+        let mut frames = PoseFrameCache::with_limits(100, 8);
+        assert!(warm_fits(&mesh, &frames, 0), "empty caches take a step");
+        assert!(warm_fits(&mesh, &frames, 40));
+
+        mesh.insert("/Scene/A".to_string(), Some(1.0), frame(70));
+        frames.insert(Some(1.0), frame(70));
+        assert!(warm_fits(&mesh, &frames, 30), "30 B of headroom fits 30 B");
+        assert!(
+            !warm_fits(&mesh, &frames, 31),
+            "a step that would evict stops the warmup"
+        );
+        assert_eq!(mesh.len(), 1, "the refused step touched nothing");
+        assert_eq!(frames.len(), 1);
+
+        // The entry ceiling binds the same way, where the byte budget would not.
+        let mut mesh = MeshCache::with_limits(1 << 20, 2);
+        let mut frames = PoseFrameCache::with_limits(1 << 20, 1);
+        mesh.insert("/Scene/A".to_string(), Some(1.0), frame(4));
+        frames.insert(Some(1.0), frame(4));
+        assert!(
+            !warm_fits(&mesh, &frames, 4),
+            "the frame cache is at its entry ceiling"
+        );
+        mesh.insert("/Scene/B".to_string(), Some(1.0), frame(4));
+        assert!(
+            !warm_fits(&mesh, &frames, 4),
+            "the mesh cache is at its entry ceiling"
+        );
     }
 }
