@@ -586,6 +586,7 @@ export const renderState = $state({
     clearTextureCache();
     // A new scene invalidates every looked-ahead pose (other stage, other
     // codes): an in-flight batch lands stale and is dropped.
+    frameDiag.onInvalidate("load");
     invalidatePoseBuffer();
     sceneLoading = true;
     queuedTime = null;
@@ -735,6 +736,10 @@ export const renderState = $state({
           manifest = buffered.manifest;
           prefetched = buffered.prefetched;
         } else {
+          // Playback wanted a hold and did not get one: the batch path is
+          // dead, nothing is on the wire, or the deadline expired. Scrubs
+          // (holdOnMiss false) are supposed to fetch and are not counted.
+          if (holdOnMiss) frameDiag.onSingleFallback();
           const pose = await fetchers.getAnimatedPose!(time);
           // Dispatch half of the span: the bytes are in hand, decode+apply follow.
           frameDiag.onPoseDispatched(performance.now() - poseStartedAt);
@@ -799,6 +804,7 @@ export const renderState = $state({
     const group = currentGroup;
     if (!group) return Promise.resolve(false);
     // An edit changes geometry: buffered poses carry the pre-edit prims.
+    frameDiag.onInvalidate("edit");
     invalidatePoseBuffer();
     timeStepInFlight = true;
     activeTimeStep = (async (): Promise<boolean> => {

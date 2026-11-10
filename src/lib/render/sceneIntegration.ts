@@ -208,11 +208,15 @@ export function installPlaybackDriver(viewer: RendererKit) {
     const held = lastEmitted !== null && renderState.heldTime === lastEmitted;
     const resynced = renderState.time !== lastEmitted && !held;
     if (resynced) {
+      // Backwards means the playhead is being rewound onto codes it already
+      // presented: the harmful form, and the one a legible diag must count.
+      const rewound = continuous !== null && renderState.time !== null && renderState.time < continuous;
       continuous = renderState.time ?? start;
       frameDiag.setRate(tcps);
-      frameDiag.onPoseResync();
+      frameDiag.onPoseResync(rewound);
       // A scrub, load or edit refresh wrote the playhead: the poses looked
       // ahead from the one we just left no longer follow it.
+      frameDiag.onInvalidate("resync");
       invalidatePoseBuffer();
     }
     // advanceStageTime without codes keeps the advanced value continuous
@@ -225,14 +229,26 @@ export function installPlaybackDriver(viewer: RendererKit) {
     // coverage, so the window would never fall below half and prefetch would
     // stay dormant for the rest of the loop pass. A scrub is not a wrap and
     // is already covered by the resync branch above.
-    if (!resynced && lastEmitted !== null && next < lastEmitted) invalidatePoseBuffer();
+    if (!resynced && lastEmitted !== null && next < lastEmitted) {
+      frameDiag.onInvalidate("wrap");
+      invalidatePoseBuffer();
+    }
     viewer.animationProgress = toPlayheadOffset(next, start);
     lastEmitted = next;
+    // Where the playhead sits in the authored code list: a park on one code
+    // while frames keep ticking narrows the freeze to the codes themselves.
+    const codeIdx = frameDiag.codeIndex(renderState.timeCodes, next);
+    frameDiag.setCodes(
+      renderState.timeCodes.length,
+      codeIdx >= 0 && codeIdx + 1 < renderState.timeCodes.length
+        ? renderState.timeCodes[codeIdx + 1]! - next
+        : 0,
+    );
     void renderState.setStageTime(next, true);
     // After the call: a played hold is already recorded by then, and only the
     // diag waits on it.
     if (next !== presented && renderState.heldTime !== next) {
-      frameDiag.onPose(performance.now(), frameDiag.codeIndex(renderState.timeCodes, next));
+      frameDiag.onPose(performance.now(), codeIdx);
       presented = next;
     }
     // Look ahead while playing: one background batch of the next K authored

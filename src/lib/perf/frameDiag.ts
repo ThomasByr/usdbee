@@ -61,7 +61,23 @@ export interface DiagSnapshot {
   dispatchMax: number;
   heldTotal: number;
   prefetchDead: boolean;
+  resyncTotal: number;
+  rewindTotal: number;
+  invalidateWrap: number;
+  invalidateResync: number;
+  invalidateEdit: number;
+  invalidateLoad: number;
+  deadlineTripTotal: number;
+  singleFallbackTotal: number;
+  codeIdx: number;
+  codesN: number;
+  nextCodeGap: number;
 }
+
+// Why the look-ahead was dropped. The four callers are the whole set; a
+// stranded buffer (kept across a change it cannot survive) shows up as the
+// matching counter moving at the same time as a pose gap.
+export type InvalidateReason = "wrap" | "resync" | "edit" | "load";
 
 const rafRing = ring(FRAMES);
 const renderRing = ring(FRAMES);
@@ -79,6 +95,16 @@ let dropped = 0;
 let held = 0;
 let prefetchDead = false;
 let rate = 0;
+let resyncs = 0;
+let rewinds = 0;
+let deadlineTrips = 0;
+let singleFallbacks = 0;
+const invalidations: Record<InvalidateReason, number> = { wrap: 0, resync: 0, edit: 0, load: 0 };
+// Playhead position relative to the authored codes: how many exist at all and
+// how far the next one is. A playhead parked on one code while frames keep
+// ticking reads as a large gap here, not as a stalled rAF loop.
+let codesN = 0;
+let nextCodeGap = 0;
 
 /** Expected pose interval for the stage rate; 0 when the rate is unknown. */
 export function expectedIntervalMs(tcps: number): number {
@@ -175,10 +201,37 @@ export function setRate(tcps: number) {
   rate = tcps;
 }
 
-/** The playhead jumped (scrub, load, pause): the next present starts a new chain. */
-export function onPoseResync() {
+/**
+ * The playhead jumped (scrub, load, pause): the next present starts a new
+ * chain. `rewound` marks the harmful form — the playhead moved BACKWARDS, so
+ * codes it already presented are presented again.
+ */
+export function onPoseResync(rewound = false) {
   lastCodeIdx = -1;
   lastPoseAt = -1;
+  resyncs++;
+  if (rewound) rewinds++;
+}
+
+/** The look-ahead was dropped, and by whom. */
+export function onInvalidate(reason: InvalidateReason) {
+  invalidations[reason]++;
+}
+
+/** A hold gave up waiting for its batch and let the step fetch singly. */
+export function onHoldDeadline() {
+  deadlineTrips++;
+}
+
+/** A playback step missed the buffer and fetched one pose (no hold was left). */
+export function onSingleFallback() {
+  singleFallbacks++;
+}
+
+/** Authored codes on the stage and the span to the one after the playhead. */
+export function setCodes(count: number, gap: number) {
+  codesN = count;
+  nextCodeGap = gap;
 }
 
 export function reset() {
@@ -194,6 +247,16 @@ export function reset() {
   dropped = 0;
   held = 0;
   prefetchDead = false;
+  resyncs = 0;
+  rewinds = 0;
+  deadlineTrips = 0;
+  singleFallbacks = 0;
+  invalidations.wrap = 0;
+  invalidations.resync = 0;
+  invalidations.edit = 0;
+  invalidations.load = 0;
+  codesN = 0;
+  nextCodeGap = 0;
   // `rate` is a stage property, not a measurement: keep it.
 }
 
@@ -253,5 +316,17 @@ export function snapshot(): DiagSnapshot {
     dispatchMax: dispatch.max,
     heldTotal: held,
     prefetchDead,
+    resyncTotal: resyncs,
+    rewindTotal: rewinds,
+    invalidateWrap: invalidations.wrap,
+    invalidateResync: invalidations.resync,
+    invalidateEdit: invalidations.edit,
+    invalidateLoad: invalidations.load,
+    deadlineTripTotal: deadlineTrips,
+    singleFallbackTotal: singleFallbacks,
+    // -1 until the driver has presented a code.
+    codeIdx: lastCodeIdx,
+    codesN,
+    nextCodeGap: round2(nextCodeGap),
   };
 }

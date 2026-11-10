@@ -1401,11 +1401,15 @@ describe("renderState.refreshAfterEdit", () => {
     });
     await loadScene(() => [shape]);
     consumeShadowUpdate();
+    frameDiag.reset();
 
     mockIpc(() => [node({ ...shape, transform: translate(5) })]);
     await renderState.refreshAfterEdit(["/Scene/Shape"]);
 
     expect(consumeShadowUpdate()).toBe(true);
+    // The edit is what dropped the look-ahead, not a wrap or a scrub.
+    expect(frameDiag.snapshot().invalidateEdit).toBe(1);
+    expect(frameDiag.snapshot().invalidateWrap).toBe(0);
   });
 
   it("patches an edited prim in place through the batched geometry fetch", async () => {
@@ -1633,6 +1637,7 @@ describe("advanceStageTime", () => {
     expect(advanceStageTime(3, 1, 24, 5, 5)).toBe(5);
   });
 });
+
 
 describe("snapToTimeCodes", () => {
   it("snaps a scrub time to the nearest authored code", () => {
@@ -1900,8 +1905,26 @@ describe("renderState pose prefetch", () => {
     expect(wrapper.matrix.elements[12]).toBe(4);
   });
 
-  it("drains a queued playback step with its hold policy, not a single fetch", async () => {
-    const group = await loadedScene();
+  it("counts a playback miss that had to fetch singly, and not a paused scrub", async () => {
+    await loadedScene();
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_animated_pose_batch") throw "batch blew up";
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    await prefetchPoses(1); // the batch path is dead: no hold is left to take
+    mockIpc(() => [wobbleAt(4)]);
+    frameDiag.reset();
+
+    await renderState.setStageTime(5, true);
+    // The playback step wanted a hold and fetched instead: that is the
+    // fallback a freeze is read against.
+    expect(frameDiag.snapshot().singleFallbackTotal).toBe(1);
+
+    await renderState.setStageTime(6); // a paused scrub fetches on purpose
+    expect(frameDiag.snapshot().singleFallbackTotal).toBe(1);
+  });
+
+  it("drains a queued playback step with its hold policy, not a single fetch", async () => {    const group = await loadedScene();
     mockIpc(() => [wobbleAt(3)]);
     await prefetchPoses(1); // 2..13 buffered
 

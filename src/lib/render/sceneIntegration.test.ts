@@ -485,6 +485,52 @@ describe("installPlaybackDriver on a held code", () => {
     expect(v.animationProgress).toBeCloseTo(30, 10);
     expect(poseCoverage(2)).toBe(0);
   });
+
+  it("counts a resync, and marks the backwards ones as rewinds", () => {
+    const v = viewer();
+    installPlaybackDriver(v);
+    v.onAdvanceTime!(1 / 24); // presents code 1
+    frameDiag.reset();
+
+    renderState.time = 30; // forward scrub
+    v.onAdvanceTime!(0);
+    expect(frameDiag.snapshot().resyncTotal).toBe(1);
+    expect(frameDiag.snapshot().rewindTotal).toBe(0);
+
+    // A backwards write re-presents codes the playhead already emitted, which
+    // is the form that reads as a freeze: count it apart from a forward jump.
+    renderState.time = 5;
+    v.onAdvanceTime!(0);
+    const diag = frameDiag.snapshot();
+    expect(diag.resyncTotal).toBe(2);
+    expect(diag.rewindTotal).toBe(1);
+    expect(diag.invalidateResync).toBe(2);
+    expect(diag.invalidateWrap).toBe(0);
+  });
+
+
+  it("attributes the loop wrap's invalidation to the wrap, not to a resync", () => {
+    const loop = Array.from({ length: 40 }, (_, i) => i);
+    renderState.timeCodes = loop;
+    stageState.stageInfo = {
+      start_time_code: 0,
+      end_time_code: 39,
+      time_codes_per_second: 60,
+    } as any;
+    renderState.time = 33;
+    const v = viewer();
+    installPlaybackDriver(v);
+    v.onAdvanceTime!(0); // presents 33
+    frameDiag.reset();
+
+    v.onAdvanceTime!(0.1); // presents 39
+    v.onAdvanceTime!(0.1); // wraps to 6: the buffer is dropped by the wrap
+
+    const diag = frameDiag.snapshot();
+    expect(diag.invalidateWrap).toBe(1);
+    expect(diag.invalidateResync).toBe(0);
+    expect(diag.rewindTotal).toBe(0);
+  });
 });
 
 describe("resetLoadedScene", () => {

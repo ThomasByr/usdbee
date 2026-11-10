@@ -14,6 +14,7 @@ import {
   settlePoseBatch,
   takePose,
 } from "./posePrefetch";
+import { snapshot as diagSnapshot } from "../perf/frameDiag";
 import type { AnimatedPose } from "./sceneBuilder";
 
 function pose(tag: number): AnimatedPose {
@@ -252,6 +253,7 @@ describe("holding a playback step on a miss", () => {
     expect(holdsPoseStep(CODES, 5)).toBe(true);
     settleAll(claimed);
   });
+
 });
 
 describe("the hold deadline", () => {
@@ -294,6 +296,21 @@ describe("the hold deadline", () => {
     // A new code the same batch would have carried: still the same wait, so
     // the spent deadline stays spent instead of restarting per code.
     expect(holdsPoseStep(CODES, 31)).toBe(false);
+
+    settleAll(claimed);
+  });
+
+  it("counts one deadline trip per holding episode", () => {
+    const before = diagSnapshot().deadlineTripTotal;
+    const claimed = claimPoseBatch(CODES, 0)!;
+    expect(holdsPoseStep(CODES, 30)).toBe(true);
+    clock += POSE_HOLD_DEADLINE_MS;
+    expect(holdsPoseStep(CODES, 30)).toBe(false);
+    // Every later frame of the same episode is the same trip, not a new one.
+    clock += 1000;
+    expect(holdsPoseStep(CODES, 31)).toBe(false);
+
+    expect(diagSnapshot().deadlineTripTotal - before).toBe(1);
 
     settleAll(claimed);
   });

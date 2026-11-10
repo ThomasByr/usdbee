@@ -7,6 +7,8 @@ import {
   codeIndex,
   droppedBetween,
   expectedIntervalMs,
+  onHoldDeadline,
+  onInvalidate,
   onPose,
   onPoseApplied,
   onPoseDispatched,
@@ -14,9 +16,11 @@ import {
   onRaf,
   onRender,
   onPoseResync,
+  onSingleFallback,
   onThrottled,
   percentile,
   reset,
+  setCodes,
   setPrefetchDead,
   setRate,
   snapshot,
@@ -193,6 +197,46 @@ describe("pose pacing", () => {
     expect(s.dispatchP50).toBe(2.5);
     expect(s.dispatchMax).toBe(9);
   });
+
+  it("counts resyncs, and the backwards ones separately", () => {
+    onPoseResync();
+    onPoseResync(true);
+    onPoseResync(true);
+    const s = snapshot();
+    expect(s.resyncTotal).toBe(3);
+    expect(s.rewindTotal).toBe(2);
+  });
+
+  it("counts an invalidation under the reason that caused it", () => {
+    onInvalidate("wrap");
+    onInvalidate("resync");
+    onInvalidate("edit");
+    onInvalidate("load");
+    onInvalidate("wrap");
+    const s = snapshot();
+    expect(s.invalidateWrap).toBe(2);
+    expect(s.invalidateResync).toBe(1);
+    expect(s.invalidateEdit).toBe(1);
+    expect(s.invalidateLoad).toBe(1);
+  });
+
+  it("counts hold-deadline trips and single-pose fallbacks", () => {
+    onHoldDeadline();
+    onSingleFallback();
+    onSingleFallback();
+    const s = snapshot();
+    expect(s.deadlineTripTotal).toBe(1);
+    expect(s.singleFallbackTotal).toBe(2);
+  });
+
+  it("reports the playhead's position in the authored code list", () => {
+    setCodes(360, 0.5);
+    onPose(0, 42);
+    const s = snapshot();
+    expect(s.codesN).toBe(360);
+    expect(s.nextCodeGap).toBe(0.5);
+    expect(s.codeIdx).toBe(42);
+  });
 });
 
 describe("snapshot", () => {
@@ -201,6 +245,9 @@ describe("snapshot", () => {
     "applyN",
     "applyP50",
     "applyP95",
+    "codeIdx",
+    "codesN",
+    "deadlineTripTotal",
     "dispatchMax",
     "dispatchN",
     "dispatchP50",
@@ -208,6 +255,11 @@ describe("snapshot", () => {
     "droppedCodes",
     "expectedPoseMs",
     "heldTotal",
+    "invalidateEdit",
+    "invalidateLoad",
+    "invalidateResync",
+    "invalidateWrap",
+    "nextCodeGap",
     "poseMax",
     "poseN",
     "poseP50",
@@ -223,6 +275,9 @@ describe("snapshot", () => {
     "renderN",
     "renderP50",
     "renderP95",
+    "resyncTotal",
+    "rewindTotal",
+    "singleFallbackTotal",
     "tcps",
     "throttled",
   ];
@@ -260,6 +315,16 @@ describe("snapshot", () => {
     expect(s.dispatchN).toBe(0);
     expect(s.heldTotal).toBe(0);
     expect(s.prefetchDead).toBe(false);
+    expect(s.resyncTotal).toBe(0);
+    expect(s.rewindTotal).toBe(0);
+    expect(s.invalidateWrap).toBe(0);
+    expect(s.invalidateResync).toBe(0);
+    expect(s.invalidateEdit).toBe(0);
+    expect(s.invalidateLoad).toBe(0);
+    expect(s.deadlineTripTotal).toBe(0);
+    expect(s.singleFallbackTotal).toBe(0);
+    expect(s.codesN).toBe(0);
+    expect(s.codeIdx).toBe(-1);
   });
 
   it("keeps the stage rate across a reset, so a reset while paused still reports it", () => {

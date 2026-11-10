@@ -6,7 +6,8 @@
 // payload transport (two IPC hops per >= 1 KB payload), which capped playback
 // at ~5-7 presented poses per second regardless of the render loop. K poses
 // arrive in one invoke; per-pose latency collapses to decode+apply (< 1 ms).
-import { codeIndex } from "../perf/frameDiag";
+// The hold-deadline counter is the diag's only view into this module.
+import { codeIndex, onHoldDeadline } from "../perf/frameDiag";
 import type { AnimatedPose } from "./sceneBuilder";
 
 // Poses held ahead of the playhead: ~290 KB at ~24 KB a pose, and ~< 1 s at
@@ -47,6 +48,10 @@ let buffered = new Map<number, AnimatedPose>();
 // a spent deadline.
 let holding = false;
 let holdStartedAt = 0;
+// Whether the current holding episode already gave up at its deadline: the
+// state stays armed (so the deadline is not restarted per code) but the trip
+// is only counted once.
+let holdTripped = false;
 // Injectable so the deadline is testable: vitest cannot fake this module's
 // clock reads.
 let holdNow: () => number = () => performance.now();
@@ -148,14 +153,21 @@ export function claimPoseBatch(codes: readonly number[], code: number): ClaimedP
 export function holdsPoseStep(codes: readonly number[], code: number): boolean {
   if (buffered.has(code) || codes.length === 0 || failedEpoch === epoch || inFlightEpoch !== epoch) {
     holding = false;
+    holdTripped = false;
     return false;
   }
   const now = holdNow();
   if (!holding) {
     holding = true;
     holdStartedAt = now;
+    holdTripped = false;
   }
-  return now - holdStartedAt < POSE_HOLD_DEADLINE_MS;
+  if (now - holdStartedAt < POSE_HOLD_DEADLINE_MS) return true;
+  if (!holdTripped) {
+    holdTripped = true;
+    onHoldDeadline();
+  }
+  return false;
 }
 
 /**
