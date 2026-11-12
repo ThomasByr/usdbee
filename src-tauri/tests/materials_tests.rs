@@ -267,6 +267,58 @@ def Material "Material" {
 }
 
 #[test]
+fn materials_full_fixture_opens() {
+    // Guard for the material-support fixture: it opens through the owner
+    // thread, composes clean, and every prim the material tasks address
+    // serializes without panicking. Binding semantics are asserted by the
+    // tests for the tasks that implement them.
+    let state = spawn_stage_owner();
+    let info = state.open(&fixture("materials_full.usda"));
+    assert!(
+        info.composition_errors.is_empty(),
+        "composition errors: {:?}",
+        info.composition_errors
+    );
+    assert_eq!(info.up_axis, "Y");
+
+    let red = request_material_data(&state.sender(), "/Materials/Red").expect("Red serializes");
+    assert_eq!(red.name, "Red");
+    let surface = red.surface.expect("Red is a UsdPreviewSurface");
+    let diffuse = surface.diffuse_color.expect("authored diffuseColor");
+    assert_eq!(
+        diffuse.data,
+        serde_json::json!([0.8f32 as f64, 0.1f32 as f64, 0.1f32 as f64])
+    );
+
+    for path in [
+        "/Materials/Green",
+        "/Materials/Blue",
+        "/Materials/RoughTex",
+        "/Materials/Yellow",
+        "/Materials/Wide",
+        "/Materials/Disp",
+        "/Materials/Vol",
+        "/Materials/Mul",
+        "/Materials/Tiled",
+        "/Root/Tri_collection",
+        "/Root/Tri_preview",
+        "/Root/Tri_graph_const",
+        "/Root/Tri_graph_tex",
+        "/Root/Tri_context",
+        "/Root/Tri_wide",
+        "/Root/Tri_disp",
+        "/Root/Tri_vol",
+        "/Root/Tri_mul",
+        "/Root/Tri_tiled",
+        "/Root/Tri_nonmat",
+        "/Root/Anc/Tri_ancdirect",
+    ] {
+        request_material_data(&state.sender(), path)
+            .unwrap_or_else(|e| panic!("{} serializes: {}", path, e));
+    }
+}
+
+#[test]
 fn material_request_without_open_stage_fails() {
     // No stage open means id 0 — the id lookup is the readable guard every
     // command shape (including get_material_data) routes through.

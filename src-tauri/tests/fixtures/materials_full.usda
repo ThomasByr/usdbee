@@ -1,0 +1,359 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+    upAxis = "Y"
+)
+
+def Scope "Materials"
+{
+    def Material "Red"
+    {
+        token outputs:surface.connect = </Materials/Red/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.8, 0.1, 0.1)
+            token outputs:surface
+        }
+    }
+
+    def Material "Green"
+    {
+        token outputs:surface.connect = </Materials/Green/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.1, 0.8, 0.1)
+            token outputs:surface
+        }
+    }
+
+    # Constant diffuse through a NodeGraph interface input.
+    def Material "Blue"
+    {
+        token outputs:surface.connect = </Materials/Blue/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </Materials/Blue/Graph.outputs:diffuse>
+            token outputs:surface
+        }
+
+        def NodeGraph "Graph"
+        {
+            color3f inputs:diff = (0.1, 0.1, 0.8)
+            color3f outputs:diffuse.connect = </Materials/Blue/Graph.inputs:diff>
+        }
+    }
+
+    # Roughness through a texture inside a NodeGraph.
+    def Material "RoughTex"
+    {
+        token outputs:surface.connect = </Materials/RoughTex/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            float inputs:roughness.connect = </Materials/RoughTex/GraphTex.outputs:rough>
+            token outputs:surface
+        }
+
+        def NodeGraph "GraphTex"
+        {
+            float outputs:rough.connect = </Materials/RoughTex/GraphTex/Tex.outputs:r>
+
+            def Shader "Tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./checker.png@
+                float2 inputs:st.connect = </Materials/RoughTex/GraphTex/st.outputs:result>
+                float outputs:r
+            }
+
+            def Shader "st"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+    }
+
+    # Render-context-only surface terminal: no universal outputs:surface.
+    def Material "Yellow"
+    {
+        token outputs:ri:surface.connect = </Materials/Yellow/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.9, 0.9, 0.1)
+            token outputs:surface
+        }
+    }
+
+    # Every channel the viewport models, constants plus a texture.
+    def Material "Wide"
+    {
+        token outputs:surface.connect = </Materials/Wide/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:emissiveColor = (1, 0.5, 0.1)
+            color3f inputs:specularColor = (0.2, 0.2, 0.2)
+            float inputs:clearcoat = 0.8
+            float inputs:clearcoatRoughness = 0.2
+            float inputs:ior = 1.4
+            float inputs:opacityThreshold = 0.5
+            float inputs:occlusion.connect = </Materials/Wide/Occl.outputs:r>
+            token outputs:surface
+        }
+
+        def Shader "Occl"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @./checker.png@
+            float2 inputs:st.connect = </Materials/Wide/st.outputs:result>
+            float outputs:r
+        }
+
+        def Shader "st"
+        {
+            uniform token info:id = "UsdPrimvarReader_float2"
+            string inputs:varname = "st"
+            float2 outputs:result
+        }
+    }
+
+    # Displacement terminal only, no surface terminal.
+    def Material "Disp"
+    {
+        token outputs:displacement.connect = </Materials/Disp/DispNode.outputs:displacement>
+
+        def Shader "DispNode"
+        {
+            uniform token info:id = "UsdDisplacementShader"
+            float outputs:displacement = 0.05
+        }
+    }
+
+    # Volume terminal only, no surface terminal.
+    def Material "Vol"
+    {
+        token outputs:volume.connect = </Materials/Vol/VolNode.outputs:volume>
+
+        def Shader "VolNode"
+        {
+            uniform token info:id = "VolumePreview"
+            token outputs:volume
+        }
+    }
+
+    # An unsupported producer: a multiply node with no inputs at all.
+    def Material "Mul"
+    {
+        token outputs:surface.connect = </Materials/Mul/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            float inputs:roughness.connect = </Materials/Mul/MulNode.outputs:result>
+            token outputs:surface
+        }
+
+        def Shader "MulNode"
+        {
+            uniform token info:id = "UsdMultiply_float"
+            float outputs:result
+        }
+    }
+
+    # Texture whose st chain runs through a UsdTransform2d, with wrap and
+    # colour-space tokens authored.
+    def Material "Tiled"
+    {
+        token outputs:surface.connect = </Materials/Tiled/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </Materials/Tiled/Tile.outputs:rgb>
+            token outputs:surface
+        }
+
+        def Shader "Tile"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @./checker.png@
+            float2 inputs:st.connect = </Materials/Tiled/Xf.outputs:result>
+            token inputs:sourceColorSpace = "raw"
+            token inputs:wrapS = "clamp"
+            token inputs:wrapT = "mirror"
+            float3 outputs:rgb
+        }
+
+        def Shader "Xf"
+        {
+            uniform token info:id = "UsdTransform2d"
+            float2 inputs:in.connect = </Materials/Tiled/st.outputs:result>
+            float inputs:rotation = 90
+            float2 inputs:scale = (2, 2)
+            float2 inputs:translation = (0.25, 0)
+            float2 outputs:result
+        }
+
+        def Shader "st"
+        {
+            uniform token info:id = "UsdPrimvarReader_float2"
+            string inputs:varname = "st"
+            float2 outputs:result
+        }
+    }
+}
+
+def Xform "Root"
+{
+    def Scope "Harness" (
+        prepend apiSchemas = ["CollectionAPI:used"]
+    )
+    {
+        uniform token collection:used:expansionRule = "explicitPrims"
+        rel collection:used:includes = [</Root/Tri_collection>, </Root/Anc/Tri_ancdirect>]
+    }
+
+    def Mesh "Tri_collection" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding:collection:used = [</Root/Harness.collection:used>, </Materials/Red>]
+    }
+
+    # A restricted-purpose binding beats the all-purpose one on the same prim.
+    def Mesh "Tri_preview" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </Materials/Red>
+        rel material:binding:preview = </Materials/Green>
+    }
+
+    def Mesh "Tri_graph_const" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </Materials/Blue>
+    }
+
+    def Mesh "Tri_graph_tex" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </Materials/RoughTex>
+    }
+
+    def Mesh "Tri_context" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </Materials/Yellow>
+    }
+
+    def Mesh "Tri_wide" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </Materials/Wide>
+    }
+
+    def Mesh "Tri_disp" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </Materials/Disp>
+    }
+
+    def Mesh "Tri_vol" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </Materials/Vol>
+    }
+
+    def Mesh "Tri_mul" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </Materials/Mul>
+    }
+
+    def Mesh "Tri_tiled" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </Materials/Tiled>
+    }
+
+    # Bound to a Scope, not a Material: must answer unbound, never an error.
+    def Mesh "Tri_nonmat" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </Materials>
+    }
+
+    def Xform "Anc" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding:collection:used (
+            bindMaterialAs = "strongerThanDescendants"
+        ) = [</Root/Harness.collection:used>, </Materials/Green>]
+
+        def Mesh "Tri_ancdirect" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+            rel material:binding = </Materials/Red>
+        }
+    }
+}
