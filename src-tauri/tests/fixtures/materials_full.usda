@@ -221,7 +221,7 @@ def Xform "Root"
         prepend apiSchemas = ["CollectionAPI:used"]
     )
     {
-        uniform token collection:used:expansionRule = "explicitPrims"
+        uniform token collection:used:expansionRule = "explicitOnly"
         rel collection:used:includes = [</Root/Tri_collection>, </Root/Anc/Tri_ancdirect>]
     }
 
