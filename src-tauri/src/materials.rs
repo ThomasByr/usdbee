@@ -33,8 +33,9 @@ pub struct MaterialInfo {
 }
 
 /// The UsdPreviewSurface channels the viewport consumes. Unauthored channels
-/// are `None` (the converter applies three.js defaults); inputs this task
-/// does not model are skipped on the Rust side, never errors.
+/// fold the USD node definition's defaults (no three.js default applies to a
+/// found UsdPreviewSurface); inputs this task does not model are skipped on the
+/// Rust side, never errors.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PreviewSurface {
@@ -62,8 +63,8 @@ pub struct PreviewSurface {
 
 /// The Material's displacement terminal: a `scale` from an authored constant on
 /// the resolved output, or the `file_path`/`st_primvar` of a UsdUVTexture
-/// feeding it. `st_primvar` keeps the reader's name even when nothing feeds the
-/// terminal, so it always names the primvar a map would read.
+/// feeding it. `st_primvar` is the reader primvar name; a `Some(Displacement)`
+/// always carries a scale or a file path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Displacement {
@@ -250,7 +251,9 @@ fn surface(material: &Material) -> Result<Option<PreviewSurface>, String> {
         }
     }
     for output in material.surface_outputs().map_err(err)? {
-        // The universal terminal was already tried above.
+        // The universal terminal was already tried above. The bare "surface"
+        // is the terminal name the crate classifies (shade/material.rs:406-411,
+        // terminal_outputs), not a path to compare against.
         if output.base_name() == "surface" {
             continue;
         }

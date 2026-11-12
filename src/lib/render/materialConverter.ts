@@ -135,7 +135,9 @@ function applySurfaceConstants(material: THREE.MeshPhysicalMaterial, surface: Pr
     material.opacity = surface.opacity;
     material.transparent = surface.opacity < 1;
   }
-  // The threshold only cuts fragments out in the transparent pass.
+  // The threshold discards fragments in any pass: three.js defines
+  // USE_ALPHATEST from alphaTest alone. transparent = true is the spec R8 rule
+  // here, not a requirement of the discard, and it costs pass sorting.
   if (surface.opacity_threshold != null) {
     material.alphaTest = surface.opacity_threshold;
     material.transparent = true;
@@ -258,6 +260,9 @@ function applyValueScale(
   // scale/bias mechanism and no asset authors one; the payload carries
   // them for a future custom-shader path. Value bias has no mechanism on
   // any slot and no authored case outside the normal-map decode above.
+  // shortcut: emissiveMap and specularColorMap share this no-per-map-scale
+  // gap; an emissive fold into material.emissive would be exact — upgrade
+  // when an asset authors a scale on either
 }
 
 // USD colors are linear and three.js stores working-space values linear, so

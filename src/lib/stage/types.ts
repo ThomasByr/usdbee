@@ -149,7 +149,8 @@ export interface TextureInput {
 }
 
 // Rust materials.rs::PreviewSurface — serialized UsdPreviewSurface channels.
-// Unauthored channels are null (the converter applies three.js defaults).
+// Unauthored channels fold the USD node definition's defaults (the converter
+// applies no three.js default to a found UsdPreviewSurface).
 // The widened channels carry serde(default) on the Rust side, so an older
 // payload may omit them: undefined and null both mean "unauthored".
 export interface PreviewSurface {
