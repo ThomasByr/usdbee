@@ -354,3 +354,26 @@ fn a_codes_fetch_keeps_the_idle_owner_from_warming() {
         "a warm step ran in the codes gap: {progress:?}"
     );
 }
+
+// Load-then-idle is the warmup's headline flow: the load-time codes fetch
+// builds the skeleton and stamps the quiet timer, then nothing else is sent
+// until the user presses play. The owner must keep waking to warm on its own.
+#[test]
+fn an_idle_owner_warms_without_a_command_to_wake_it() {
+    let state = common::spawn_stage_owner();
+    state.open(&fixture("many_codes.usda"));
+    let sender = state.sender();
+
+    let codes = request_time_codes(&sender).expect("time codes");
+    assert_eq!(codes.len(), 240, "the fixture authors one code per frame");
+    // Long enough for the whole quiet window to elapse with no command at all.
+    std::thread::sleep(Duration::from_millis(WARMUP_QUIET_MS + 50));
+
+    // One poll, no loop: its reply is sent before the owner takes its next warm
+    // step, so anything already warmed happened during the sleep.
+    let progress = request_warmup_progress(&sender).expect("progress should reply");
+    assert!(
+        progress.0 >= 1,
+        "the idle owner never warmed on its own: {progress:?}"
+    );
+}

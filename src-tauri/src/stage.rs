@@ -684,6 +684,26 @@ fn spawn_stage_owner_for(
                 {
                     continue;
                 }
+                // Still inside the quiet window: sleep only the remainder of
+                // it, so an owner left idle after a load or a pause wakes up
+                // to warm instead of blocking here until the next command. A
+                // command arriving meanwhile still returns immediately.
+                Err(mpsc::TryRecvError::Empty)
+                    if warmup_enabled
+                        && last_pose_at.is_some_and(|at| {
+                            at.elapsed() < Duration::from_millis(WARMUP_QUIET_MS)
+                        }) =>
+                {
+                    let quiet = Duration::from_millis(WARMUP_QUIET_MS);
+                    let left = last_pose_at
+                        .map(|at| quiet.saturating_sub(at.elapsed()))
+                        .unwrap_or(quiet);
+                    match receiver.recv_timeout(left) {
+                        Ok(request) => request,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
                 Err(mpsc::TryRecvError::Empty) => match receiver.recv() {
                     Ok(request) => request,
                     Err(_) => break,
