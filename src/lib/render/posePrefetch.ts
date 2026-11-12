@@ -188,7 +188,11 @@ export function claimPoseBatch(codes: readonly number[], code: number, tcps = 0)
     }
   } else {
     if (codes.length === 0 || tcps <= 0) return null;
-    const exitCode = codes[firstCodeAfter(codes, code)] ?? Infinity;
+    // No authored code past the playhead (the wrap window past the stage's
+    // tail): the hole has no exit ahead of it, so it is bounded by the last
+    // authored code. Claiming past it asks the backend for times it drops
+    // positionally, and that count mismatch fails the batch for the generation.
+    const exitCode = codes[firstCodeAfter(codes, code)] ?? codes[codes.length - 1]!;
     // Coverage relative to the hole only: the authored codes past the exit are
     // still ahead but cannot serve a hole time, and letting them mask the hole
     // window would starve it for the length of the hole.

@@ -336,8 +336,10 @@ describe("hole times on the tcps grid", () => {
     expect(Object.is(first, second)).toBe(true);
 
     // And the batch's keys are the very values the driver asks for, so the
-    // frame cache hits on the second pass.
-    const claimed = claimPoseBatch(SPARSE, holeQueryTime(119.97, SPARSE, 30), 30)!;
+    // frame cache hits on the second pass. The stage must span the slot: past
+    // its last authored code a hole claim is clamped away (tail seam).
+    const codes = [0, 200];
+    const claimed = claimPoseBatch(codes, holeQueryTime(119.97, codes, 30), 30)!;
     expect(Object.is(claimed.times[0], first)).toBe(true);
     settleAll(claimed);
   });
@@ -370,6 +372,22 @@ describe("claiming a hole batch", () => {
     expect(claimed.times).toEqual([39.6, 39.7, 39.8, 39.9]);
     expect(claimed.times).not.toContain(40);
     settleAll(claimed);
+  });
+
+  it("never claims past the last authored code at a tail seam", () => {
+    // The wrap window: the playhead runs past the stage's last authored code
+    // (42) toward the stage end, so no authored code follows it and the hole's
+    // exit is undefined. Claiming grid times there sends the backend times it
+    // drops positionally; the count mismatch then fails the split and prefetch
+    // dies for the rest of the generation.
+    const claimed = claimPoseBatch(SPARSE, 43.2, 10);
+    // Settle first: an assert that aborts would leave the batch in flight and
+    // starve every later claim in this module-level buffer.
+    const times = claimed?.times ?? [];
+    if (claimed) settleAll(claimed);
+
+    expect(times.filter((time) => time > 42)).toEqual([]);
+    expect(claimed).toBeNull();
   });
 
   it("re-claims only what the hole window does not hold", () => {
