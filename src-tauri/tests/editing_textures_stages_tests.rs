@@ -1,18 +1,12 @@
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 mod common;
 
-use usdbee_lib::stage::{
-    request_geometry_data, request_list_dirty_layers, request_save_layers, request_scene_manifest,
-    request_set_edit_target, request_stage_tree, LayerSaveRequest, RenderNode,
-};
-use usdbee_lib::values::PrimDetails;
+use usdbee_lib::stage::{request_list_dirty_layers, request_stage_tree};
 
 use common::{
-    attribute, details_via_owner, edit_target, fixture, open_path_via_owner, open_via_owner,
-    owner_with_events, payload, request_redo, request_set_value, request_set_variant_selection,
-    request_undo, spawn_stage_owner, undo_state, variant_set, TestOwner,
+    fixture, open_via_owner, owner_with_events, payload, request_redo, request_undo, undo_state,
+    TestOwner,
 };
 
 fn request_set_texture(state: &TestOwner, path: &str, texture: Option<&str>) -> Result<(), String> {
