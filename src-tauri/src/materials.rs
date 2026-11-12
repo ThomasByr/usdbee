@@ -738,6 +738,42 @@ mod tests {
         Ok(())
     }
 
+    /// A NodeGraph interface input feeding `specularColor` still serializes as
+    /// a constant: `color_payload`'s constant arm runs before the channel's
+    /// suppressed definition-default fold.
+    #[test]
+    fn graph_interface_constant_feeds_specular_color() -> openusd::Result<()> {
+        let stage = stage("specular_graph.usda")?;
+        let material = Material::define(&stage, "/Mat")?;
+        let surface = UsdPreviewSurface::define(&stage, "/Mat/Surface")?;
+        let terminal = surface.shader().create_output("surface", "token")?;
+        material.create_surface_output()?.connect_to(&terminal)?;
+
+        let graph = NodeGraph::define(&stage, "/Mat/Graph")?;
+        let authored = graph
+            .create_input("spec", "color3f")?
+            .set(gf::vec3f(0.2, 0.3, 0.4))?;
+        let output = graph
+            .create_output("specular", "color3f")?
+            .connect_to(&authored)?;
+        surface
+            .shader()
+            .create_input("specularColor", "color3f")?
+            .connect_to(&output)?;
+
+        let info = material_info(&stage, "/Mat").expect("material serializes");
+        let surface = info.surface.expect("the surface terminal resolves");
+        assert_eq!(
+            surface
+                .specular_color
+                .expect("the graph-fed constant serializes")
+                .data,
+            serde_json::json!([0.2f32 as f64, 0.3f32 as f64, 0.4f32 as f64]),
+            "an authored interface input is a constant, not a dropped channel"
+        );
+        Ok(())
+    }
+
     /// Spec R3: a surface channel fed by a producer that is neither an authored
     /// interface input nor a `UsdUVTexture` output stays absent, even when that
     /// producer authors a value of its own (which only displacement folds).

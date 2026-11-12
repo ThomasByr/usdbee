@@ -572,12 +572,6 @@ fn unauthored_channels_fold_definition_defaults() {
     assert_eq!(red.metallic, Some(0.0));
     assert_eq!(red.opacity, Some(1.0f32 as f64));
     assert_eq!(
-        red.specular_color, None,
-        "specularColor is authored-only: USD gates its (0,0,0) default to the \
-         specular workflow, so an unauthored channel leaves three's ior-derived \
-         dielectric F0 in place"
-    );
-    assert_eq!(
         red.diffuse_color.expect("authored diffuseColor").data,
         color(0.8, 0.1, 0.1),
         "an authored channel keeps its value"
@@ -593,6 +587,20 @@ fn unauthored_channels_fold_definition_defaults() {
         "nothing authored folds the node definition's 0.18 gray"
     );
     assert_eq!(diffuse.r#type, "color3f");
+}
+
+#[test]
+fn unauthored_specular_color_stays_none() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    let red = surface_of(&state, "/Materials/Red");
+    assert_eq!(
+        red.specular_color, None,
+        "specularColor is authored-only: USD gates its (0,0,0) default to the \
+         specular workflow, so an unauthored channel leaves three's ior-derived \
+         dielectric F0 in place"
+    );
 }
 
 #[test]
