@@ -148,7 +148,10 @@ function viewer(): BridgeViewer {
       domElement: { toDataURL: vi.fn(() => "data:image/png;base64,QUJD") },
     },
     scene: {},
-    camera: { isCamera: true },
+    camera: new THREE.PerspectiveCamera(75, 1, 0.1, 1000),
+    controls: { target: new THREE.Vector3(), update: vi.fn() },
+    fov: 75,
+    pinnedCamera: null,
     activeCameraIndex: -1,
     usdCameras: [],
   } as unknown as BridgeViewer;
@@ -511,6 +514,55 @@ describe("performance", () => {
     expect(after.rafN).toBe(0);
     // The rate is a stage property, not a measurement: reset keeps it.
     expect(after.tcps).toBe(24);
+  });
+});
+
+describe("set_camera", () => {
+  it("requires at least one channel", async () => {
+    await expect(call(viewer(), "set_camera", {})).rejects.toThrow(
+      "set_camera needs position, target or fov",
+    );
+  });
+
+  it("moves the camera and pins copies of the view", async () => {
+    const view = viewer();
+    expect(await call(view, "set_camera", { position: [1, 2, 3], target: [4, 5, 6] })).toEqual({
+      ok: true,
+      pinned: true,
+    });
+
+    expect(view.camera.position.toArray()).toEqual([1, 2, 3]);
+    expect(view.controls.target.toArray()).toEqual([4, 5, 6]);
+    expect(view.controls.update).toHaveBeenCalled();
+    expect(view.pinnedCamera!.position.toArray()).toEqual([1, 2, 3]);
+    expect(view.pinnedCamera!.target.toArray()).toEqual([4, 5, 6]);
+
+    // The pin is a copy: moving the live camera later must not move it.
+    expect(view.pinnedCamera!.position).not.toBe(view.camera.position);
+    view.camera.position.set(9, 9, 9);
+    expect(view.pinnedCamera!.position.toArray()).toEqual([1, 2, 3]);
+  });
+
+  it("keeps the position when only the target is given", async () => {
+    const view = viewer();
+    view.camera.position.set(7, 8, 9);
+
+    expect(await call(view, "set_camera", { target: [1, 1, 1] })).toEqual({ ok: true, pinned: true });
+
+    expect(view.camera.position.toArray()).toEqual([7, 8, 9]);
+    expect(view.controls.target.toArray()).toEqual([1, 1, 1]);
+    expect(view.pinnedCamera!.position.toArray()).toEqual([7, 8, 9]);
+    expect(view.pinnedCamera!.target.toArray()).toEqual([1, 1, 1]);
+  });
+
+  it("sets the field of view without pinning a position", async () => {
+    const view = viewer();
+
+    expect(await call(view, "set_camera", { fov: 35 })).toEqual({ ok: true, pinned: false });
+
+    expect(view.fov).toBe(35);
+    expect((view.camera as THREE.PerspectiveCamera).fov).toBe(35);
+    expect(view.pinnedCamera).toBeNull();
   });
 });
 

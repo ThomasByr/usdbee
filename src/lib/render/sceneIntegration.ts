@@ -106,6 +106,16 @@ export function integrateScene(viewer: RendererKit, group: THREE.Group) {
   viewer.controls.update();
   viewer.controls.saveState();
 
+  // A bridge-pinned view outlives the reframe: an agent's screenshots stay
+  // comparable across rebuilds. Only position and target are pinned; fov is
+  // a viewer setting that already survives.
+  if (viewer.pinnedCamera) {
+    viewer.camera.position.copy(viewer.pinnedCamera.position);
+    viewer.controls.target.copy(viewer.pinnedCamera.target);
+    viewer.controls.update();
+    viewer.controls.saveState();
+  }
+
   if (viewer.gridHelper) {
     viewer.scene!.remove(viewer.gridHelper);
     viewer.gridHelper.dispose();

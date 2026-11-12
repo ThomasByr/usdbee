@@ -48,6 +48,9 @@ export class RendererKit {
   triangleCount = $state<number>(0);
   sceneCenter = $state.raw<THREE.Vector3>(new THREE.Vector3(0, 0, 0));
   sceneSize = $state<number>(10);
+  // Bridge-pinned view (dev probe): reapplied after every framing so
+  // screenshots stay comparable across rebuilds.
+  pinnedCamera = $state.raw<{ position: THREE.Vector3; target: THREE.Vector3 } | null>(null);
 
   // Settings
   showWireframe = $state(false);

@@ -55,6 +55,7 @@ function integrateKit(): RendererKit {
     showBoundingBox: false,
     selectedNode: null,
     animationProgress: 0,
+    pinnedCamera: null,
   } as unknown as RendererKit;
 }
 
@@ -871,6 +872,24 @@ describe("integrateScene", () => {
     integrateScene(kit, rebuilt.group);
 
     expect(kit.selectedNode).toBeNull();
+  });
+
+  it("reapplies a bridge-pinned view over the automatic framing", () => {
+    // An agent's pinned view has to survive the reframe, or its screenshots
+    // stop being comparable across rebuilds.
+    const kit = integrateKit();
+    kit.pinnedCamera = {
+      position: new THREE.Vector3(5, 6, 7),
+      target: new THREE.Vector3(1, 2, 3),
+    };
+
+    integrateScene(kit, namedGroup("/Scene/Shape").group);
+
+    expect(kit.camera.position.toArray()).toEqual([5, 6, 7]);
+    expect(kit.controls.target.toArray()).toEqual([1, 2, 3]);
+    // Once for the framing, once for the pin it then overwrote.
+    expect(kit.controls.update).toHaveBeenCalledTimes(2);
+    expect(kit.controls.saveState).toHaveBeenCalledTimes(2);
   });
 
   it("requests a shadow redraw for the new geometry", () => {

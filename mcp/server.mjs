@@ -82,6 +82,16 @@ export const TOOLS = [
     args: {},
   },
   {
+    name: "set_camera",
+    description:
+      "Move the default viewport camera and pin the view: position and target are reapplied after every scene rebuild or load, so screenshots stay comparable. Omitted channels keep their current value.",
+    args: {
+      position: vec3.optional().describe("camera position [x,y,z], viewer/screen space"),
+      target: vec3.optional().describe("look-at point [x,y,z], viewer/screen space"),
+      fov: z.number().optional().describe("vertical field of view in degrees"),
+    },
+  },
+  {
     name: "screenshot",
     description: "Render the viewport and return it as a PNG image.",
     args: {},

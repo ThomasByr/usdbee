@@ -27,6 +27,7 @@ const CONTRACT = {
   get_performance: {},
   reset_performance: {},
   screenshot: {},
+  set_camera: { "position?": "vec3", "target?": "vec3", "fov?": "number" },
   close_app: {},
   open_app: {},
 };

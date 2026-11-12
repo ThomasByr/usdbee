@@ -1,10 +1,10 @@
 // Dev-only MCP bridge: the running app dials OUT to the local MCP server's
 // WebSocket host and executes the commands a coding agent sends. Every
 // command calls an existing seam (load path, gizmo commit authoring,
-// playback driver, frameDiag, export render) — the bridge owns no behavior
-// of its own. A production bundle must carry none of it: startMcpBridge
-// returns null outside a dev build, and the caller imports it dynamically
-// behind the same gate.
+// playback driver, frameDiag, export render, camera framing) — the bridge
+// owns no behavior of its own. A production bundle must carry none of it:
+// startMcpBridge returns null outside a dev build, and the caller imports it
+// dynamically behind the same gate.
 
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -32,6 +32,9 @@ export interface BridgeViewer {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
   camera: THREE.Camera;
+  controls: { target: THREE.Vector3; update: () => void };
+  fov: number;
+  pinnedCamera: { position: THREE.Vector3; target: THREE.Vector3 } | null;
   activeCameraIndex: number;
   usdCameras: THREE.Camera[];
 }
@@ -164,6 +167,34 @@ async function transformObject(args: Record<string, unknown>) {
   return { ok: true };
 }
 
+function setCamera(viewer: BridgeViewer, args: Record<string, unknown>) {
+  const position = vec3(args.position);
+  const target = vec3(args.target);
+  const fov = numberArg(args.fov);
+  if (!position && !target && fov === null) throw new Error("set_camera needs position, target or fov");
+
+  if (position || target) {
+    if (position) viewer.camera.position.fromArray(position);
+    if (target) viewer.controls.target.fromArray(target);
+    viewer.controls.update();
+    // Pin the whole view, not the given channels: a rebuild frames the scene
+    // from scratch, so an unpinned channel would come back reframed.
+    viewer.pinnedCamera = {
+      position: viewer.camera.position.clone(),
+      target: viewer.controls.target.clone(),
+    };
+  }
+  if (fov !== null) {
+    viewer.fov = fov;
+    // The Viewport effect is the other fov consumer; writing both keeps them
+    // consistent where that effect is not mounted.
+    const camera = viewer.camera as THREE.PerspectiveCamera;
+    camera.fov = fov;
+    camera.updateProjectionMatrix();
+  }
+  return { ok: true, pinned: viewer.pinnedCamera !== null };
+}
+
 function screenshot(viewer: BridgeViewer) {
   if (!viewer.renderer) throw new Error("viewport not ready");
   const camera = viewer.activeCameraIndex >= 0 ? viewer.usdCameras[viewer.activeCameraIndex] : viewer.camera;
@@ -241,6 +272,8 @@ export async function dispatchCommand(
     case "reset_performance":
       frameDiag.reset();
       return { ok: true };
+    case "set_camera":
+      return setCamera(viewer, args);
     case "screenshot":
       return screenshot(viewer);
     case "close_app":
