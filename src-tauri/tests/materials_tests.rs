@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 mod common;
 
 use common::spawn_stage_owner;
-use usdbee_lib::materials::{material_info, MaterialInfo, UvTransform};
+use usdbee_lib::materials::{material_info, MaterialInfo, PreviewSurface, UvTransform};
 use usdbee_lib::stage::{open_stage, request_material_batch, request_material_data};
 
 fn fixture(name: &str) -> PathBuf {
@@ -26,8 +26,15 @@ fn mesh_entry_resolves_the_bound_preview_surface() {
     let surface = info.surface.expect("Plastic is a UsdPreviewSurface");
     assert_eq!(surface.roughness, Some(0.35f32 as f64));
     assert_eq!(surface.metallic, Some(0.9f32 as f64));
-    assert_eq!(surface.opacity, None);
-    assert_eq!(surface.normal, None);
+    assert_eq!(
+        surface.opacity,
+        Some(1.0f32 as f64),
+        "an unauthored opacity folds the node definition's 1.0"
+    );
+    assert_eq!(
+        surface.normal, None,
+        "normal carries only a texture; a constant normal is not modeled"
+    );
     assert!(surface.textures.is_empty(), "Plastic has no textures");
     let color = surface.diffuse_color.expect("authored diffuseColor");
     assert_eq!(color.r#type, "color3f");
@@ -472,6 +479,131 @@ fn transform2d_chain_wrap_tokens_and_value_scale_reach_the_payload() {
     let normal_info = surface.normal.expect("normal TextureInfo");
     assert_eq!(normal_info.wrap_s.as_deref(), Some("repeat"));
     assert_eq!(normal_info.uv_transform, None);
+}
+
+// Producer-walk channel resolution (spec R3/R4) over materials_full.usda and
+// material_cycle.usda: every PreviewSurface input resolves through its
+// producers, and an unwired, unauthored channel folds the node definition's
+// default.
+fn surface_of(state: &common::TestOwner, path: &str) -> PreviewSurface {
+    request_material_data(&state.sender(), path)
+        .unwrap_or_else(|e| panic!("{} resolves: {}", path, e))
+        .surface
+        .unwrap_or_else(|| panic!("{} resolves a UsdPreviewSurface", path))
+}
+
+#[test]
+fn nodegraph_interface_constant_feeds_diffuse() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    assert_eq!(
+        bound_diffuse(&state, "/Root/Tri_graph_const"),
+        color(0.1, 0.1, 0.8),
+        "the diffuseColor constant is reached through the NodeGraph interface"
+    );
+    let surface = surface_of(&state, "/Root/Tri_graph_const");
+    assert_eq!(
+        surface
+            .diffuse_color
+            .expect("the interface value serializes")
+            .r#type,
+        "color3f",
+        "the input's declared type names the payload"
+    );
+    assert!(
+        surface.textures.is_empty(),
+        "an interface constant is no texture"
+    );
+}
+
+#[test]
+fn nodegraph_wrapped_texture_feeds_roughness() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    let surface = surface_of(&state, "/Root/Tri_graph_tex");
+    let roughness = surface
+        .textures
+        .iter()
+        .find(|texture| texture.input == "roughness")
+        .expect("the texture inside the NodeGraph feeds roughness");
+    let checker = std::fs::canonicalize(fixture("checker.png")).expect("fixture texture");
+    assert_eq!(Path::new(&roughness.file_path), checker);
+    assert_eq!(roughness.st_primvar, "st");
+    assert_eq!(
+        surface.roughness, None,
+        "a textured channel serializes no constant"
+    );
+}
+
+#[test]
+fn unauthored_channels_fold_definition_defaults() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    let red = surface_of(&state, "/Materials/Red");
+    assert_eq!(
+        red.roughness,
+        Some(0.5f32 as f64),
+        "an unwired, unauthored roughness folds the node definition's 0.5"
+    );
+    assert_eq!(red.metallic, Some(0.0));
+    assert_eq!(red.opacity, Some(1.0f32 as f64));
+    assert_eq!(
+        red.diffuse_color.expect("authored diffuseColor").data,
+        color(0.8, 0.1, 0.1),
+        "an authored channel keeps its value"
+    );
+
+    let wide = surface_of(&state, "/Root/Tri_wide");
+    let diffuse = wide
+        .diffuse_color
+        .expect("the definition default diffuseColor");
+    assert_eq!(
+        diffuse.data,
+        color(0.18, 0.18, 0.18),
+        "nothing authored folds the node definition's 0.18 gray"
+    );
+    assert_eq!(diffuse.r#type, "color3f");
+}
+
+#[test]
+fn unsupported_producer_drops_channel() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    let surface = surface_of(&state, "/Root/Tri_mul");
+    assert_eq!(
+        surface.roughness, None,
+        "a Multiply output produces no channel this viewport models"
+    );
+    assert!(
+        !surface
+            .textures
+            .iter()
+            .any(|texture| texture.input == "roughness"),
+        "an unsupported producer is no texture either"
+    );
+}
+
+#[test]
+fn cyclic_connection_drops_channel_fail_soft() {
+    let state = spawn_stage_owner();
+    let info = open_via_owner(&state, "material_cycle.usda");
+    assert!(
+        info.composition_errors.is_empty(),
+        "composition errors: {:?}",
+        info.composition_errors
+    );
+
+    let surface = surface_of(&state, "/Cyclic");
+    assert_ne!(
+        surface.roughness,
+        Some(0.5f32 as f64),
+        "an empty walk with a connection is a cycle, not a default"
+    );
+    assert_eq!(surface.roughness, None, "the cyclic channel drops");
 }
 
 // Batched material fetch (Phase 2 Task 3): one channel round trip for many

@@ -1,0 +1,16 @@
+#usda 1.0
+
+# A connection cycle: the surface's roughness input connects back to itself.
+# The crate accepts the authoring and the producer walk answers an empty
+# result, so the channel must drop rather than fold its definition default.
+def Material "Cyclic"
+{
+    token outputs:surface.connect = </Cyclic/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        float inputs:roughness.connect = </Cyclic/Surface.inputs:roughness>
+        token outputs:surface
+    }
+}
