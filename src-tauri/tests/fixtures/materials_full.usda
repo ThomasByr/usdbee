@@ -64,12 +64,13 @@ def Scope "Materials"
         def NodeGraph "GraphTex"
         {
             float outputs:rough.connect = </Materials/RoughTex/GraphTex/Tex.outputs:r>
+            float2 outputs:st.connect = </Materials/RoughTex/GraphTex/st.outputs:result>
 
             def Shader "Tex"
             {
                 uniform token info:id = "UsdUVTexture"
                 asset inputs:file = @./checker.png@
-                float2 inputs:st.connect = </Materials/RoughTex/GraphTex/st.outputs:result>
+                float2 inputs:st.connect = </Materials/RoughTex/GraphTex.outputs:st>
                 float outputs:r
             }
 
