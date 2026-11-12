@@ -260,11 +260,12 @@ export function installPlaybackDriver(viewer: RendererKit) {
       invalidatePoseBuffer("wrap");
       // Claim the post-wrap window from the wrap target BEFORE the step. The
       // step above it would otherwise find nothing buffered and nothing it may
-      // wait for, and single-fetch the very pose a batch could carry — behind
-      // the end-of-loop batch still on the transport (the wrap adopted its
-      // wire so the claim does not queue behind it). Claimed here, not after
-      // the step, because the batch has to be on the wire before the step
-      // decides whether to hold.
+      // wait for, and single-fetch the very pose a batch could carry. The claim
+      // still waits the abandoned end-of-loop batch's remaining wall (the one
+      // wait a wrap cannot avoid); adoption only frees the guard, so this claim
+      // is issued at all and its stale settle cannot release the new guard.
+      // Claimed here, not after the step, because the batch has to be on the
+      // wire before the step decides whether to hold.
       if (renderState.status === "ready") void prefetchPoses(next, tcps, true);
     }
     viewer.animationProgress = toPlayheadOffset(next, start);

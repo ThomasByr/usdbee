@@ -198,9 +198,10 @@ export function claimPoseBatch(
   // claim would queue behind it (a wrap then waits two batch walls for its
   // first pose). Trade-off: a wedged invoke blocks prefetch until it settles —
   // the same exposure the non-invalidated path already has. The wrap's
-  // abandoned tail batch is the one exception (see adoptInFlight): it carries
-  // nothing the new generation can consume, so the claim takes its place on the
-  // wire rather than waiting a batch wall for it to land.
+  // abandoned tail batch is the one exception (see adoptInFlight): the claim
+  // still waits its remaining wall, but adoption takes over the guard, so a
+  // second claim is not refused and that batch's stale settle cannot release
+  // the new claim's guard.
   if ((inFlightEpoch !== -1 && !adoptInFlight) || failedEpoch === epoch) return null;
   // Poses the playhead has passed can never be consumed again: never fetch
   // them, and never let them sit in the map. Both branches prune: in a hole the
@@ -264,9 +265,10 @@ export function claimPoseBatch(
  * generation) and a batch is in flight for it. The ipc transport serializes
  * requests, so a single fetch queues in front of the batch that would have
  * delivered the pose (measured: 260 ms -> > 2 s per batch). With nothing on
- * the wire there is nothing to queue behind, so a cold start (first frame, the
- * frame after a wrap) seeds the buffer with one ~145 ms fetch instead of
- * waiting ~260 ms for a claim.
+ * the wire there is nothing to queue behind, so a pure cold start (first frame,
+ * the load-time seed) fetches that one pose directly (~145 ms) instead of
+ * waiting ~260 ms for a claim. The frame after a wrap is not cold: it claims
+ * the post-wrap window before stepping and holds for that batch.
  *
  * Hold does not imply a refill is coming: on a fully buffered tail window the
  * playhead's last code holds while a claim returns null. Worst case is one
