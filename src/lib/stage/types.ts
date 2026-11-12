@@ -150,6 +150,8 @@ export interface TextureInput {
 
 // Rust materials.rs::PreviewSurface — serialized UsdPreviewSurface channels.
 // Unauthored channels are null (the converter applies three.js defaults).
+// The widened channels carry serde(default) on the Rust side, so an older
+// payload may omit them: undefined and null both mean "unauthored".
 export interface PreviewSurface {
   diffuse_color: ValuePayload | null;
   roughness: number | null;
@@ -157,14 +159,35 @@ export interface PreviewSurface {
   opacity: number | null;
   normal: TextureInfo | null;
   textures: TextureInput[];
+  emissive_color?: ValuePayload | null;
+  specular_color?: ValuePayload | null;
+  clearcoat?: number | null;
+  clearcoat_roughness?: number | null;
+  opacity_threshold?: number | null;
+  ior?: number | null;
+  // Serialized for completeness; three.js has no occlusion scalar slot.
+  occlusion?: number | null;
+}
+
+// Rust materials.rs::Displacement — the material's displacement terminal: a
+// scale from an authored constant, or the file a UsdUVTexture feeds it.
+// `st_primvar` names the UV set a map would read, authored or not.
+export interface Displacement {
+  scale?: number | null;
+  file_path?: string | null;
+  st_primvar: string;
 }
 
 // Rust materials.rs::MaterialInfo — get_material_data payload. `name` is
 // the material prim name (or the prim name when unbound); `surface` is null
 // when no UsdPreviewSurface is found (unbound or unknown shader id).
+// `displacement`/`has_volume` carry serde(default), so an older payload may
+// omit them.
 export interface MaterialInfo {
   name: string;
   surface: PreviewSurface | null;
+  displacement?: Displacement | null;
+  has_volume?: boolean;
 }
 
 export interface AttributeInfo {

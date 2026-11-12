@@ -302,6 +302,149 @@ describe("convertMaterial", () => {
     ).toBe(THREE.SRGBColorSpace);
   });
 
+  it("wires emissive, specular, clearcoat, ior and alphaTest constants", () => {
+    const material = convertMaterial(
+      {
+        name: "Wide",
+        surface: surface({
+          emissive_color: { type: "color3f", data: [1, 0.5, 0.1] },
+          specular_color: { type: "color3f", data: [0.2, 0.3, 0.4] },
+          clearcoat: 0.5,
+          clearcoat_roughness: 0.25,
+          ior: 1.7,
+          opacity_threshold: 0.4,
+        }),
+      },
+      null,
+      loader,
+    );
+
+    expect(material.emissive.r).toBeCloseTo(1);
+    expect(material.emissive.g).toBeCloseTo(0.5);
+    expect(material.emissive.b).toBeCloseTo(0.1);
+    expect(material.specularColor.r).toBeCloseTo(0.2);
+    expect(material.specularColor.g).toBeCloseTo(0.3);
+    expect(material.specularColor.b).toBeCloseTo(0.4);
+    expect(material.clearcoat).toBe(0.5);
+    expect(material.clearcoatRoughness).toBe(0.25);
+    expect(material.ior).toBe(1.7);
+    expect(material.alphaTest).toBe(0.4);
+    expect(material.transparent).toBe(true);
+  });
+
+  it("wires the widened texture slots named by input", () => {
+    const named = (path: string) => {
+      const texture = new THREE.Texture();
+      texture.name = path;
+      return texture;
+    };
+    const material = convertMaterial(
+      {
+        name: "Textured",
+        surface: surface({
+          textures: [
+            textureInput({ input: "emissiveColor", file_path: "/cache/emissive.png" }),
+            textureInput({ input: "specularColor", file_path: "/cache/specular.png" }),
+            textureInput({ input: "clearcoat", file_path: "/cache/clearcoat.png" }),
+            textureInput({ input: "clearcoatRoughness", file_path: "/cache/clearcoat-rough.png" }),
+            textureInput({ input: "occlusion", file_path: "/cache/occlusion.png" }),
+          ],
+        }),
+      },
+      null,
+      named,
+    );
+
+    expect(material.emissiveMap!.name).toBe("/cache/emissive.png");
+    expect(material.specularColorMap!.name).toBe("/cache/specular.png");
+    expect(material.clearcoatMap!.name).toBe("/cache/clearcoat.png");
+    expect(material.clearcoatRoughnessMap!.name).toBe("/cache/clearcoat-rough.png");
+    expect(material.aoMap!.name).toBe("/cache/occlusion.png");
+    // color slots decode as sRGB, data slots stay linear
+    expect(material.emissiveMap!.colorSpace).toBe(THREE.SRGBColorSpace);
+    expect(material.specularColorMap!.colorSpace).toBe(THREE.SRGBColorSpace);
+    expect(material.aoMap!.colorSpace).toBe(THREE.NoColorSpace);
+    expect(material.clearcoatMap!.colorSpace).toBe(THREE.NoColorSpace);
+  });
+
+  it("reads the occlusion map from the base uv set", () => {
+    const material = convertMaterial(
+      {
+        name: "Occluded",
+        surface: surface({ textures: [textureInput({ input: "occlusion", file_path: "/cache/ao.png" })] }),
+      },
+      null,
+      loader,
+    );
+
+    expect(material.aoMap!.channel).toBe(0);
+  });
+
+  it("skips a slot constant when its texture occupies the slot", () => {
+    const material = convertMaterial(
+      {
+        name: "Both",
+        surface: surface({
+          roughness: 0.2,
+          metallic: 0.9,
+          clearcoat: 0.7,
+          emissive_color: { type: "color3f", data: [1, 0.5, 0.1] },
+          textures: [
+            textureInput({ input: "roughness", file_path: "/cache/roughness.png" }),
+            textureInput({ input: "metallic", file_path: "/cache/metallic.png" }),
+            textureInput({ input: "clearcoat", file_path: "/cache/clearcoat.png" }),
+            textureInput({ input: "emissiveColor", file_path: "/cache/emissive.png" }),
+          ],
+        }),
+      },
+      null,
+      loader,
+    );
+
+    // three multiplies map by constant, so the constant must stay at its default
+    const defaults = new THREE.MeshPhysicalMaterial();
+    expect(material.roughness).toBe(defaults.roughness);
+    expect(material.metalness).toBe(defaults.metalness);
+    expect(material.clearcoat).toBe(defaults.clearcoat);
+    // a black emissive would swallow the map; three multiplies, so paint it white
+    expect(material.emissive.getHex()).toBe(0xffffff);
+  });
+
+  it("renders a volume-only material as translucent gray", () => {
+    const material = convertMaterial({ name: "Fog", surface: null, has_volume: true }, null, loader);
+
+    expect(material.transparent).toBe(true);
+    expect(material.opacity).toBe(0.35);
+    expect(material.color.getHex()).toBe(0x888888);
+
+    const plain = convertMaterial({ name: "Unbound", surface: null }, null, loader);
+    expect(plain.transparent).toBe(false);
+    expect(plain.opacity).toBe(1);
+    expect(plain.color.getHex()).toBe(0xffffff);
+  });
+
+  it("wires displacement scale and map", () => {
+    const scaled = convertMaterial(
+      { name: "Bumpy", surface: null, displacement: { scale: 0.05, file_path: null, st_primvar: "st" } },
+      null,
+      loader,
+    );
+    expect(scaled.displacementScale).toBe(0.05);
+    expect(scaled.displacementMap).toBeNull();
+
+    const mapped = convertMaterial(
+      {
+        name: "Bumpy",
+        surface: null,
+        displacement: { scale: null, file_path: "/cache/disp.png", st_primvar: "st" },
+      },
+      null,
+      loader,
+    );
+    expect(mapped.displacementMap).toBeInstanceOf(THREE.Texture);
+    expect(mapped.displacementScale).toBe(1);
+  });
+
   it("picks the per-slot colorSpace default for unauthored sourceColorSpace", () => {
     const convert = (over: Partial<TextureInput> = {}) =>
       convertMaterial({ name: "Auto", surface: surface({ textures: [textureInput(over)] }) }, null, loader);

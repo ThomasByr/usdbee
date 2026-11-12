@@ -4,9 +4,46 @@
 // tests pass a stub. Fail-soft throughout: unknown texture inputs are
 // skipped and a texture the loader cannot fetch falls back to base color.
 import * as THREE from "three";
-import type { MaterialInfo, PreviewSurface, TextureInput, UvTransform } from "../stage/types";
+import type {
+  Displacement,
+  MaterialInfo,
+  PreviewSurface,
+  TextureInput,
+  UvTransform,
+  ValuePayload,
+} from "../stage/types";
 
 export type MaterialTextureLoader = (file_path: string, onError: () => void) => THREE.Texture | null;
+
+type TextureSlot =
+  | "map"
+  | "normalMap"
+  | "roughnessMap"
+  | "metalnessMap"
+  | "alphaMap"
+  | "emissiveMap"
+  | "specularColorMap"
+  | "clearcoatMap"
+  | "clearcoatRoughnessMap"
+  | "aoMap";
+
+// USD PreviewSurface input name -> three.js material slot. Unknown inputs
+// (studio shader dialects, future channels) are skipped, never errors.
+const TEXTURE_SLOTS: Record<string, TextureSlot> = {
+  diffuseColor: "map",
+  normal: "normalMap",
+  roughness: "roughnessMap",
+  metallic: "metalnessMap",
+  opacity: "alphaMap",
+  emissiveColor: "emissiveMap",
+  specularColor: "specularColorMap",
+  clearcoat: "clearcoatMap",
+  clearcoatRoughness: "clearcoatRoughnessMap",
+  occlusion: "aoMap",
+};
+
+// Slots carrying sRGB-encoded color data; every other slot holds linear data.
+const COLOR_SLOTS: TextureSlot[] = ["map", "emissiveMap", "specularColorMap"];
 
 export function convertMaterial(
   info: MaterialInfo,
@@ -21,17 +58,17 @@ export function convertMaterial(
   if (surface) {
     applyTextures(material, surface, loadTexture, fallbackColor);
     hasMap = material.map !== null;
-    applyConstantColor(material, surface);
-    if (surface.roughness !== null) material.roughness = surface.roughness;
-    if (surface.metallic !== null) material.metalness = surface.metallic;
-    if (surface.opacity !== null) {
-      material.opacity = surface.opacity;
-      material.transparent = surface.opacity < 1;
-    }
+    applySurfaceConstants(material, surface);
     // An opacity texture blends per-pixel, so the whole material must render in the transparent pass.
     if (material.alphaMap !== null) material.transparent = true;
+  } else if (info.has_volume) {
+    // Volume-only material (no surface to draw): translucent gray placeholder.
+    material.color.setHex(0x888888);
+    material.opacity = 0.35;
+    material.transparent = true;
   }
 
+  applyDisplacement(material, info.displacement, loadTexture);
   applyFallbackColor(material, info, surface, hasMap, fallbackColor);
   return material;
 }
@@ -43,13 +80,7 @@ function applyTextures(
   fallbackColor: string | null,
 ): void {
   for (const texture of surface.textures) {
-    const slot = {
-      diffuseColor: "map",
-      normal: "normalMap",
-      roughness: "roughnessMap",
-      metallic: "metalnessMap",
-      opacity: "alphaMap",
-    }[texture.input] as "map" | "normalMap" | "roughnessMap" | "metalnessMap" | "alphaMap" | undefined;
+    const slot = TEXTURE_SLOTS[texture.input];
     if (!slot) continue;
     const loaded = loadTexture(texture.file_path, () => {
       if (!loaded) return;
@@ -66,11 +97,73 @@ function applyTextures(
       loaded.wrapS = wrapMode(texture.wrap_s);
       loaded.wrapT = wrapMode(texture.wrap_t);
       loaded.colorSpace = colorSpace(texture.color_space, slot);
+      // USD occlusion samples the same st UVs, i.e. the base uv set.
+      if (slot === "aoMap") loaded.channel = 0;
       applyUvTransform(loaded, texture.uv_transform);
       applyValueScale(material, slot, texture);
       material[slot] = loaded;
     }
   }
+}
+
+// Spec R8: authored constants land on the matching three.js slot, except
+// where a texture occupies that slot — three multiplies map by constant, so
+// applying both would double-count (spec R3 texture-wins rule).
+function applySurfaceConstants(material: THREE.MeshPhysicalMaterial, surface: PreviewSurface): void {
+  applyConstantColor(material, surface);
+
+  const emissive = constantColor(surface.emissive_color);
+  if (material.emissiveMap !== null) material.emissive = new THREE.Color(1, 1, 1);
+  else if (emissive) material.emissive = emissive;
+
+  if (material.specularColorMap === null) {
+    const specular = constantColor(surface.specular_color);
+    if (specular) material.specularColor = specular;
+  }
+
+  if (surface.roughness != null && material.roughnessMap === null) material.roughness = surface.roughness;
+  if (surface.metallic != null && material.metalnessMap === null) material.metalness = surface.metallic;
+  if (surface.clearcoat != null && material.clearcoatMap === null) material.clearcoat = surface.clearcoat;
+  if (surface.clearcoat_roughness != null && material.clearcoatRoughnessMap === null) {
+    material.clearcoatRoughness = surface.clearcoat_roughness;
+  }
+
+  if (surface.ior != null) material.ior = surface.ior;
+
+  if (surface.opacity != null) {
+    material.opacity = surface.opacity;
+    material.transparent = surface.opacity < 1;
+  }
+  // The threshold only cuts fragments out in the transparent pass.
+  if (surface.opacity_threshold != null) {
+    material.alphaTest = surface.opacity_threshold;
+    material.transparent = true;
+  }
+}
+
+// Displacement only moves existing vertices, so a coarse mesh shows little or
+// nothing — accepted (manual-pass note), not a bug. The authored scale stays a
+// multiplier on the map, so it applies alongside it.
+function applyDisplacement(
+  material: THREE.MeshPhysicalMaterial,
+  displacement: Displacement | null | undefined,
+  loadTexture: MaterialTextureLoader,
+): void {
+  if (!displacement) return;
+  if (displacement.file_path) {
+    const loaded = loadTexture(displacement.file_path, () => {
+      if (!loaded) return;
+      loaded.dispose();
+      if (material.displacementMap !== loaded) return;
+      material.displacementMap = null;
+      material.needsUpdate = true;
+    });
+    if (loaded) {
+      loaded.colorSpace = THREE.NoColorSpace;
+      material.displacementMap = loaded;
+    }
+  }
+  if (displacement.scale != null) material.displacementScale = displacement.scale;
 }
 
 // shortcut: "black"/"useMetadata" and unauthored wrap tokens fall back to
@@ -83,13 +176,12 @@ function wrapMode(token: string | null | undefined): THREE.Wrapping {
 }
 
 // Authored sourceColorSpace always wins; unauthored "auto" picks by slot:
-// the one narrow conditional below is the whole per-slot default table —
-// color slots carry sRGB-encoded files, data slots (and any future slot
-// until listed here) carry linear data; add e.g. emissiveMap there.
-function colorSpace(token: string | null | undefined, slot: string): THREE.ColorSpace {
+// COLOR_SLOTS above is the whole default table — color slots carry
+// sRGB-encoded files, data slots carry linear data.
+function colorSpace(token: string | null | undefined, slot: TextureSlot): THREE.ColorSpace {
   if (token === "raw") return THREE.NoColorSpace;
   if (token === "sRGB") return THREE.SRGBColorSpace;
-  return slot === "map" ? THREE.SRGBColorSpace : THREE.NoColorSpace; // unauthored "auto"
+  return COLOR_SLOTS.includes(slot) ? THREE.SRGBColorSpace : THREE.NoColorSpace; // unauthored "auto"
 }
 
 // USD's UsdTransform2d composes `result = in * scale * rotate + translation`
@@ -112,7 +204,7 @@ function applyUvTransform(texture: THREE.Texture, transform: UvTransform | null 
 // equivalent or none at all is needed.
 function applyValueScale(
   material: THREE.MeshPhysicalMaterial,
-  slot: "map" | "normalMap" | "roughnessMap" | "metalnessMap" | "alphaMap",
+  slot: TextureSlot,
   texture: TextureInput,
 ): void {
   const scale = texture.value_scale;
@@ -137,12 +229,16 @@ function applyValueScale(
 
 // USD colors are linear and three.js stores working-space values linear, so
 // the payload numbers map straight onto THREE.Color.
+function constantColor(payload: ValuePayload | null | undefined): THREE.Color | null {
+  if (!payload || !Array.isArray(payload.data) || payload.data.length !== 3) return null;
+  const data = payload.data as number[];
+  return new THREE.Color(data[0], data[1], data[2]);
+}
+
 function applyConstantColor(material: THREE.MeshPhysicalMaterial, surface: PreviewSurface): void {
   if (material.map !== null) return;
-  const color = surface.diffuse_color;
-  if (color && Array.isArray(color.data) && color.data.length === 3) {
-    material.color = new THREE.Color(color.data[0], color.data[1], color.data[2]);
-  }
+  const color = constantColor(surface.diffuse_color);
+  if (color) material.color = color;
 }
 
 // Fallback color, ported from the +page.svelte replaceWithColor logic: apply
