@@ -76,7 +76,7 @@ def Scope "Materials"
             def Shader "st"
             {
                 uniform token info:id = "UsdPrimvarReader_float2"
-                string inputs:varname = "st"
+                string inputs:varname = "uv"
                 float2 outputs:result
             }
         }

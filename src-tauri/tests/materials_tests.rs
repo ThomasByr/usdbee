@@ -530,7 +530,10 @@ fn nodegraph_wrapped_texture_feeds_roughness() {
         .expect("the texture inside the NodeGraph feeds roughness");
     let checker = std::fs::canonicalize(fixture("checker.png")).expect("fixture texture");
     assert_eq!(Path::new(&roughness.file_path), checker);
-    assert_eq!(roughness.st_primvar, "st");
+    assert_eq!(
+        roughness.st_primvar, "uv",
+        "the graph's reader names the primvar, not the fallback"
+    );
     assert_eq!(
         surface.roughness, None,
         "a textured channel serializes no constant"
