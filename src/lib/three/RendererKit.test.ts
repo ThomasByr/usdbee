@@ -1,7 +1,6 @@
-// Frame-loop pin: the selection box must not be recomputed from the
-// selected node while playback runs (each pose nulls the animated
-// geometry's bounding box, so a rescan walks every selected vertex), and
-// must refresh on pause, on a paused scrub and on a selection change.
+// Frame-loop pin: the selection box follows the selected node every frame,
+// playback included (the orange box and the gizmo anchor both read it), and
+// a pose's invalidated geometry bounding box costs at most one vertex walk.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -134,7 +133,7 @@ describe("fps limiter", () => {
 });
 
 describe("selection box during playback", () => {
-  it("does not rescan while playback runs", () => {
+  it("follows the pose every frame while playback runs", () => {
     const { kit, node } = makeKit(true);
     frame(kit);
     const setFromObject = vi.spyOn(THREE.Box3.prototype, "setFromObject");
@@ -143,10 +142,35 @@ describe("selection box during playback", () => {
     node.position.set(5, 0, 0);
     node.updateMatrixWorld(true);
     frame(kit);
+
+    expect(setFromObject).toHaveBeenCalledTimes(1);
+    expect(boxOf(kit).min.x).toBeCloseTo(4.5, 6);
+
+    node.position.set(-2, 0, 0);
+    node.updateMatrixWorld(true);
     frame(kit);
 
-    expect(setFromObject).not.toHaveBeenCalled();
-    expect(boxOf(kit).min.x).toBeCloseTo(-0.5, 6);
+    expect(setFromObject).toHaveBeenCalledTimes(2);
+    expect(boxOf(kit).min.x).toBeCloseTo(-2.5, 6);
+  });
+
+  it("walks vertices at most once per pose", () => {
+    // A pose nulls the animated geometry's cached box (the in-place write in
+    // sceneBuilder). The first rescan after it repopulates that cache, so the
+    // frames in between a pose must not walk the vertices again.
+    const { kit, node } = makeKit(true);
+    const geometry = (node as THREE.Mesh).geometry;
+    frame(kit);
+    const walk = vi.spyOn(THREE.BufferGeometry.prototype, "computeBoundingBox");
+
+    geometry.boundingBox = null; // what applyPackedGeometryInPlace does
+    frame(kit);
+    expect(walk).toHaveBeenCalledTimes(1);
+    expect(geometry.boundingBox).not.toBeNull();
+
+    frame(kit);
+    frame(kit);
+    expect(walk).toHaveBeenCalledTimes(1);
   });
 
   it("rescans on the paused frame and tracks pose changes while paused", () => {
@@ -159,22 +183,6 @@ describe("selection box during playback", () => {
     node.position.set(-3, 0, 0);
     node.updateMatrixWorld(true);
     setFromObject.mockClear();
-    frame(kit);
-
-    expect(setFromObject).toHaveBeenCalledTimes(1);
-    expect(boxOf(kit).min.x).toBeCloseTo(-3.5, 6);
-  });
-
-  it("rescans on the frame where playback pauses", () => {
-    const { kit, node } = makeKit(true);
-    frame(kit);
-    const setFromObject = vi.spyOn(THREE.Box3.prototype, "setFromObject");
-    setFromObject.mockClear();
-
-    // The pose reached while playing, frozen until the pause lands.
-    node.position.set(-3, 0, 0);
-    node.updateMatrixWorld(true);
-    kit.isPlayingAnim = false;
     frame(kit);
 
     expect(setFromObject).toHaveBeenCalledTimes(1);
@@ -201,13 +209,9 @@ describe("selection box during playback", () => {
     table.mockRestore();
   });
 
-  it("rescans once when the selection changes during playback", () => {
-    const { kit, node } = makeKit(true);
+  it("tracks a selection change during playback", () => {
+    const { kit } = makeKit(true);
     frame(kit);
-    const setFromObject = vi.spyOn(THREE.Box3.prototype, "setFromObject");
-    setFromObject.mockClear();
-    node.position.set(5, 0, 0);
-    node.updateMatrixWorld(true);
 
     const other = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2));
     other.position.set(10, 0, 0);
@@ -216,11 +220,8 @@ describe("selection box during playback", () => {
     kit.selectionHelper!.visible = false;
     frame(kit);
 
-    expect(setFromObject).toHaveBeenCalledTimes(1);
     expect(boxOf(kit).min.x).toBeCloseTo(9, 6);
     expect(kit.selectionHelper!.visible).toBe(true);
-    frame(kit);
-    expect(setFromObject).toHaveBeenCalledTimes(1);
   });
 
   it("hides the box when the selection clears during playback", () => {

@@ -70,8 +70,6 @@ export class RendererKit {
   private resizeObserver: ResizeObserver | null = null;
   public keysPressed = new Set<string>();
   public showExportModal = $state(false);
-  // The node the selection box currently describes (plain, never rendered).
-  private boxNode: THREE.Object3D | null = null;
 
   constructor() {
     this.clock = new THREE.Clock();
@@ -297,17 +295,11 @@ export class RendererKit {
       this.sceneBox.setFromObject(this.loadedGroup, true);
     }
     if (this.selectedNode && this.selectionHelper) {
-      // Playback nulls the animated geometry's bounding box on every pose, so
-      // a per-frame setFromObject walks every vertex of the selection in dev
-      // JS. Keep the box from before the play started; pause, paused scrub and
-      // a selection change refresh it. The gizmo anchor reads this same box
-      // (onFrameGizmoSync below), so the frozen box also parks the knob at the
-      // play-start center until drag start refreshes and re-anchors it.
-      if (!this.isPlayingAnim || this.selectedNode !== this.boxNode) this.refreshSelectionBox();
+      // The selected prim keeps animating, so the box follows it every frame.
+      this.refreshSelectionBox();
     } else if (this.selectionHelper) {
       // A cleared selection must take the last-drawn box with it.
       this.selectionHelper.visible = false;
-      this.boxNode = null;
     }
     // After the selection box: the gizmo anchor reuses its center.
     this.onFrameGizmoSync?.();
@@ -339,14 +331,14 @@ export class RendererKit {
     }
   };
 
-  // One selection-box rescan from the current selection. The paused-frame
-  // path above and a gizmo drag start (whose anchor latch must not read a
-  // box frozen by playback) both refresh through here.
+  // One selection-box rescan from the current selection, over the selection's
+  // subtree only. setFromObject reuses each geometry's cached bounding box, so
+  // only geometry a pose invalidated (playback nulls the animated geometry's
+  // box, so this is at most one vertex walk per pose) pays for its vertices.
   public refreshSelectionBox() {
     if (!this.selectedNode || !this.selectionHelper) return;
     this.selectionHelper.box.setFromObject(this.selectedNode, false);
     this.selectionHelper.visible = !this.selectionHelper.box.isEmpty();
-    this.boxNode = this.selectedNode;
   }
 
   public dispose() {

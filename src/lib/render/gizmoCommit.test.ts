@@ -367,10 +367,10 @@ describe("hybrid authoring time", () => {
 });
 
 describe("pause on gizmo drag start", () => {
-  it("rescans the box and re-anchors the gizmo before the drag latch", () => {
-    // Real kit: the rescan and the anchor read are the point here. Playback
-    // freezes the box, so a drag begun mid-playback would otherwise pivot
-    // on the pre-play center.
+  it("re-anchors the gizmo from the live box before the drag latch", () => {
+    // Real kit: the anchor read is the point here. The frame loop keeps the
+    // box on the selected node's pose while playback runs, so a drag begun
+    // mid-playback must latch the pose it starts from.
     const kit = new RendererKit();
     const node = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2));
     node.updateMatrixWorld(true);
@@ -390,11 +390,13 @@ describe("pause on gizmo drag start", () => {
     frameSyncGizmo(kit);
     expect(proxy().position.x).toBeCloseTo(0, 6);
 
-    // Poses land during playback; the frozen box keeps the knob behind.
+    // Poses land during playback; the frame loop rescans the box, so the
+    // knob follows them.
     node.position.set(10, 0, 0);
     node.updateMatrixWorld(true);
+    kit.refreshSelectionBox();
     frameSyncGizmo(kit);
-    expect(proxy().position.x).toBeCloseTo(0, 6);
+    expect(proxy().position.x).toBeCloseTo(10, 6);
 
     gizmoPolicy.kit!.onDragStart!();
 
