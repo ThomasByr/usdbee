@@ -12,8 +12,8 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn open_via_owner(state: &common::TestOwner, name: &str) {
-    state.open(&fixture(name));
+fn open_via_owner(state: &common::TestOwner, name: &str) -> usdbee_lib::stage::StageInfo {
+    state.open(&fixture(name))
 }
 
 #[test]
@@ -273,7 +273,7 @@ fn materials_full_fixture_opens() {
     // serializes without panicking. Binding semantics are asserted by the
     // tests for the tasks that implement them.
     let state = spawn_stage_owner();
-    let info = state.open(&fixture("materials_full.usda"));
+    let info = open_via_owner(&state, "materials_full.usda");
     assert!(
         info.composition_errors.is_empty(),
         "composition errors: {:?}",
@@ -316,6 +316,103 @@ fn materials_full_fixture_opens() {
         request_material_data(&state.sender(), path)
             .unwrap_or_else(|e| panic!("{} serializes: {}", path, e));
     }
+}
+
+// Binding resolution (spec R1/R2) over materials_full.usda: the fixture
+// gives each prim one binding shape, so each test pins a single rule.
+fn bound_diffuse(state: &common::TestOwner, path: &str) -> serde_json::Value {
+    let info = request_material_data(&state.sender(), path)
+        .unwrap_or_else(|e| panic!("{} resolves: {}", path, e));
+    let surface = info
+        .surface
+        .unwrap_or_else(|| panic!("{} resolves a UsdPreviewSurface", path));
+    surface
+        .diffuse_color
+        .unwrap_or_else(|| panic!("{} has an authored diffuseColor", path))
+        .data
+}
+
+fn color(r: f32, g: f32, b: f32) -> serde_json::Value {
+    serde_json::json!([r as f64, g as f64, b as f64])
+}
+
+#[test]
+fn collection_bound_mesh_resolves_material() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    assert_eq!(
+        bound_diffuse(&state, "/Root/Tri_collection"),
+        color(0.8, 0.1, 0.1),
+        "a collection binding naming the mesh resolves the collection's material"
+    );
+}
+
+#[test]
+fn purpose_binding_beats_all_purpose() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    assert_eq!(
+        bound_diffuse(&state, "/Root/Tri_preview"),
+        color(0.1, 0.8, 0.1),
+        "the preview-purpose binding outranks the all-purpose one on the same prim"
+    );
+}
+
+#[test]
+fn all_purpose_binding_resolves_without_purpose_rel() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    // The diffuse constant flows through Blue's NodeGraph interface, which
+    // this task does not resolve; the binding identity is the guard here.
+    let info = request_material_data(&state.sender(), "/Root/Tri_graph_const")
+        .expect("an all-purpose binding resolves");
+    assert_eq!(
+        info.name, "Blue",
+        "a plain all-purpose binding still resolves when no purpose rel is authored"
+    );
+}
+
+#[test]
+fn render_context_only_terminal_resolves() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    assert_eq!(
+        bound_diffuse(&state, "/Root/Tri_context"),
+        color(0.9, 0.9, 0.1),
+        "a material with only a render-context surface terminal still serializes"
+    );
+}
+
+#[test]
+fn ancestor_collection_binding_outranks_descendant_direct() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    assert_eq!(
+        bound_diffuse(&state, "/Root/Anc/Tri_ancdirect"),
+        color(0.1, 0.8, 0.1),
+        "bindMaterialAs = strongerThanDescendants on the ancestor collection binding wins"
+    );
+}
+
+#[test]
+fn binding_to_non_material_prim_answers_unbound() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    let info = request_material_data(&state.sender(), "/Root/Tri_nonmat")
+        .expect("a binding to a non-Material prim is not an error");
+    assert_eq!(
+        info,
+        MaterialInfo {
+            name: "Tri_nonmat".to_string(),
+            surface: None,
+        }
+    );
 }
 
 #[test]

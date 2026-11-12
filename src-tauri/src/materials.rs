@@ -11,7 +11,9 @@ use openusd::gf;
 use openusd::sdf::{self, Value};
 use openusd::usd::{Prim, SchemaBase, Stage};
 use openusd_schemas::shade::nodes::{PreviewSurface as UsdPreviewSurface, Transform2d, UVTexture};
-use openusd_schemas::shade::{Connectable, Input, Material, MaterialBindingAPI, Shader};
+use openusd_schemas::shade::{
+    Connectable, Input, Material, MaterialBindingAPI, ProducerFilter, Shader,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::values::{serialize_payload, ValuePayload};
@@ -94,9 +96,10 @@ fn err(error: impl std::fmt::Display) -> String {
 
 /// Serialize the material for `path`. Controller resolution (Task 3): `path`
 /// may be the mesh prim OR the material prim. A Material serializes directly;
-/// any other prim resolves its direct `material:binding` relationship and
-/// serializes the bound Material. An unbound prim (or a binding with no /
-/// non-Material target) answers the prim's own name with `surface: None`.
+/// any other prim resolves its bound Material (collections, purpose-specific
+/// and ancestor bindings included) and serializes it. An unbound prim (or a
+/// binding with no / non-Material target) answers the prim's own name with
+/// `surface: None`.
 pub fn material_info(stage: &Stage, path: &str) -> Result<MaterialInfo, String> {
     let prim_path =
         sdf::try_into_path(path).map_err(|e| format!("invalid prim path '{}': {}", path, e))?;
@@ -109,11 +112,15 @@ pub fn material_info(stage: &Stage, path: &str) -> Result<MaterialInfo, String> 
         return serialize_material(&material);
     }
 
-    // shortcut: collection-based material bindings are out of scope; only a
-    // direct all-purpose `material:binding` relationship is read
-    let bound = MaterialBindingAPI::from_prim_unchecked(prim.clone())
-        .direct_binding("")
-        .map_err(err)?;
+    // Spec R1: the viewport renders the preview purpose, so that query comes
+    // first; `full` then rescues a mesh bound only at full purpose.
+    // shortcut: every purpose query folds the all-purpose fallback in, so an
+    // all-purpose binding shadows a full-only one; upgrade if an asset shows it
+    let binding = MaterialBindingAPI::from_prim_unchecked(prim.clone());
+    let bound = match binding.compute_bound_material("preview").map_err(err)? {
+        Some(material) => Some(material),
+        None => binding.compute_bound_material("full").map_err(err)?,
+    };
     let Some(material_path) = bound else {
         return Ok(unbound(&prim));
     };
@@ -148,27 +155,46 @@ fn serialize_material(material: &Material) -> Result<MaterialInfo, String> {
 }
 
 /// The Material's surface terminal -> connected shader, serialized when it is
-/// a UsdPreviewSurface. Unknown shader ids fail soft to `None`; displacement
-/// and volume terminals are ignored.
-/// shortcut: render-context-only surface terminals (outputs:<ctx>:surface)
-/// are not consulted; only the universal terminal is
+/// a UsdPreviewSurface. The universal terminal is preferred; a material that
+/// only authors render-context terminals (`outputs:<ctx>:surface`) falls back
+/// to the first of those that reaches a UsdPreviewSurface. Unknown shader ids
+/// fail soft to `None`; displacement and volume terminals are ignored.
 fn surface(material: &Material) -> Result<Option<PreviewSurface>, String> {
-    let Some(terminal) = material.compute_surface_source(&[]).map_err(err)? else {
-        return Ok(None);
-    };
-    let Some(source) = terminal.sources().first() else {
-        return Ok(None);
-    };
-    let Some(shader) = source.shader() else {
-        return Ok(None);
-    };
-    if UsdPreviewSurface::from_shader(shader.clone())
-        .map_err(err)?
-        .is_none()
-    {
-        return Ok(None);
+    if let Some(terminal) = material.compute_surface_source(&[]).map_err(err)? {
+        if let Some(shader) = terminal
+            .sources()
+            .first()
+            .and_then(|source| source.shader())
+        {
+            if UsdPreviewSurface::from_shader(shader.clone())
+                .map_err(err)?
+                .is_some()
+            {
+                return Ok(Some(preview_surface(shader)?));
+            }
+        }
     }
-    Ok(Some(preview_surface(shader)?))
+    for output in material.surface_outputs().map_err(err)? {
+        // The universal terminal was already tried above.
+        if output.base_name() == "surface" {
+            continue;
+        }
+        for attribute in output
+            .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)
+            .map_err(err)?
+        {
+            let Some(shader) = Shader::from_prim(attribute.attribute().prim()).map_err(err)? else {
+                continue;
+            };
+            if UsdPreviewSurface::from_shader(shader.clone())
+                .map_err(err)?
+                .is_some()
+            {
+                return Ok(Some(preview_surface(&shader)?));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn preview_surface(shader: &Shader) -> Result<PreviewSurface, String> {
