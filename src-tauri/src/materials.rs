@@ -216,13 +216,18 @@ fn displacement(material: &Material) -> Result<Option<Displacement>, String> {
         file_path: None,
         st_primvar: "st".to_string(),
     };
-    match channel_from_producers(producers)? {
+    match channel_from_producers(producers, true)? {
         Some(Channel::Constant(value)) => displacement.scale = scalar(&value),
         Some(Channel::Texture(texture)) => {
             displacement.file_path = texture_file(&texture.file_input())?;
             displacement.st_primvar = st_primvar(&texture)?;
         }
         None => {}
+    }
+    // Spec R6: an unsupported producer, or a constant that is no float, leaves
+    // nothing to displace; a payload of absent fields is no displacement.
+    if displacement.scale.is_none() && displacement.file_path.is_none() {
+        return Ok(None);
     }
     Ok(Some(displacement))
 }
@@ -279,14 +284,17 @@ enum Channel {
 /// absent, and so does a cycle or a chain past the crate's depth budget —
 /// those answer an empty walk or a refusal, never a panic and never an error.
 fn resolve_channel(input: &Input) -> Result<Option<Channel>, String> {
-    channel_from_producers(input.value_producing_attributes(ProducerFilter::Any))
+    channel_from_producers(input.value_producing_attributes(ProducerFilter::Any), false)
 }
 
 /// The channel a producer walk answers: a `UsdUVTexture` output anywhere in the
 /// walk wins, else an authored value, else nothing. A refused walk (cycle,
-/// depth budget) drops the channel.
+/// depth budget) drops the channel. `fold_output_constants` admits an authored
+/// value on a shader output, which only the displacement terminal needs: a
+/// surface channel fed by an unsupported producer stays absent (spec R3).
 fn channel_from_producers(
     producers: Result<Vec<ShadingAttribute>, openusd_schemas::SchemaError>,
+    fold_output_constants: bool,
 ) -> Result<Option<Channel>, String> {
     let Ok(producers) = producers else {
         return Ok(None);
@@ -303,7 +311,10 @@ fn channel_from_producers(
                 }
                 // A shader output may author a constant itself, as a
                 // displacement signal does; an unauthored output is no value.
-                if constant.is_none() && attribute.has_authored_value().map_err(err)? {
+                if fold_output_constants
+                    && constant.is_none()
+                    && attribute.has_authored_value().map_err(err)?
+                {
                     constant = attribute.value_at::<Value>(None).map_err(err)?;
                 }
             }
@@ -625,6 +636,83 @@ mod tests {
         assert!(resolve_channel(&input)
             .expect("a refused walk drops the channel")
             .is_none());
+        Ok(())
+    }
+
+    /// A stage with the schema registry, for authoring shading networks.
+    fn stage(name: &str) -> openusd::Result<Stage> {
+        Stage::builder()
+            .schema_registry(openusd_schemas::schema_registry())
+            .in_memory(name)
+    }
+
+    /// Spec R6: a displacement terminal whose producer is neither an authored
+    /// constant nor a `UsdUVTexture` — or whose constant is a vector — answers
+    /// `None`, not a payload with every field absent.
+    #[test]
+    fn displacement_all_null_fields_answer_none() -> openusd::Result<()> {
+        let stage = stage("displacement.usda")?;
+
+        // A Multiply-style producer authors no value of its own.
+        let material = Material::define(&stage, "/Unsupported")?;
+        let multiply = Shader::define(&stage, "/Unsupported/Multiply")?;
+        multiply
+            .create_id_attr()?
+            .set(Value::token("UsdMultiply"))?;
+        let result = multiply.create_output("result", "float")?;
+        material.create_displacement_output()?.connect_to(&result)?;
+        assert_eq!(
+            material_info(&stage, "/Unsupported")
+                .expect("material serializes")
+                .displacement,
+            None,
+            "an unsupported producer is no displacement at all"
+        );
+
+        // A vector terminal fails soft too: `scale` is a float.
+        let material = Material::define(&stage, "/Vector")?;
+        let shader = Shader::define(&stage, "/Vector/Displace")?;
+        let output = shader
+            .create_output("displacement", "float3")?
+            .set(gf::vec3f(0.0, 0.0, 0.05))?;
+        material.create_displacement_output()?.connect_to(&output)?;
+        assert_eq!(
+            material_info(&stage, "/Vector")
+                .expect("material serializes")
+                .displacement,
+            None,
+            "vector displacement fails soft"
+        );
+        Ok(())
+    }
+
+    /// Spec R3: a surface channel fed by a producer that is neither an authored
+    /// interface input nor a `UsdUVTexture` output stays absent, even when that
+    /// producer authors a value of its own (which only displacement folds).
+    #[test]
+    fn authored_shader_output_constant_does_not_leak_into_surface_channels() -> openusd::Result<()>
+    {
+        let stage = stage("shader_output.usda")?;
+        let material = Material::define(&stage, "/Mat")?;
+        let surface = UsdPreviewSurface::define(&stage, "/Mat/Surface")?;
+        let terminal = surface.shader().create_output("surface", "token")?;
+        let multiply = Shader::define(&stage, "/Mat/Multiply")?;
+        multiply
+            .create_id_attr()?
+            .set(Value::token("UsdMultiply"))?;
+        multiply.create_output("result", "float")?.set(3.0_f32)?;
+        surface
+            .shader()
+            .create_input("roughness", "float")?
+            .set_connections([sdf::path("/Mat/Multiply.outputs:result")?])?;
+        material.create_surface_output()?.connect_to(&terminal)?;
+
+        let info = material_info(&stage, "/Mat").expect("material serializes");
+        let surface = info.surface.expect("the surface terminal resolves");
+        assert_eq!(
+            surface.roughness, None,
+            "an unsupported producer leaves the channel absent (R3)"
+        );
         Ok(())
     }
 }
