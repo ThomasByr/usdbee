@@ -296,28 +296,46 @@ function sameMatrix(bytes: ArrayLike<number>, offset: number, matrix: ArrayLike<
   return true;
 }
 
-// The instance source floats last applied to each mesh. The composed matrix
-// is never compared: the buffer only holds its rounded f32 product, so a
-// re-applied pose would never match. Sources are the inputs, and ancestor
-// motion is caught by the ancestor node's own matrix compare.
-const appliedInstances = new WeakMap<THREE.InstancedMesh, Float64Array>();
+// The instance INPUTS last applied to each mesh: the raw per-instance source
+// floats plus the accumulated context transform composed into them. The
+// composed matrix is never compared: the buffer only holds its rounded f32
+// product, so a re-applied pose would never match. Both recorded inputs are
+// f64 and the composition is deterministic, so an identical re-apply compares
+// bit-equal. The transform is what catches motion inside a prototype subtree:
+// a descendant's local transform never appears in the root sources, only in
+// the composed matrices.
+interface AppliedInstances {
+  sources: Float64Array;
+  transform: Float64Array;
+}
 
-// Whether any raw per-instance source float differs from what this mesh was
-// last applied, remembering the new sources either way (skipping the store
-// would desync the mesh from its record and over-request forever after).
-function instanceSourcesMoved(mesh: THREE.InstancedMesh, sources: number[][]): boolean {
+const appliedInstances = new WeakMap<THREE.InstancedMesh, AppliedInstances>();
+
+// Whether any recorded instance input differs from the apply in hand,
+// remembering the new inputs either way (skipping the store would desync the
+// mesh from its record and over-request forever after). An owned root always
+// passes the identity context transform, so its compare is constant.
+function instanceInputsMoved(
+  mesh: THREE.InstancedMesh,
+  sources: number[][],
+  transform: ArrayLike<number>,
+): boolean {
   const size = sources.length * 16;
   let applied = appliedInstances.get(mesh);
-  let moved = applied === undefined || applied.length !== size;
-  if (!applied || applied.length !== size) {
-    applied = new Float64Array(size);
+  let moved = applied === undefined || applied.sources.length !== size;
+  if (!applied || applied.sources.length !== size) {
+    applied = { sources: new Float64Array(size), transform: new Float64Array(16) };
     appliedInstances.set(mesh, applied);
+  }
+  for (let i = 0; i < 16; i++) {
+    if (applied.transform[i] !== transform[i]) moved = true;
+    applied.transform[i] = transform[i];
   }
   for (let i = 0; i < sources.length; i++) {
     const source = sources[i];
     for (let j = 0; j < 16; j++) {
-      if (applied[i * 16 + j] !== source[j]) moved = true;
-      applied[i * 16 + j] = source[j];
+      if (applied.sources[i * 16 + j] !== source[j]) moved = true;
+      applied.sources[i * 16 + j] = source[j];
     }
   }
   return moved;
@@ -449,8 +467,9 @@ async function updateNodes(
           if (instanced.count !== sources.length) moved = true;
           instanced.count = sources.length;
           // Compared before composition: a collapsed subtree wrapper carries
-          // its motion only in these instance sources.
-          if (instanceSourcesMoved(instanced, sources)) moved = true;
+          // its motion only in its instance sources and the context transform
+          // folded into them.
+          if (instanceInputsMoved(instanced, sources, context!.transform.elements)) moved = true;
           for (let i = 0; i < sources.length; i++) {
             scratchInstance.fromArray(sources[i]);
             if (!owned) scratchInstance.multiply(context!.transform);

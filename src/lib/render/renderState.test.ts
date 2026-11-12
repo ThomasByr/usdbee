@@ -987,6 +987,49 @@ describe("renderState.setStageTime", () => {
     expect(consumeShadowUpdate()).toBe(false);
   });
 
+  it("requests one shadow redraw when a prototype descendant's transform moves", async () => {
+    // A subtree descendant's local transform never reaches the root sources:
+    // it is folded into the accumulated context transform and composed into
+    // every instance matrix. Static root matrices + moving descendant still
+    // rewrite the whole buffer, so the compare must see the transform too.
+    const proto = (shape: number[]) =>
+      node({
+        path: "/Scene/Inst/__proto_0",
+        name: "__proto_0",
+        type_name: "Xform",
+        animated: true,
+        instances: [translate(3)],
+        children: [
+          node({
+            path: "/Scene/Inst/__proto_0/Shape",
+            name: "Shape",
+            type_name: "Mesh",
+            has_geometry: true,
+            animated: true,
+            transform: shape,
+          }),
+        ],
+      });
+    const instancer = (child: RenderNode) =>
+      node({
+        path: "/Scene/Inst",
+        name: "Inst",
+        type_name: "PointInstancer",
+        animated: true,
+        children: [child],
+      });
+    await loadScene(() => [instancer(proto(translate(1)))]);
+    mockIpc(() => [instancer(proto(translate(1)))]); // identical: records
+    await renderState.setStageTime(5);
+    consumeShadowUpdate();
+
+    mockIpc(() => [instancer(proto(translate(2)))]); // only the descendant moved
+    await renderState.setStageTime(6);
+
+    expect(consumeShadowUpdate()).toBe(true);
+    expect(consumeShadowUpdate()).toBe(false);
+  });
+
   it("dedupes a repeated same-time step into zero extra fetches", async () => {
     // Playback perf: with time-code snapping the driver re-requests the
     // IDENTICAL time on most frames (60 Hz/30 tcps = every other frame,
