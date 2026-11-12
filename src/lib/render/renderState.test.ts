@@ -2045,6 +2045,40 @@ describe("renderState pose prefetch", () => {
     expect(wrapper.matrix.elements[12]).toBe(4);
   });
 
+  it("single-fetches when a buffered frame fails to decode at takePose", async () => {
+    // C5's deferred decode: the batch settles without decoding, so a frame
+    // the decode rejects surfaces at takePose. It must land in the same
+    // fallback a failed batch lands in — one single fetch, no scene error.
+    const group = await loadedScene();
+    const good = () => poseFrame([wobbleAt(2)], packedBatchGeometry(1, 1));
+    const batch = poseBatch([
+      good(),
+      good(),
+      good(),
+      frameWithBadVisibility(), // slot 3: code 5 of the claimed window 2..13
+      ...Array.from({ length: 8 }, () => good()),
+    ]);
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_animated_pose_batch") return batch;
+      if (cmd === "get_animated_pose") return poseFrame([wobbleAt(7)], packedBatchGeometry(1, 1));
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    await prefetchPoses(1);
+    expect(poseCoverage(1)).toBe(12);
+    mockedInvoke.mockClear();
+
+    await renderState.setStageTime(5, true);
+
+    expect(renderState.error).toBeNull();
+    expect(mockedInvoke).toHaveBeenCalledWith("get_animated_pose", {
+      stageId: stageState.activeStageId,
+      time: 5,
+    });
+    expect(frameDiag.snapshot().singleFallbackTotal).toBe(1);
+    const wrapper = group.children.find((child) => child.name === "/Scene/Wobble")!;
+    expect(wrapper.matrix.elements[12]).toBe(7);
+  });
+
   it("drops the look-ahead on a stage load", async () => {
     await loadedScene();
     mockIpc(() => [wobbleAt(3)]);
@@ -2315,3 +2349,16 @@ describe("renderState pose prefetch", () => {
     expect(wrapper.matrix.elements[12]).toBe(4);
   });
 });
+
+// A one-node frame whose visibility byte is neither 0 nor 1: the split can
+// bound it (the layout is intact), the decode rejects it.
+function frameWithBadVisibility(): ArrayBuffer {
+  const frame = poseFrame([node({ path: "/Bad", name: "Bad" })], packedBatch([]));
+  const view = new DataView(frame);
+  let at = 4 + 4 + view.getUint32(4, true); // past the single path entry
+  at = (at + 3) & ~3; // section padding
+  at += 4; // material count (0 entries)
+  at += 4; // node count (1 record follows)
+  view.setUint8(at + 11, 2); // node record: visibility byte
+  return frame;
+}

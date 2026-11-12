@@ -14,7 +14,7 @@ import * as THREE from "three";
 import type { MaterialInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
 import { decodeGeometryBatch, decodeMaterialBatch } from "./geometryDecoder";
-import { decodeAnimatedPose, decodeAnimatedPoseBatch } from "./poseDecoder";
+import { decodeAnimatedPose } from "./poseDecoder";
 import {
   claimPoseBatch,
   holdsPoseStep,
@@ -135,17 +135,15 @@ const fetchers: SceneFetchers = {
     decodeAnimatedPose(
       await invoke<ArrayBuffer>("get_animated_pose", { stageId: stageState.activeStageId, time }),
     ),
-  // Playback prefetch: K poses in ONE invoke, each frame the exact bytes the
-  // single command returns for that code. The backend omits out-of-stage
-  // times, so the decoder asserts frame_count === times.length.
+  // Playback prefetch: K poses in ONE invoke, the raw batch payload — the
+  // settle splits it into per-code frames and takePose decodes one per step
+  // (never all K in one between-frame task). The backend omits out-of-stage
+  // times, so the splitter asserts frame_count === times.length.
   getAnimatedPoseBatch: async (times: number[]) =>
-    decodeAnimatedPoseBatch(
-      await invoke<ArrayBuffer>("get_animated_pose_batch", {
-        stageId: stageState.activeStageId,
-        times,
-      }),
+    invoke<ArrayBuffer>("get_animated_pose_batch", {
+      stageId: stageState.activeStageId,
       times,
-    ),
+    }),
   getMaterial: (path: string) =>
     invoke<MaterialInfo>("get_material_data", {
       stageId: stageState.activeStageId,
@@ -245,12 +243,12 @@ export function prefetchPoses(code: number, tcps = 0): Promise<void> {
   return (async () => {
     const startedAt = performance.now();
     try {
-      const poses = await fetchers.getAnimatedPoseBatch!(claimed.times);
+      const payload = await fetchers.getAnimatedPoseBatch!(claimed.times);
       // ONE dispatch sample per batch: the invoke's wall time, recorded where
       // the batch resolves. A per-pose sample would hide it (the batch's own
       // ~145 ms is not attributable to any single pose it carries).
       frameDiag.onPoseDispatched(performance.now() - startedAt);
-      settlePoseBatch(claimed, poses);
+      settlePoseBatch(claimed, payload);
     } catch (e) {
       settlePoseBatch(claimed, null);
       console.warn("usdbee: pose prefetch failed; stepping one pose at a time:", e);
@@ -843,9 +841,10 @@ export const renderState = $state({
         // grow the timeline.
         performance.mark?.("usdbee:pose:issued");
         const poseStartedAt = performance.now();
-        // A prefetched pose is already decoded: this step only applies it, so
-        // the pose costs decode+apply (< 1 ms) instead of a transport round
-        // trip. A miss takes the single-pose path below, unchanged.
+        // A prefetched pose arrives as RAW frame bytes: decode+apply is
+        // sub-ms, so the settle stores the batch undecoded and the pose
+        // costs one frame's decode here instead of a transport round trip.
+        // A miss takes the single-pose path below, unchanged.
         const buffered = takePose(time);
         // An in-hole time is a real USD pose the playhead is crossing, not a
         // fallback: counted apart so singleFallbackTotal keeps meaning starvation.

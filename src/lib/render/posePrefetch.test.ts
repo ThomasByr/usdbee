@@ -17,14 +17,19 @@ import {
   takePose,
 } from "./posePrefetch";
 import { snapshot as diagSnapshot } from "../perf/frameDiag";
+import { encodePoseBatch, encodePoseFrame, emptyPoseBatch } from "./poseFrameFixture";
 import type { AnimatedPose } from "./sceneBuilder";
 
-function pose(tag: number): AnimatedPose {
-  return { manifest: [{ path: `/${tag}` }] as never, prefetched: new Map() };
+// Raw frame bytes per buffered code — the buffer stores undecoded frames and
+// takePose decodes one per pose (C5). One node at /<tag> is enough: the
+// tests only read the decoded manifest back for identity.
+function frame(tag: number): ArrayBuffer {
+  return encodePoseFrame([{ path: `/${tag}` }], emptyPoseBatch());
 }
 
-function poses(count: number, from = 0): AnimatedPose[] {
-  return Array.from({ length: count }, (_, i) => pose(from + i));
+// One settled batch: `count` frames, the i-th carrying path /<from + i>.
+function frames(count: number, from = 0): ArrayBuffer {
+  return encodePoseBatch(Array.from({ length: count }, (_, i) => frame(from + i)));
 }
 
 const CODES = Array.from({ length: 40 }, (_, i) => i);
@@ -37,12 +42,12 @@ const SPARSE = [0, 1, 2, 3, 40, 41, 42];
 // wedged invoke) releases it, so a leftover claim would starve the next test.
 function fillAt(code: number, codes: readonly number[] = CODES, tcps = 0) {
   const claimed = claimPoseBatch(codes, code, tcps)!;
-  settlePoseBatch(claimed, poses(claimed.times.length));
+  settlePoseBatch(claimed, frames(claimed.times.length));
   return claimed;
 }
 
 function settleAll(claimed: ReturnType<typeof claimPoseBatch>) {
-  settlePoseBatch(claimed!, poses(claimed!.times.length));
+  settlePoseBatch(claimed!, frames(claimed!.times.length));
 }
 
 // --- Cold-start seed ---------------------------------------------------
@@ -81,7 +86,7 @@ describe("the window's anchor", () => {
 
   it("forgets it when the batch lands a desync instead of poses", () => {
     const claimed = claimPoseBatch(CODES, 5)!;
-    settlePoseBatch(claimed, poses(1));
+    settlePoseBatch(claimed, frames(1));
 
     expect(poseBufferAnchoredAt(5)).toBe(false);
   });
@@ -153,7 +158,7 @@ describe("the look-ahead buffer", () => {
     expect(claimed).not.toBeNull();
     expect(claimPoseBatch(CODES, 0)).toBeNull();
 
-    settlePoseBatch(claimed!, poses(claimed!.times.length));
+    settlePoseBatch(claimed!, frames(claimed!.times.length));
     invalidatePoseBuffer();
     // The settle released the guard, so the new generation can claim.
     const fresh = claimPoseBatch(CODES, 0);
@@ -182,7 +187,7 @@ describe("the look-ahead buffer", () => {
     takePose(2);
     expect(claimPoseBatch(CODES, 2)).toBeNull();
 
-    settlePoseBatch(topUp!, poses(topUp!.times.length));
+    settlePoseBatch(topUp!, frames(topUp!.times.length));
   });
 
   it("claims nothing once every code at the stage's tail is held", () => {
@@ -195,7 +200,7 @@ describe("the look-ahead buffer", () => {
   it("drops the poses behind the playhead so nothing lingers", () => {
     fillAt(0); // 1..12
     const claimed = claimPoseBatch(CODES, 20)!;
-    settlePoseBatch(claimed, poses(claimed.times.length));
+    settlePoseBatch(claimed, frames(claimed.times.length));
 
     expect(poseCoverage(20)).toBe(POSE_PREFETCH);
     expect(takePose(1)).toBeNull();
@@ -205,7 +210,7 @@ describe("the look-ahead buffer", () => {
   it("drops a batch that arrives after invalidation", () => {
     const claimed = claimPoseBatch(CODES, 0)!;
     invalidatePoseBuffer();
-    settlePoseBatch(claimed, poses(claimed.times.length));
+    settlePoseBatch(claimed, frames(claimed.times.length));
 
     expect(takePose(1)).toBeNull();
     expect(poseCoverage(0)).toBe(0);
@@ -243,10 +248,78 @@ describe("the look-ahead buffer", () => {
     // so the new generation keeps prefetching.
     settlePoseBatch(stale, null);
     const fresh = claimPoseBatch(CODES, 0)!;
-    settlePoseBatch(fresh, poses(fresh.times.length)); // window 1..12
+    settlePoseBatch(fresh, frames(fresh.times.length)); // window 1..12
     expect(poseCoverage(0)).toBe(POSE_PREFETCH);
   });
+
+  it("marks the generation failed when the batch bytes will not split", () => {
+    // The fetcher splits the batch at settle; bytes it cannot bound are the
+    // same verdict as a batch that failed wholesale.
+    const claimed = claimPoseBatch(CODES, 0)!;
+    settlePoseBatch(claimed, new ArrayBuffer(8));
+
+    expect(isPrefetchDead()).toBe(true);
+    expect(poseCoverage(0)).toBe(0);
+    expect(claimPoseBatch(CODES, 0)).toBeNull();
+  });
+
+  it("stores the settled frames without decoding them", () => {
+    // A frame whose visibility byte is 2: the split can bound it, the decode
+    // rejects it. A settle that decoded all K frames would drop the batch
+    // whole; a settle that only splits keeps the window for takePose.
+    const payload = encodePoseBatch([
+      ...Array.from({ length: POSE_PREFETCH - 1 }, (_, i) => frame(i + 1)),
+      frameWithBadVisibility(),
+    ]);
+    const claimed = claimPoseBatch(CODES, 0)!;
+
+    settlePoseBatch(claimed, payload);
+
+    expect(poseCoverage(0)).toBe(POSE_PREFETCH);
+    expect(isPrefetchDead()).toBe(false);
+  });
+
+  it("decodes one frame per takePose, after the settle", () => {
+    fillAt(0); // codes 1..12 carry frames tagged 0..11
+
+    const pose: AnimatedPose | null = takePose(1);
+
+    expect(pose).not.toBeNull();
+    expect(pose!.manifest[0]!.path).toBe("/0");
+    expect(takePose(1)).toBeNull(); // consumed exactly like a decoded pose was
+  });
+
+  it("falls into the failed-epoch fallback on a corrupt buffered frame", () => {
+    const payload = encodePoseBatch([
+      ...Array.from({ length: POSE_PREFETCH - 1 }, (_, i) => frame(i + 1)),
+      frameWithBadVisibility(), // the LAST frame: code POSE_PREFETCH of window 1..12
+    ]);
+    const claimed = claimPoseBatch(CODES, 0)!;
+    settlePoseBatch(claimed, payload);
+
+    // The corrupt frame is the LAST of the window: taking it must land in
+    // the same fallback a failed batch lands in — dead generation, window
+    // dropped whole, the step free to single-fetch — never a thrown error.
+    expect(takePose(POSE_PREFETCH)).toBeNull();
+    expect(isPrefetchDead()).toBe(true);
+    expect(takePose(1)).toBeNull();
+    expect(poseCoverage(0)).toBe(0);
+    expect(claimPoseBatch(CODES, 0)).toBeNull();
+  });
 });
+
+// A frame whose node table is structurally scannable but semantically
+// corrupt (visibility byte 2): the split bounds it, the decode throws.
+function frameWithBadVisibility(): ArrayBuffer {
+  const frame = encodePoseFrame([{ path: "/Bad" }], emptyPoseBatch());
+  const view = new DataView(frame);
+  let at = 4 + 4 + view.getUint32(4, true); // past the single path entry
+  at = (at + 3) & ~3; // section padding
+  at += 4; // material count (0 entries)
+  at += 4; // node count (1 record follows)
+  view.setUint8(at + 11, 2); // node record: visibility byte
+  return frame;
+}
 
 describe("hole times on the tcps grid", () => {
   // Inside a hole the playhead's own time is wall-clock derived: unquantized,

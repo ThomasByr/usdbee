@@ -21,7 +21,10 @@
 //
 // The batch variant wraps K frames: `[u32 LE frame count][frames...]`. Frames
 // carry no length prefix of their own — the geometry batch's slot headers are
-// the only self-describing tail — hence the cursor reader below.
+// the only self-describing tail — hence the cursor reader below. The prefetch
+// path does NOT decode the batch whole (that was a ~12k-allocation spike
+// every settle): splitAnimatedPoseBatch bounds the frames, and each frame is
+// decoded alone at takePose with the stage's cached string tables.
 import type { RenderNode } from "../stage/types";
 import { decodeGeometryBatch, geometryBatchLength } from "./geometryDecoder";
 import type { AnimatedPose } from "./sceneBuilder";
@@ -35,6 +38,85 @@ const POSE_FLAG_GEOMETRY_ANIMATED = 1 << 1;
 const POSE_FLAG_INSTANCES = 1 << 2;
 const POSE_FLAG_IS_POINTS = 1 << 3;
 const POSE_FLAG_ANIMATED = 1 << 4;
+
+/** The path/material string tables one stage's frames share (byte-identical across a stage's frames, so they are decoded once per generation and reused). */
+export interface PoseStringTables {
+  paths: string[];
+  materials: string[];
+  /** The exact table bytes the strings were decoded from: a frame reuses the
+   * arrays only while its own table bytes match, so a desync re-decodes. */
+  blob: Uint8Array;
+}
+
+/** Where each string table entry's [length] header sits, plus the offset past
+ * both tables — the string tables are the only way to find the node table. */
+interface TableWalk {
+  start: number;
+  end: number;
+  pathEntries: number[];
+  materialEntries: number[];
+}
+
+// Structural walk over the two string tables: validates the framing
+// (truncation at every field, exactly like the decode does) WITHOUT decoding
+// any string, so a batch can be split without paying K table decodes.
+function walkStringTables(payload: ArrayBuffer, start: number): TableWalk {
+  const view = new DataView(payload);
+  const limit = payload.byteLength;
+  let offset = start;
+  const need = (bytes: number, what: string) => {
+    if (offset + bytes > limit) {
+      throw new Error(`pose frame truncated reading ${what}: needs ${offset + bytes} bytes, got ${limit}`);
+    }
+  };
+  const u32 = (what: string) => {
+    need(4, what);
+    const value = view.getUint32(offset, true);
+    offset += 4;
+    return value;
+  };
+
+  const pathEntries: number[] = [];
+  for (let count = u32("path count"); count > 0; count--) {
+    pathEntries.push(offset);
+    const length = u32("path length");
+    need(length, "path");
+    offset += length;
+  }
+  offset = (offset + 3) & ~3;
+  need(0, "section padding");
+  const materialEntries: number[] = [];
+  for (let count = u32("material count"); count > 0; count--) {
+    materialEntries.push(offset);
+    const length = u32("material length");
+    need(length, "material");
+    offset += length;
+    offset = (offset + 3) & ~3;
+    need(0, "section padding");
+  }
+  return { start, end: offset, pathEntries, materialEntries };
+}
+
+const bytesEqual = (a: Uint8Array, b: Uint8Array): boolean => {
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index++) if (a[index] !== b[index]) return false;
+  return true;
+};
+
+// The walk's strings: reused from `cache` while the frame's table bytes are
+// identical (they are, across one stage's frames), decoded fresh otherwise.
+function resolveStringTables(
+  payload: ArrayBuffer,
+  walk: TableWalk,
+  cache: PoseStringTables | null,
+): PoseStringTables {
+  const region = new Uint8Array(payload, walk.start, walk.end - walk.start);
+  if (cache && bytesEqual(cache.blob, region)) return cache;
+  const view = new DataView(payload);
+  const decode = (entries: number[]) =>
+    entries.map((at) => poseText.decode(new Uint8Array(payload, at + 4, view.getUint32(at, true))));
+  return { paths: decode(walk.pathEntries), materials: decode(walk.materialEntries), blob: region.slice() };
+}
 
 /** One node of the flat table, before the tree is rebuilt from the ids. */
 interface FlatNode {
@@ -52,7 +134,11 @@ interface FlatNode {
 }
 
 /** One pose frame at `start`, plus the offset just past it. */
-function readAnimatedPose(payload: ArrayBuffer, start: number): { pose: AnimatedPose; end: number } {
+function readAnimatedPose(
+  payload: ArrayBuffer,
+  start: number,
+  cache: PoseStringTables | null = null,
+): { pose: AnimatedPose; end: number; tables: PoseStringTables } {
   const view = new DataView(payload);
   const limit = payload.byteLength;
   let offset = start;
@@ -88,26 +174,12 @@ function readAnimatedPose(payload: ArrayBuffer, start: number): { pose: Animated
     }
     return out;
   };
-  const text = (what: string) => {
-    const length = u32(`${what} length`);
-    need(length, what);
-    const value = poseText.decode(new Uint8Array(payload, offset, length));
-    offset += length;
-    return value;
-  };
-  const align = () => {
-    offset = (offset + 3) & ~3;
-    need(0, "section padding");
-  };
 
-  const paths: string[] = [];
-  for (let count = u32("path count"); count > 0; count--) paths.push(text("path"));
-  align();
-  const materials: string[] = [];
-  for (let count = u32("material count"); count > 0; count--) {
-    materials.push(text("material"));
-    align();
-  }
+  const walk = walkStringTables(payload, start);
+  offset = walk.end;
+  const tables = resolveStringTables(payload, walk, cache);
+  const paths = tables.paths;
+  const materials = tables.materials;
 
   const flat: FlatNode[] = [];
   const nodeCount = u32("node count");
@@ -207,7 +279,7 @@ function readAnimatedPose(payload: ArrayBuffer, start: number): { pose: Animated
   }
   const prefetched: AnimatedPose["prefetched"] = new Map();
   slotPaths.forEach((path, slot) => prefetched.set(path, slots[slot] ?? null));
-  return { pose: { manifest, prefetched }, end: offset + batchLength };
+  return { pose: { manifest, prefetched }, end: offset + batchLength, tables };
 }
 
 /** The decoded node, in the shape the JSON manifest produced for it. */
@@ -262,4 +334,90 @@ export function decodeAnimatedPoseBatch(payload: ArrayBuffer, codes: readonly nu
     throw new Error(`pose batch has ${payload.byteLength - offset} trailing bytes`);
   }
   return poses;
+}
+
+// Offset past the pre-order node table at `start`: skips the 80-byte records
+// (header + matrix) and their instance tails without allocating anything.
+// The same truncation checks the decode pays, so a frame the split accepts is
+// bounded by exactly the bytes the decode will walk.
+function walkNodeRecords(payload: ArrayBuffer, start: number): number {
+  const view = new DataView(payload);
+  const limit = payload.byteLength;
+  let offset = start;
+  const need = (bytes: number, what: string) => {
+    if (offset + bytes > limit) {
+      throw new Error(`pose frame truncated reading ${what}: needs ${offset + bytes} bytes, got ${limit}`);
+    }
+  };
+  need(4, "node count");
+  const nodeCount = view.getUint32(offset, true);
+  offset += 4;
+  for (let index = 0; index < nodeCount; index++) {
+    need(80, `node ${index}`);
+    const flags = view.getUint8(offset + 10);
+    offset += 80;
+    if (flags & POSE_FLAG_INSTANCES) {
+      need(4, "instance count");
+      const instances = view.getUint32(offset, true);
+      offset += 4 + instances * 64;
+      need(0, `node ${index} instances`);
+    }
+  }
+  return offset;
+}
+
+/**
+ * The batch response split into one raw frame per requested code, WITHOUT
+ * decoding anything: the settle only bounds the frames (cursor walks over
+ * the tables, the node records and the geometry-batch slot headers), and the
+ * decode is deferred to takePose one frame at a time. The same count and
+ * trailing-byte checks as decodeAnimatedPoseBatch, so a desynced or truncated
+ * batch throws here and the caller drops it whole.
+ */
+export function splitAnimatedPoseBatch(payload: ArrayBuffer, codes: readonly number[]): ArrayBuffer[] {
+  if (payload.byteLength < 4) {
+    throw new Error(`pose batch truncated reading frame count: needs 4, got ${payload.byteLength}`);
+  }
+  const view = new DataView(payload);
+  const count = view.getUint32(0, true);
+  if (count !== codes.length) {
+    throw new Error(`pose batch carried ${count} frames for ${codes.length} requested codes`);
+  }
+  const frames: ArrayBuffer[] = [];
+  let offset = 4;
+  for (let frame = 0; frame < count; frame++) {
+    const tables = walkStringTables(payload, offset);
+    const nodes = walkNodeRecords(payload, tables.end);
+    const batchLength = geometryBatchLength(payload, nodes);
+    const end = nodes + batchLength;
+    if (end > payload.byteLength) {
+      throw new Error(
+        `pose frame ${frame} truncated reading geometry batch: needs ${end}, got ${payload.byteLength}`,
+      );
+    }
+    frames.push(payload.slice(offset, end));
+    offset = end;
+  }
+  if (offset !== payload.byteLength) {
+    throw new Error(`pose batch has ${payload.byteLength - offset} trailing bytes`);
+  }
+  return frames;
+}
+
+/**
+ * One buffered frame decoded with the stage's shared string tables: `cache`
+ * comes back (possibly the same object) so the caller can hand it to the next
+ * frame's decode. Strictness is the single decode's — count checks, tree
+ * checks, trailing-byte check — a frame that throws feeds the prefetch
+ * fallback instead of the scene.
+ */
+export function decodeBufferedPose(
+  payload: ArrayBuffer,
+  cache: PoseStringTables | null,
+): { pose: AnimatedPose; tables: PoseStringTables } {
+  const read = readAnimatedPose(payload, 0, cache);
+  if (read.end !== payload.byteLength) {
+    throw new Error(`pose frame has ${payload.byteLength - read.end} trailing bytes`);
+  }
+  return { pose: read.pose, tables: read.tables };
 }

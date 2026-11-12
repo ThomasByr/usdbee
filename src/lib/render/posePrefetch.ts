@@ -8,6 +8,7 @@
 // arrive in one invoke; per-pose latency collapses to decode+apply (< 1 ms).
 // The hold-deadline counter is the diag's only view into this module.
 import { codeIndex, onHoldDeadline } from "../perf/frameDiag";
+import { decodeBufferedPose, splitAnimatedPoseBatch, type PoseStringTables } from "./poseDecoder";
 import type { AnimatedPose } from "./sceneBuilder";
 
 // Poses held ahead of the playhead: ~290 KB at ~24 KB a pose, and ~< 1 s at
@@ -35,10 +36,16 @@ let inFlightEpoch = -1;
 // retrying at frame rate would spend one ~145 ms invoke per frame while it is
 // broken. Only a failure of the current generation lands here.
 let failedEpoch = -1;
-// The look-ahead window. A claim takes only the codes it does not hold and the
-// fill merges them, so nothing valid is dropped; entries behind the playhead
-// are pruned on the next claim, which bounds the map at 2K - 1.
-let buffered = new Map<number, AnimatedPose>();
+// The look-ahead window, RAW frame bytes keyed by code: a settle only splits
+// the batch (no decode), and takePose decodes the one frame it hands out, so
+// the 12-frame task amortizes into 12 sub-millisecond decodes (C5). Entries
+// behind the playhead are pruned on the next claim, which bounds the map at
+// 2K - 1.
+let buffered = new Map<number, ArrayBuffer>();
+// The stage generation's decoded path/material string tables: byte-identical
+// across one stage's frames, so the first takePose decodes them and the rest
+// reuse the arrays. Cleared exactly where the buffer invalidates.
+let tableCache: PoseStringTables | null = null;
 // The times the batch in flight carries. The hold decision needs them: an
 // in-hole time is worth waiting for only when the hole claim computed exactly
 // that grid key.
@@ -84,6 +91,11 @@ export interface ClaimedPoseBatch {
 export function invalidatePoseBuffer() {
   epoch++;
   buffered = new Map();
+  // The string tables belong to the invalidated generation: a new stage (or
+  // an edit) ships different ones, and the blob compare would re-decode on
+  // mismatch anyway — dropping them keeps one generation from borrowing
+  // another's paths even if a frame slipped past the epoch guard.
+  tableCache = null;
   inFlightTimes = [];
   holding = false;
   anchoredAt = null;
@@ -247,11 +259,14 @@ export function holdsPoseStep(codes: readonly number[], code: number): boolean {
 }
 
 /**
- * One batch arrived (null = it failed): fills the window when the epoch still
- * matches, then releases the in-flight guard. A count mismatch is a desync —
- * the batch is dropped whole rather than slotted onto the wrong codes.
+ * One batch arrived (null = it failed): splits the payload into per-code raw
+ * frames and fills the window when the epoch still matches, then releases the
+ * in-flight guard. NO decode happens here — each frame decodes at takePose.
+ * A payload that will not split (desynced count, truncated frame, trailing
+ * bytes) is the same verdict as a failed batch: the generation is marked
+ * failed and the step path single-fetches, never erroring the scene.
  */
-export function settlePoseBatch(claimed: ClaimedPoseBatch, poses: AnimatedPose[] | null) {
+export function settlePoseBatch(claimed: ClaimedPoseBatch, payload: ArrayBuffer | null) {
   if (inFlightEpoch === claimed.epoch) {
     inFlightEpoch = -1;
     inFlightTimes = [];
@@ -262,7 +277,7 @@ export function settlePoseBatch(claimed: ClaimedPoseBatch, poses: AnimatedPose[]
   // the generation that replaced it, and marking the new one failed would turn
   // prefetch off for the rest of the session.
   if (claimed.epoch !== epoch) return;
-  if (poses === null) {
+  if (payload === null) {
     failedEpoch = epoch;
     // The anchor must not outlive a batch that carried nothing: the resync
     // onto its own code would skip the invalidation, which is the only cheap
@@ -271,22 +286,40 @@ export function settlePoseBatch(claimed: ClaimedPoseBatch, poses: AnimatedPose[]
     anchoredAt = null;
     return;
   }
-  if (poses.length !== claimed.times.length) {
-    console.warn(`usdbee: pose prefetch dropped, ${poses.length} poses for ${claimed.times.length} codes`);
-    // Nothing landed, so the window is not servable: same leak as a failure.
+  let frames: ArrayBuffer[];
+  try {
+    frames = splitAnimatedPoseBatch(payload, claimed.times);
+  } catch (e) {
+    console.warn("usdbee: pose prefetch dropped; stepping one pose at a time:", e);
+    failedEpoch = epoch;
     anchoredAt = null;
     return;
   }
   // Merge, not replace: the claim deliberately left the codes it already held
-  // out of `times`, so replacing would throw the poses ahead of the playhead
+  // out of `times`, so replacing would throw the frames ahead of the playhead
   // away.
-  claimed.times.forEach((code, slot) => buffered.set(code, poses[slot]!));
+  claimed.times.forEach((code, slot) => buffered.set(code, frames[slot]!));
 }
 
-/** The buffered pose for `code`, consumed by the caller (null on a miss). */
+/** The buffered pose for `code`, decoded here and consumed by the caller
+ * (null on a miss). A frame that will not decode is the same verdict as a
+ * batch that failed: the generation is marked failed, the window is dropped
+ * whole, and the null lands the caller in the single-fetch fallback — the
+ * corrupt bytes must never surface as a scene error. */
 export function takePose(code: number): AnimatedPose | null {
-  const pose = buffered.get(code);
-  if (!pose) return null;
+  const frame = buffered.get(code);
+  if (!frame) return null;
   buffered.delete(code);
-  return pose;
+  try {
+    const decoded = decodeBufferedPose(frame, tableCache);
+    tableCache = decoded.tables;
+    return decoded.pose;
+  } catch (e) {
+    console.warn("usdbee: buffered pose failed to decode; stepping one pose at a time:", e);
+    failedEpoch = epoch;
+    buffered = new Map();
+    anchoredAt = null;
+    holding = false;
+    return null;
+  }
 }

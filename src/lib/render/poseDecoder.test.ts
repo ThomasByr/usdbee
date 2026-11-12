@@ -3,7 +3,13 @@
 // come from poseFrameFixture, the in-test writer that mirrors the Rust one.
 
 import { describe, expect, it } from "vitest";
-import { decodeAnimatedPose, decodeAnimatedPoseBatch } from "./poseDecoder";
+import {
+  decodeAnimatedPose,
+  decodeAnimatedPoseBatch,
+  decodeBufferedPose,
+  splitAnimatedPoseBatch,
+  type PoseStringTables,
+} from "./poseDecoder";
 import {
   asRenderNodes,
   encodePoseBatch,
@@ -232,5 +238,102 @@ describe("decodeAnimatedPoseBatch", () => {
     new Uint8Array(payload, 4, frame.byteLength).set(new Uint8Array(frame));
 
     expect(() => decodeAnimatedPoseBatch(payload, [1])).toThrow(/trailing bytes/);
+  });
+});
+
+describe("splitAnimatedPoseBatch", () => {
+  // The prefetch settle path: bound each frame WITHOUT decoding it, so the
+  // decode can happen one frame at a time at takePose (C5: the 12-frame
+  // settle task was a ~12k-allocation spike every batch).
+  it("splits the batch into the exact bytes of each frame", () => {
+    const frames = [
+      treeFrame(),
+      encodePoseFrame([{ path: "/Moved", has_geometry: true, geometry_animated: true }], slotBatch([[9]])),
+      encodePoseFrame([], emptyPoseBatch()),
+    ];
+
+    const split = splitAnimatedPoseBatch(encodePoseBatch(frames), [1, 2, 3]);
+
+    // Byte-identical to the frames the batch was written from, and each
+    // slice decodes alone exactly like the batch decoder decodes it.
+    expect(split.map((frame) => new Uint8Array(frame))).toEqual(frames.map((frame) => new Uint8Array(frame)));
+    expect(split.map((frame) => decodeAnimatedPose(frame))).toEqual(
+      decodeAnimatedPoseBatch(encodePoseBatch(frames), [1, 2, 3]),
+    );
+  });
+
+  it("throws when the frame count does not match the requested codes", () => {
+    const payload = encodePoseBatch([treeFrame(), treeFrame()]);
+
+    expect(() => splitAnimatedPoseBatch(payload, [1, 2, 3])).toThrow(/2 frames for 3/);
+    expect(() => splitAnimatedPoseBatch(payload, [1])).toThrow(/2 frames for 1/);
+  });
+
+  it("splits an empty batch", () => {
+    expect(splitAnimatedPoseBatch(encodePoseBatch([]), [])).toEqual([]);
+  });
+
+  it("rejects trailing bytes after the last frame", () => {
+    const frame = treeFrame();
+    const payload = new ArrayBuffer(4 + frame.byteLength + 4);
+    new DataView(payload).setUint32(0, 1, true);
+    new Uint8Array(payload, 4, frame.byteLength).set(new Uint8Array(frame));
+
+    expect(() => splitAnimatedPoseBatch(payload, [1])).toThrow(/trailing bytes/);
+  });
+
+  it("rejects a frame truncated inside its node table", () => {
+    // Truncation the cursor walk cannot bound: the whole batch is refused
+    // at settle, which is the failed-epoch / single-fetch fallback.
+    const frame = treeFrame();
+    const truncated = frame.slice(0, nodeTableOffset(frame) + 40);
+    const payload = encodePoseBatch([treeFrame(), truncated]);
+
+    expect(() => splitAnimatedPoseBatch(payload, [1, 2])).toThrow(/truncated/);
+  });
+});
+
+describe("decodeBufferedPose string tables", () => {
+  // The path/material tables are byte-identical across one stage's frames,
+  // so the second decode of a generation must reuse the first's arrays
+  // instead of re-decoding every string (C5).
+  it("reuses the decoded tables for a frame with identical table bytes", () => {
+    const first = decodeBufferedPose(treeFrame(), null);
+
+    const second = decodeBufferedPose(treeFrame(), first.tables);
+
+    expect(second.tables).toBe(first.tables);
+    expect(second.tables.paths).toBe(first.tables.paths);
+    expect(second.tables.materials).toBe(first.tables.materials);
+    expect(second.pose).toEqual(first.pose);
+  });
+
+  it("re-decodes the tables when a frame carries different bytes", () => {
+    const first: PoseStringTables = decodeBufferedPose(treeFrame(), null).tables;
+    const other = encodePoseFrame(
+      [{ path: "/Other", material: "/Looks/Other", has_geometry: true, geometry_animated: true }],
+      slotBatch([[5]]),
+    );
+
+    const second = decodeBufferedPose(other, first);
+
+    expect(second.tables).not.toBe(first);
+    expect(second.tables.paths).toEqual(["/Other"]);
+    expect(second.tables.materials).toEqual(["/Looks/Other"]);
+    expect(second.pose.manifest[0]!.path).toBe("/Other");
+    expect(second.pose.manifest[0]!.material).toBe("/Looks/Other");
+  });
+
+  it("keeps the strict decode on the cached path", () => {
+    const tables = decodeBufferedPose(treeFrame(), null).tables;
+
+    // A frame whose node table is corrupt must still throw, cached tables
+    // or not: the throw is what feeds the failed-epoch fallback.
+    expect(() =>
+      decodeBufferedPose(
+        corrupt(treeFrame(), (view, nodes) => view.setUint32(nodes, 99, true)),
+        tables,
+      ),
+    ).toThrow(/path id 99/);
   });
 });

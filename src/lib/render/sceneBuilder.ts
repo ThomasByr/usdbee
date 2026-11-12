@@ -42,10 +42,12 @@ export interface SceneFetchers {
   // keyed by path in slot order. Playback only — loads and edit refreshes
   // keep getGeometryBatch (their path set differs).
   getAnimatedPose?: (time: number) => Promise<AnimatedPose>;
-  // Playback prefetch (round 4): the same pose for each of `times` in ONE
-  // invoke, in order. The backend drops out-of-stage times, so an array whose
-  // length differs from `times` is a desync and throws.
-  getAnimatedPoseBatch?: (times: number[]) => Promise<AnimatedPose[]>;
+  // Playback prefetch (round 4): the RAW batch payload for `times` in ONE
+  // invoke. The prefetch buffer splits it into per-code frames and decodes one
+  // frame per consumed pose, so no caller decodes all K at once. The backend
+  // drops out-of-stage times, so a payload whose frame count differs from
+  // `times` is a desync and throws at the split.
+  getAnimatedPoseBatch?: (times: number[]) => Promise<ArrayBuffer>;
   loadTexture: MaterialTextureLoader;
 }
 
