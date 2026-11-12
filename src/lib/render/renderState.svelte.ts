@@ -287,12 +287,23 @@ function indexByPath(group: THREE.Group): Map<string, THREE.Object3D> {
   return byPath;
 }
 
+// Shadow-map dirtiness: only a caster that actually moved can change the
+// depth target, so every apply reports whether anything did. Both sides of
+// the comparison are already in hand — the incoming matrix and the bytes the
+// node carries — so this costs no fetch.
+function sameMatrix(bytes: ArrayLike<number>, offset: number, matrix: ArrayLike<number>): boolean {
+  for (let i = 0; i < 16; i++) if (bytes[offset + i] !== matrix[i]) return false;
+  return true;
+}
+
 // Applies the manifest's time state to the integrated scene. Animated
 // geometry is rebuilt; instanced prototypes can appear, disappear, or
 // change count as invisibleIds changes. Every await is generation-guarded.
 // `refreshPaths` (edit refresh) additionally force-refetches geometry for
 // the affected prims — an edit can swap geometry on a non-animated node —
-// consuming slots from the batched `prefetched` map first.
+// consuming slots from the batched `prefetched` map first. Returns whether
+// any caster moved (matrix, visibility or geometry), which is the only thing
+// the shadow map cares about.
 async function updateNodes(
   nodes: RenderNode[],
   byPath: Map<string, THREE.Object3D>,
@@ -301,9 +312,10 @@ async function updateNodes(
   instancing: InstanceContext | null = null,
   refreshPaths: Set<string> | null = null,
   prefetched: Map<string, ArrayBuffer | Uint8Array | null> | null = null,
-): Promise<void> {
+): Promise<boolean> {
+  let moved = false;
   for (const node of nodes) {
-    if (isStale()) return;
+    if (isStale()) return moved;
     let object = byPath.get(node.path);
     if (!object && node.instances.length > 0) {
       const parent = byPath.get(node.path.split("/").slice(0, -1).join("/"));
@@ -311,7 +323,7 @@ async function updateNodes(
         const built = await buildScene([node], fetchers, currentFallbacks, time);
         if (isStale()) {
           disposeScene(built);
-          return;
+          return moved;
         }
         object = built.children[0];
         if (object) {
@@ -319,6 +331,7 @@ async function updateNodes(
           object.traverse((child) => {
             if (child.name) byPath.set(child.name, child);
           });
+          moved = true; // a caster appeared in the scene
         }
       }
       continue;
@@ -345,7 +358,11 @@ async function updateNodes(
       const drawable = object as THREE.Mesh | THREE.Points;
       const isDrawable = object instanceof THREE.Mesh || (drawable as THREE.Points).isPoints;
       const wrapper = isDrawable ? object.parent! : object;
-      if (!isSubtreeNode) applyTransform(wrapper, node.transform);
+      if (!isSubtreeNode) {
+        if (!sameMatrix(wrapper.matrix.elements, 0, node.transform)) moved = true;
+        applyTransform(wrapper, node.transform);
+      }
+      if (wrapper.visible !== node.visible) moved = true;
       wrapper.visible = node.visible;
       const refreshing = refreshPaths !== null && refreshPaths.has(node.path);
       if (isDrawable && (node.animated || refreshing)) {
@@ -354,7 +371,7 @@ async function updateNodes(
         // xform-driven scenes) keep their load-time geometry forever. An
         // edit refresh refetches the affected prim regardless.
         if (node.geometry_animated || refreshing) {
-          if (isStale()) return;
+          if (isStale()) return moved;
           try {
             // Edit refreshes consume the batched slots first (a failed
             // slot keeps the last geometry, fail-soft like playback); the
@@ -362,7 +379,7 @@ async function updateNodes(
             const pre = prefetched?.get(node.path);
             prefetched?.delete(node.path);
             const frame = pre !== undefined ? pre : await fetchers.getGeometry(node.path, time);
-            if (isStale()) return;
+            if (isStale()) return moved;
             if (frame) {
               // Layout-compatible frames update the live geometry in
               // place (same GPU buffers); anything else recreates.
@@ -370,11 +387,12 @@ async function updateNodes(
                 const geometry = toBufferGeometry(frame);
                 if (isStale()) {
                   geometry.dispose();
-                  return;
+                  return moved;
                 }
                 drawable.geometry.dispose();
                 drawable.geometry = geometry;
               }
+              moved = true; // a geometry slot was written
             }
           } catch (e) {
             console.warn(`usdbee: keeping last geometry at ${node.path}:`, e);
@@ -401,18 +419,25 @@ async function updateNodes(
             byPath.set(node.path, replacement);
             instanced = replacement;
           }
+          if (instanced.count !== sources.length) moved = true;
           instanced.count = sources.length;
           for (let i = 0; i < sources.length; i++) {
             scratchInstance.fromArray(sources[i]);
             if (!owned) scratchInstance.multiply(context!.transform);
+            // An instance matrix is the only motion a collapsed subtree
+            // wrapper carries, so a rewritten buffer is a moved caster.
+            if (!moved && !sameMatrix(instanced.instanceMatrix.array, i * 16, scratchInstance.elements))
+              moved = true;
             instanced.setMatrixAt(i, scratchInstance);
           }
           instanced.instanceMatrix.needsUpdate = true;
         }
       }
     }
-    await updateNodes(node.children, byPath, time, isStale, context, refreshPaths, prefetched);
+    if (await updateNodes(node.children, byPath, time, isStale, context, refreshPaths, prefetched))
+      moved = true;
   }
+  return moved;
 }
 
 async function updateScene(
@@ -430,14 +455,15 @@ async function updateScene(
     }
   };
   collect(nodes);
-  await updateNodes(nodes, currentPaths, time, isStale, null, refreshPaths, prefetched);
+  let moved = await updateNodes(nodes, currentPaths, time, isStale, null, refreshPaths, prefetched);
   if (isStale()) return;
   for (const [path, object] of currentPaths) {
     if ((object as THREE.InstancedMesh).isInstancedMesh && !present.has(path)) {
+      if (object.parent!.visible) moved = true;
       object.parent!.visible = false;
     }
   }
-  requestShadowUpdate();
+  if (moved) requestShadowUpdate();
 }
 
 // Time-delta update (playback/scrub): the delta manifest carries ONLY
@@ -470,17 +496,22 @@ async function updateSceneDelta(
     }
   };
   collect(nodes);
-  await updateNodes(nodes, currentPaths, time, isStale, null, null, prefetched);
+  let moved = await updateNodes(nodes, currentPaths, time, isStale, null, null, prefetched);
   if (isStale()) return;
   for (const [path, object] of currentPaths) {
     if ((object as THREE.InstancedMesh).isInstancedMesh && !present.has(path)) {
       const slash = path.lastIndexOf("/");
       const isDirectWrapper = path.slice(slash + 1).startsWith("__proto_");
-      if (isDirectWrapper && present.has(path.slice(0, slash))) object.parent!.visible = false;
+      if (isDirectWrapper && present.has(path.slice(0, slash))) {
+        if (object.parent!.visible) moved = true;
+        object.parent!.visible = false;
+      }
     }
   }
-  // A pose moved casters: the shadow map follows the pose, not the frame.
-  requestShadowUpdate();
+  // A pose only redraws the shadow map when a caster moved: most poses leave
+  // the depth target alone, and the redraw lands a frame late on an already
+  // tight frame.
+  if (moved) requestShadowUpdate();
 }
 
 // Geometry for the edit-refreshed prims, fetched through the BATCH

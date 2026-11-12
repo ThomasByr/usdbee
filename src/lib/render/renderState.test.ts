@@ -821,6 +821,124 @@ describe("renderState.setStageTime", () => {
     expect(consumeShadowUpdate()).toBe(false);
   });
 
+  it("does not request a shadow redraw when a pose changes nothing visible", async () => {
+    // C4: the map follows the CASTERS, not the pose traffic. A pose that
+    // lands the same matrix and the same visibility re-rasterizes nothing.
+    const wobble = node({
+      path: "/Scene/Wobble",
+      name: "Wobble",
+      animated: true,
+      transform: translate(2),
+    });
+    await loadScene(() => [wobble]);
+    consumeShadowUpdate();
+
+    mockIpc(() => [node({ ...wobble })]);
+    await renderState.setStageTime(5);
+
+    expect(consumeShadowUpdate()).toBe(false);
+  });
+
+  it("requests one shadow redraw when a pose flips a node's visibility", async () => {
+    const wobble = node({
+      path: "/Scene/Wobble",
+      name: "Wobble",
+      animated: true,
+      transform: translate(2),
+    });
+    await loadScene(() => [wobble]);
+    consumeShadowUpdate();
+
+    mockIpc(() => [node({ ...wobble, visible: false })]);
+    await renderState.setStageTime(5);
+
+    expect(consumeShadowUpdate()).toBe(true);
+    expect(consumeShadowUpdate()).toBe(false);
+  });
+
+  it("requests one shadow redraw when a pose writes a geometry slot", async () => {
+    // A deformed mesh always moves its shadow, even at a fixed transform.
+    const deforming = node({
+      path: "/Scene/Wobble",
+      name: "Wobble",
+      type_name: "Mesh",
+      has_geometry: true,
+      geometry_animated: true,
+      animated: true,
+      transform: translate(2),
+    });
+    await loadScene(() => [deforming]);
+    consumeShadowUpdate();
+    mockedInvoke.mockImplementation((async (cmd: string) => {
+      if (cmd === "get_animated_pose") return poseFrame([deforming], packedBatch([packedGeometry(2)]));
+      if (cmd === "get_time_codes") return [];
+      throw new Error(`unexpected command: ${cmd}`);
+    }) as any);
+
+    await renderState.setStageTime(5);
+
+    expect(consumeShadowUpdate()).toBe(true);
+    expect(consumeShadowUpdate()).toBe(false);
+  });
+
+  it("requests one shadow redraw when a pose moves only the instances", async () => {
+    // An instanced prototype's wrapper keeps the manifest's identity
+    // transform: the motion is entirely in the instance buffer.
+    const proto = node({
+      path: "/Scene/Inst/__proto_0",
+      name: "__proto_0",
+      type_name: "Mesh",
+      has_geometry: true,
+      animated: true,
+      instances: [IDENTITY],
+    });
+    const instancer = (child: RenderNode) =>
+      node({
+        path: "/Scene/Inst",
+        name: "Inst",
+        type_name: "PointInstancer",
+        animated: true,
+        children: [child],
+      });
+    await loadScene(() => [instancer(proto)]);
+    consumeShadowUpdate();
+
+    mockIpc(() => [instancer(node({ ...proto, instances: [translate(3)] }))]);
+    await renderState.setStageTime(5);
+
+    expect(consumeShadowUpdate()).toBe(true);
+    expect(consumeShadowUpdate()).toBe(false);
+  });
+
+  it("requests one shadow redraw when a pose drops an instance", async () => {
+    // The surviving instance keeps its matrix: only the count shrank, and the
+    // dropped copy must leave the depth target too.
+    const proto = node({
+      path: "/Scene/Inst/__proto_0",
+      name: "__proto_0",
+      type_name: "Mesh",
+      has_geometry: true,
+      animated: true,
+      instances: [IDENTITY, translate(3)],
+    });
+    const instancer = (child: RenderNode) =>
+      node({
+        path: "/Scene/Inst",
+        name: "Inst",
+        type_name: "PointInstancer",
+        animated: true,
+        children: [child],
+      });
+    await loadScene(() => [instancer(proto)]);
+    consumeShadowUpdate();
+
+    mockIpc(() => [instancer(node({ ...proto, instances: [IDENTITY] }))]);
+    await renderState.setStageTime(5);
+
+    expect(consumeShadowUpdate()).toBe(true);
+    expect(consumeShadowUpdate()).toBe(false);
+  });
+
   it("dedupes a repeated same-time step into zero extra fetches", async () => {
     // Playback perf: with time-code snapping the driver re-requests the
     // IDENTICAL time on most frames (60 Hz/30 tcps = every other frame,
@@ -1411,6 +1529,18 @@ describe("renderState.refreshAfterEdit", () => {
     // The edit is what dropped the look-ahead, not a wrap or a scrub.
     expect(frameDiag.snapshot().invalidateEdit).toBe(1);
     expect(frameDiag.snapshot().invalidateWrap).toBe(0);
+  });
+
+  it("does not request a shadow redraw when an edit changes nothing visible", async () => {
+    const shape = node({ path: "/Scene/Shape", name: "Shape", transform: translate(1) });
+    await loadScene(() => [shape]);
+    consumeShadowUpdate();
+
+    // Same transform, same visibility, no geometry: no caster moved.
+    mockIpc(() => [node({ ...shape })]);
+    await renderState.refreshAfterEdit(["/Scene/Shape"]);
+
+    expect(consumeShadowUpdate()).toBe(false);
   });
 
   it("patches an edited prim in place through the batched geometry fetch", async () => {
