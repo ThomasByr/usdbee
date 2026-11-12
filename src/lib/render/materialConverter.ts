@@ -91,6 +91,7 @@ function applyTextures(
         applyConstantColor(material, surface);
         applyFallbackColor(material, { name: material.name, surface }, surface, false, fallbackColor);
       }
+      restoreSlotConstant(material, surface, slot);
       material.needsUpdate = true;
     });
     if (loaded) {
@@ -138,6 +139,38 @@ function applySurfaceConstants(material: THREE.MeshPhysicalMaterial, surface: Pr
   if (surface.opacity_threshold != null) {
     material.alphaTest = surface.opacity_threshold;
     material.transparent = true;
+  }
+}
+
+// A failed async load must undo the map-present rule above: the constant was
+// skipped when the map was assigned, and emissive was painted white. Slots
+// holding no authored constant already sit at three.js's default.
+function restoreSlotConstant(
+  material: THREE.MeshPhysicalMaterial,
+  surface: PreviewSurface,
+  slot: TextureSlot,
+): void {
+  switch (slot) {
+    case "emissiveMap":
+      material.emissive = constantColor(surface.emissive_color) ?? new THREE.Color(0, 0, 0);
+      break;
+    case "specularColorMap": {
+      const specular = constantColor(surface.specular_color);
+      if (specular) material.specularColor = specular;
+      break;
+    }
+    case "roughnessMap":
+      if (surface.roughness != null) material.roughness = surface.roughness;
+      break;
+    case "metalnessMap":
+      if (surface.metallic != null) material.metalness = surface.metallic;
+      break;
+    case "clearcoatMap":
+      if (surface.clearcoat != null) material.clearcoat = surface.clearcoat;
+      break;
+    case "clearcoatRoughnessMap":
+      if (surface.clearcoat_roughness != null) material.clearcoatRoughness = surface.clearcoat_roughness;
+      break;
   }
 }
 

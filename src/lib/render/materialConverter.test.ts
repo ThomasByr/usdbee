@@ -24,6 +24,13 @@ function textureInput(over: Partial<TextureInput> = {}): TextureInput {
 const loader = (path: string): THREE.Texture | null =>
   path.includes("missing") ? null : new THREE.Texture();
 
+// Texture loader whose textures carry their file path as the name.
+const named = (path: string): THREE.Texture => {
+  const texture = new THREE.Texture();
+  texture.name = path;
+  return texture;
+};
+
 describe("convertMaterial", () => {
   it("maps constant channels onto MeshPhysicalMaterial", () => {
     const material = convertMaterial(
@@ -333,11 +340,6 @@ describe("convertMaterial", () => {
   });
 
   it("wires the widened texture slots named by input", () => {
-    const named = (path: string) => {
-      const texture = new THREE.Texture();
-      texture.name = path;
-      return texture;
-    };
     const material = convertMaterial(
       {
         name: "Textured",
@@ -410,6 +412,61 @@ describe("convertMaterial", () => {
     expect(material.emissive.getHex()).toBe(0xffffff);
   });
 
+  it("restores authored constants when a widened slot texture fails to load", () => {
+    // Loader hands back a texture and exposes its rejection for the test.
+    const failedLoad = (input: string, over: Partial<PreviewSurface> = {}) => {
+      let onError: (() => void) | undefined;
+      const material = convertMaterial(
+        {
+          name: "Broken",
+          surface: surface({
+            ...over,
+            textures: [textureInput({ input, file_path: `/cache/${input}.png` })],
+          }),
+        },
+        null,
+        ((_path: string, error: () => void) => {
+          onError = error;
+          return new THREE.Texture();
+        }) as any,
+      );
+      onError!();
+      return material;
+    };
+    const defaults = new THREE.MeshPhysicalMaterial();
+
+    const emissive = failedLoad("emissiveColor", {
+      emissive_color: { type: "color3f", data: [1, 0.5, 0.1] },
+    });
+    expect(emissive.emissiveMap).toBeNull();
+    expect(emissive.emissive.toArray()).toEqual([1, 0.5, 0.1]);
+    // no authored emissive: back to three's black, not the white map paint
+    expect(failedLoad("emissiveColor").emissive.getHex()).toBe(defaults.emissive.getHex());
+
+    const specular = failedLoad("specularColor", {
+      specular_color: { type: "color3f", data: [0.2, 0.3, 0.4] },
+    });
+    expect(specular.specularColor.toArray()).toEqual([0.2, 0.3, 0.4]);
+    expect(failedLoad("specularColor").specularColor.getHex()).toBe(defaults.specularColor.getHex());
+
+    const roughness = failedLoad("roughness", { roughness: 0.2 });
+    expect(roughness.roughnessMap).toBeNull();
+    expect(roughness.roughness).toBe(0.2);
+    expect(failedLoad("roughness").roughness).toBe(defaults.roughness);
+
+    const metallic = failedLoad("metallic", { metallic: 0.9 });
+    expect(metallic.metalness).toBe(0.9);
+    expect(failedLoad("metallic").metalness).toBe(defaults.metalness);
+
+    const clearcoat = failedLoad("clearcoat", { clearcoat: 0.7 });
+    expect(clearcoat.clearcoat).toBe(0.7);
+    expect(failedLoad("clearcoat").clearcoat).toBe(defaults.clearcoat);
+
+    const clearcoatRoughness = failedLoad("clearcoatRoughness", { clearcoat_roughness: 0.25 });
+    expect(clearcoatRoughness.clearcoatRoughness).toBe(0.25);
+    expect(failedLoad("clearcoatRoughness").clearcoatRoughness).toBe(defaults.clearcoatRoughness);
+  });
+
   it("renders a volume-only material as translucent gray", () => {
     const material = convertMaterial({ name: "Fog", surface: null, has_volume: true }, null, loader);
 
@@ -439,9 +496,9 @@ describe("convertMaterial", () => {
         displacement: { scale: null, file_path: "/cache/disp.png", st_primvar: "st" },
       },
       null,
-      loader,
+      named,
     );
-    expect(mapped.displacementMap).toBeInstanceOf(THREE.Texture);
+    expect(mapped.displacementMap!.name).toBe("/cache/disp.png");
     expect(mapped.displacementScale).toBe(1);
   });
 
