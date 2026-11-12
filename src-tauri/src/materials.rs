@@ -205,13 +205,13 @@ fn displacement(material: &Material) -> Result<Option<Displacement>, String> {
     let Some(terminal) = material.compute_displacement_source(&[]).map_err(err)? else {
         return Ok(None);
     };
-    let Some(source) = terminal.sources().first() else {
-        return Ok(None);
-    };
-    let producers = match source.attribute() {
-        ShadingAttribute::Input(input) => input.value_producing_attributes(ProducerFilter::Any),
-        ShadingAttribute::Output(output) => output.value_producing_attributes(ProducerFilter::Any),
-    };
+    // Root the walk at the terminal itself: the terminal's attribute carries the
+    // connection, so a texture reached through it counts as a producer whether
+    // or not the texture authors a value (shade/utils.rs:115-118).
+    let output = material
+        .displacement_output_for(terminal.render_context().as_str())
+        .map_err(err)?;
+    let producers = output.value_producing_attributes(ProducerFilter::Any);
     let mut displacement = Displacement {
         scale: None,
         file_path: None,
@@ -690,9 +690,9 @@ mod tests {
     }
 
     /// Spec R6: a `UsdUVTexture` feeding the displacement terminal serializes
-    /// its file and the primvar reader's name, not just a constant scale.
-    /// The texture output authors a value because the producer walk only
-    /// returns an output that does (an unauthored one answers no displacement).
+    /// its file and the primvar reader's name, not just a constant scale. The
+    /// texture output authors no value, the way real assets wire it: only the
+    /// connection reaches it.
     #[test]
     fn textured_displacement_resolves_file_and_primvar() -> openusd::Result<()> {
         let stage = stage("displacement_texture.usda")?;
@@ -714,7 +714,7 @@ mod tests {
             .shader()
             .create_input("st", "float2")?
             .connect_to(&st)?;
-        let height = texture.shader().create_output("r", "float")?.set(1.0_f32)?;
+        let height = texture.shader().create_output("r", "float")?;
         material.create_displacement_output()?.connect_to(&height)?;
 
         let displacement = material_info(&stage, "/TexDisp")
