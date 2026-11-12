@@ -288,12 +288,39 @@ function indexByPath(group: THREE.Group): Map<string, THREE.Object3D> {
 }
 
 // Shadow-map dirtiness: only a caster that actually moved can change the
-// depth target, so every apply reports whether anything did. Both sides of
-// the comparison are already in hand — the incoming matrix and the bytes the
-// node carries — so this costs no fetch.
+// depth target, so every apply reports whether anything did. Compares a raw
+// source matrix (the manifest floats, before any composition) against the
+// floats the node already carries, so it costs no fetch.
 function sameMatrix(bytes: ArrayLike<number>, offset: number, matrix: ArrayLike<number>): boolean {
   for (let i = 0; i < 16; i++) if (bytes[offset + i] !== matrix[i]) return false;
   return true;
+}
+
+// The instance source floats last applied to each mesh. The composed matrix
+// is never compared: the buffer only holds its rounded f32 product, so a
+// re-applied pose would never match. Sources are the inputs, and ancestor
+// motion is caught by the ancestor node's own matrix compare.
+const appliedInstances = new WeakMap<THREE.InstancedMesh, Float64Array>();
+
+// Whether any raw per-instance source float differs from what this mesh was
+// last applied, remembering the new sources either way (skipping the store
+// would desync the mesh from its record and over-request forever after).
+function instanceSourcesMoved(mesh: THREE.InstancedMesh, sources: number[][]): boolean {
+  const size = sources.length * 16;
+  let applied = appliedInstances.get(mesh);
+  let moved = applied === undefined || applied.length !== size;
+  if (!applied || applied.length !== size) {
+    applied = new Float64Array(size);
+    appliedInstances.set(mesh, applied);
+  }
+  for (let i = 0; i < sources.length; i++) {
+    const source = sources[i];
+    for (let j = 0; j < 16; j++) {
+      if (applied[i * 16 + j] !== source[j]) moved = true;
+      applied[i * 16 + j] = source[j];
+    }
+  }
+  return moved;
 }
 
 // Applies the manifest's time state to the integrated scene. Animated
@@ -421,13 +448,12 @@ async function updateNodes(
           }
           if (instanced.count !== sources.length) moved = true;
           instanced.count = sources.length;
+          // Compared before composition: a collapsed subtree wrapper carries
+          // its motion only in these instance sources.
+          if (instanceSourcesMoved(instanced, sources)) moved = true;
           for (let i = 0; i < sources.length; i++) {
             scratchInstance.fromArray(sources[i]);
             if (!owned) scratchInstance.multiply(context!.transform);
-            // An instance matrix is the only motion a collapsed subtree
-            // wrapper carries, so a rewritten buffer is a moved caster.
-            if (!moved && !sameMatrix(instanced.instanceMatrix.array, i * 16, scratchInstance.elements))
-              moved = true;
             instanced.setMatrixAt(i, scratchInstance);
           }
           instanced.instanceMatrix.needsUpdate = true;

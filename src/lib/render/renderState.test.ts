@@ -908,6 +908,14 @@ describe("renderState.setStageTime", () => {
 
     expect(consumeShadowUpdate()).toBe(true);
     expect(consumeShadowUpdate()).toBe(false);
+
+    // Same count, different source float: the compare must notice it on a
+    // mesh that already carries a recorded apply, not only on the first one.
+    mockIpc(() => [instancer(node({ ...proto, instances: [translate(4)] }))]);
+    await renderState.setStageTime(6);
+
+    expect(consumeShadowUpdate()).toBe(true);
+    expect(consumeShadowUpdate()).toBe(false);
   });
 
   it("requests one shadow redraw when a pose drops an instance", async () => {
@@ -936,6 +944,46 @@ describe("renderState.setStageTime", () => {
     await renderState.setStageTime(5);
 
     expect(consumeShadowUpdate()).toBe(true);
+    expect(consumeShadowUpdate()).toBe(false);
+  });
+
+  it("does not request a shadow redraw when a re-applied pose rounds the same instances", async () => {
+    // A threaded descendant's only motion is its composed instance matrix
+    // (the wrapper is collapsed to identity). The buffer holds the f32
+    // rounding of that f64 product, so comparing the buffer would move every
+    // pose; ancestor motion is already caught by the ancestor's own matrix
+    // compare, so the SOURCE floats are what "moved" means here. 3 + 1/3 is
+    // f32-exact on neither side of the product, so the sum rounds.
+    const child = node({
+      path: "/Scene/Inst/__proto_0/Body",
+      name: "Body",
+      type_name: "Mesh",
+      has_geometry: true,
+      animated: true,
+      transform: translate(1 / 3),
+    });
+    const proto = node({
+      path: "/Scene/Inst/__proto_0",
+      name: "__proto_0",
+      animated: true,
+      instances: [translate(3)],
+      children: [child],
+    });
+    const instancer = (child: RenderNode) =>
+      node({
+        path: "/Scene/Inst",
+        name: "Inst",
+        type_name: "PointInstancer",
+        animated: true,
+        children: [child],
+      });
+    await loadScene(() => [instancer(proto)]);
+    mockIpc(() => [instancer(proto)]); // identical pose, identical inputs
+    await renderState.setStageTime(5); // first apply records the sources
+    consumeShadowUpdate();
+
+    await renderState.setStageTime(6);
+
     expect(consumeShadowUpdate()).toBe(false);
   });
 
