@@ -15,6 +15,7 @@ import { renderState } from "$lib/render/renderState.svelte";
 import { tabsState } from "$lib/state/tabsState.svelte";
 import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
 import { authorLocalTransform } from "$lib/render/gizmoCommit.svelte";
+import { bindSelectionBox } from "$lib/render/sceneIntegration";
 import * as frameDiag from "$lib/perf/frameDiag";
 import { pingTransport } from "$lib/dev/transportKeepAlive";
 import { renderWithShadowUpdate } from "$lib/three/shadowMapUpdate";
@@ -31,6 +32,9 @@ export interface BridgeViewer {
   isPlayingAnim: boolean;
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
+  loadedGroup: THREE.Group | null;
+  selectedNode: THREE.Object3D | null;
+  selectionHelper: THREE.Box3Helper | null;
   camera: THREE.Camera;
   controls: { target: THREE.Vector3; update: () => void };
   fov: number;
@@ -195,6 +199,71 @@ function setCamera(viewer: BridgeViewer, args: Record<string, unknown>) {
   return { ok: true, pinned: viewer.pinnedCamera !== null };
 }
 
+// Cached vs precise AABB of the selected subtree, plus the meshes that
+// contribute the most extent. A box that reaches past the visible geometry
+// is either a hidden prim or a stale per-geometry bound; the rows say which.
+function boxReport(viewer: BridgeViewer) {
+  const node = viewer.selectedNode;
+  if (!node) throw new Error("nothing selected");
+  node.updateWorldMatrix(true, true);
+  const cached = new THREE.Box3().setFromObject(node, false);
+  const precise = new THREE.Box3().setFromObject(node, true);
+  const rows: Record<string, unknown>[] = [];
+  const visibleBox = new THREE.Box3();
+  // Which mesh sets each face, and whether that mesh is actually drawn: a face
+  // held by a hidden prim is the box reaching where nothing is rendered.
+  const markers: Record<string, { value: number; name: string; visible: boolean }> = {};
+  const mark = (key: string, value: number, name: string, visible: boolean, keep: "min" | "max") => {
+    const prev = markers[key];
+    if (!prev || (keep === "min" ? value < prev.value : value > prev.value)) {
+      markers[key] = { value, name, visible };
+    }
+  };
+  node.traverse((obj) => {
+    const geometry = (obj as THREE.Mesh).geometry;
+    if (!geometry) return;
+    if (geometry.boundingBox === null) geometry.computeBoundingBox();
+    const box = geometry.boundingBox!.clone().applyMatrix4(obj.matrixWorld);
+    const size = box.getSize(new THREE.Vector3());
+    let visible = obj.visible;
+    for (let p = obj.parent; p && p !== node.parent; p = p.parent) visible &&= p.visible;
+    if (visible) visibleBox.union(box);
+    const short = obj.name.split("/").slice(-1)[0];
+    for (const k of ["min", "max"] as const) {
+      for (const a of ["x", "y", "z"] as const) {
+        mark(`${k}.${a}`, box[k][a], short, visible, k);
+      }
+    }
+    rows.push({
+      name: obj.name,
+      visible,
+      diagonal: Number(size.length().toFixed(3)),
+      min: box.min.toArray().map((v) => Number(v.toFixed(2))),
+      max: box.max.toArray().map((v) => Number(v.toFixed(2))),
+    });
+  });
+  rows.sort((a, b) => (b.diagonal as number) - (a.diagonal as number));
+  const round = (b: THREE.Box3) => ({
+    min: b.min.toArray().map((v) => Number(v.toFixed(2))),
+    max: b.max.toArray().map((v) => Number(v.toFixed(2))),
+  });
+  // What the render loop pays per frame for this selection, measured in the
+  // app rather than estimated.
+  const scratch = new THREE.Box3();
+  const t0 = performance.now();
+  for (let i = 0; i < 200; i++) scratch.setFromObject(node, false);
+  const refreshMs = (performance.now() - t0) / 200;
+  return {
+    cached: round(cached),
+    precise: round(precise),
+    visible: round(visibleBox),
+    faces: markers,
+    meshes: rows.length,
+    refreshMs: Number(refreshMs.toFixed(4)),
+    top: rows.slice(0, 10),
+  };
+}
+
 function screenshot(viewer: BridgeViewer) {
   if (!viewer.renderer) throw new Error("viewport not ready");
   const camera = viewer.activeCameraIndex >= 0 ? viewer.usdCameras[viewer.activeCameraIndex] : viewer.camera;
@@ -249,6 +318,21 @@ export async function dispatchCommand(
       return inspectScene(args);
     case "search_objects":
       return searchObjects(args);
+    case "select_node": {
+      const path = typeof args.path === "string" ? args.path : "";
+      if (!path) {
+        // Empty path = clear, so a measurement can A/B a selection.
+        bindSelectionBox(viewer, null);
+        stageState.deselectPrim();
+        return { ok: true, path: null };
+      }
+      const node = viewer.loadedGroup?.getObjectByName(path) ?? null;
+      if (!node) throw new Error(`no render node for ${path}`);
+      // Same path as a hierarchy click: orange box, selected node, details.
+      bindSelectionBox(viewer, node);
+      await stageState.selectPrim(path);
+      return { ok: true, path };
+    }
     case "transform_object":
       return transformObject(args);
     case "play":
@@ -265,6 +349,8 @@ export async function dispatchCommand(
     }
     case "get_performance":
       return frameDiag.snapshot();
+    case "box_report":
+      return boxReport(viewer);
     case "ping":
       // The keep-alive's own invoke, timed from the app side: what an idle
       // transport charges the next caller.

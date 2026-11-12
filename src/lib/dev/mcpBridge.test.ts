@@ -18,6 +18,8 @@ vi.mock("$lib/stage/stageState.svelte", () => {
     stageInfo: { root_layer: "/tmp/a.usda" },
     fetchPrimDetails: vi.fn(async () => null),
     refreshAfterEdit: vi.fn(async () => {}),
+    selectPrim: vi.fn(async () => true),
+    deselectPrim: vi.fn(),
     setAttributeValue: vi.fn(async () => null),
   };
   return { stageState };
@@ -66,6 +68,8 @@ const stage = stageState as unknown as {
   stageInfo: { root_layer: string } | null;
   fetchPrimDetails: ReturnType<typeof vi.fn>;
   refreshAfterEdit: ReturnType<typeof vi.fn>;
+  selectPrim: ReturnType<typeof vi.fn>;
+  deselectPrim: ReturnType<typeof vi.fn>;
   setAttributeValue: ReturnType<typeof vi.fn>;
 };
 const tabs = tabsState as unknown as {
@@ -419,6 +423,63 @@ describe("search_objects", () => {
       matches: unknown[];
     };
     expect(limited.matches).toHaveLength(1);
+  });
+});
+
+describe("select_node", () => {
+  function sceneViewer() {
+    const view = viewer();
+    const scene = new THREE.Scene();
+    const group = new THREE.Group();
+    const prim = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2));
+    prim.name = "/World/Cube";
+    prim.position.set(10, 0, 0);
+    group.add(prim);
+    Object.assign(view, { scene, loadedGroup: group, selectedNode: null, selectionHelper: null });
+    return { view, scene, prim };
+  }
+
+  it("binds the prim's render node like a hierarchy click", async () => {
+    const { view, scene, prim } = sceneViewer();
+
+    expect(await call(view, "select_node", { path: "/World/Cube" })).toEqual({
+      ok: true,
+      path: "/World/Cube",
+    });
+    expect(view.selectedNode).toBe(prim);
+    expect(view.selectionHelper!.box.min.x).toBeCloseTo(9, 6);
+    expect(scene.children).toContain(view.selectionHelper);
+    expect(stage.selectPrim).toHaveBeenCalledWith("/World/Cube");
+  });
+
+  it("replaces the previous box instead of stacking helpers", async () => {
+    const { view, scene } = sceneViewer();
+    await call(view, "select_node", { path: "/World/Cube" });
+    const first = view.selectionHelper;
+    await call(view, "select_node", { path: "/World/Cube" });
+
+    expect(view.selectionHelper).not.toBe(first);
+    expect(scene.children.filter((c) => c === first)).toHaveLength(0);
+    expect(scene.children).toContain(view.selectionHelper);
+  });
+
+  it("fails readably for a missing prim", async () => {
+    const { view } = sceneViewer();
+    await expect(call(view, "select_node", { path: "/World/Nope" })).rejects.toThrow(
+      "no render node for /World/Nope",
+    );
+    expect(stage.selectPrim).not.toHaveBeenCalled();
+  });
+
+  it("clears the selection on an empty path", async () => {
+    const { view, scene } = sceneViewer();
+    await call(view, "select_node", { path: "/World/Cube" });
+
+    expect(await call(view, "select_node", { path: "" })).toEqual({ ok: true, path: null });
+    expect(view.selectedNode).toBeNull();
+    expect(view.selectionHelper).toBeNull();
+    expect(scene.children).toHaveLength(0);
+    expect(stage.deselectPrim).toHaveBeenCalled();
   });
 });
 

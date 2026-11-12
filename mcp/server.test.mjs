@@ -15,6 +15,7 @@ const CONTRACT = {
   unload_scene: {},
   inspect_scene: { "max_depth?": "integer" },
   search_objects: { query: "string", "limit?": "integer" },
+  select_node: { path: "string" },
   transform_object: {
     path: "string",
     "position?": "vec3",
@@ -25,6 +26,7 @@ const CONTRACT = {
   pause: {},
   set_time: { time: "number" },
   get_performance: {},
+  box_report: {},
   reset_performance: {},
   screenshot: {},
   set_camera: { "position?": "vec3", "target?": "vec3", "fov?": "number" },

@@ -54,6 +54,12 @@ export const TOOLS = [
     },
   },
   {
+    name: "select_node",
+    description:
+      "Select a prim's render node like a hierarchy click: orange box, gizmo anchor, stage details.",
+    args: { path: z.string().describe("prim path, e.g. /CarbonFrameBike; empty string clears") },
+  },
+  {
     name: "transform_object",
     description:
       "Author a prim's local transform through the gizmo path (undo/redo and caches apply). Only the channels given are written.",
@@ -74,6 +80,12 @@ export const TOOLS = [
   {
     name: "get_performance",
     description: "Frame diagnostics of the render loop, verbatim snapshot.",
+    args: {},
+  },
+  {
+    name: "box_report",
+    description:
+      "Cached vs precise AABB of the selected subtree, plus its widest meshes (hidden ones flagged).",
     args: {},
   },
   {
