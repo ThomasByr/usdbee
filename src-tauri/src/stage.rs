@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use openusd::ar::DefaultResolver;
 use openusd::gf;
@@ -655,6 +656,11 @@ fn spawn_stage_owner_for(
         let mut warm: Warmup = None;
         // The warmup's only off switch (dev/test): see SetWarmupEnabled.
         let mut warmup_enabled = true;
+        // When the last pose or codes request was served: the idle gap warms
+        // only once this is WARMUP_QUIET_MS old, so playback's queue gaps are
+        // not spent on warm steps. `None` = no such request yet (a fresh open),
+        // which keeps the plain load-then-idle warmup immediate.
+        let mut last_pose_at: Option<Instant> = None;
         loop {
             let request = match receiver.try_recv() {
                 Ok(request) => request,
@@ -662,6 +668,9 @@ fn spawn_stage_owner_for(
                 // command that arrived meanwhile is served before the next.
                 Err(mpsc::TryRecvError::Empty)
                     if warmup_enabled
+                        && last_pose_at.is_none_or(|at| {
+                            at.elapsed() >= Duration::from_millis(WARMUP_QUIET_MS)
+                        })
                         && warm_one_step(
                             current_stage.as_deref(),
                             &mut mesh_cache,
@@ -852,6 +861,9 @@ fn spawn_stage_owner_for(
                         None => Err("no stage open".to_string()),
                     };
                     let _ = reply.send(response);
+                    // A codes fetch is the batch's first turn: stamping it
+                    // covers the gap before the first pose request.
+                    last_pose_at = Some(Instant::now());
                 }
                 StageRequest::GetGeometry { path, time, reply } => {
                     let response = match current_stage {
@@ -904,6 +916,7 @@ fn spawn_stage_owner_for(
                         None => Err("no stage open".to_string()),
                     };
                     let _ = reply.send(response);
+                    last_pose_at = Some(Instant::now());
                 }
                 StageRequest::GetWarmupProgress { reply } => {
                     let response = match current_stage {
@@ -1848,6 +1861,14 @@ fn edit_emission_path(stage: &Stage, path: &str) -> String {
 /// fill `pose_frames`, and a grid time reached mid-pass warms itself on that
 /// pass.
 type Warmup = Option<(Vec<f64>, usize, usize)>;
+
+/// How long the owner must have served no pose traffic before an idle gap may
+/// warm. Playback's 12-pose batch is 13 owner turns with a queue-empty gap
+/// between each, and a gap taken for a warm step (tens of ms per cold code in
+/// dev) lands on the next pose: the batch wall then reads as bimodal. A load's
+/// codes fetch stamps the timer too (the batch's first turn is one), so an
+/// animated stage's warmup starts this long after load instead of immediately.
+pub(crate) const WARMUP_QUIET_MS: u64 = 150;
 
 /// Whether one more warm step of `charge` bytes fits both caches without
 /// evicting. A step that would evict drops the oldest entry, which is the code

@@ -278,3 +278,80 @@ fn a_command_is_served_while_the_queue_is_still_pending() {
         "the pose preempted the warmup instead of queueing behind it: {warmed}/{total}"
     );
 }
+
+// Playback awareness (residual-stutter C2): a 12-pose batch is 13 owner turns
+// with a queue-empty gap between each, and the owner takes such a gap for a
+// warm step (~35-50 ms cold in dev), which the next pose then waits behind.
+// Pose traffic therefore holds the warmup off until the owner has seen
+// WARMUP_QUIET_MS (stage.rs, 150 ms) of quiet.
+#[test]
+fn pose_traffic_keeps_the_idle_owner_from_warming() {
+    let state = common::spawn_stage_owner();
+    state.open(&fixture("many_codes.usda"));
+    let sender = state.sender();
+
+    // The pose is the request that builds the skeleton the queue needs, so no
+    // code can have warmed before it: every code is still ahead of the cursor.
+    request_animated_pose(&sender, Some(3.0)).expect("pose should reply");
+    // Long past the owner's next idle poll, well inside the 150 ms window: a
+    // gap this short belongs to playback, not to the warmup.
+    std::thread::sleep(Duration::from_millis(60));
+
+    let progress = request_warmup_progress(&sender).expect("progress should reply");
+    assert_eq!(
+        progress.0, 0,
+        "a warm step ran in the pose gap: {progress:?}"
+    );
+}
+
+// The gate must not starve the warmup: once the window has elapsed the next
+// idle gap warms again. How many codes that gap chain covers is not pinned
+// (the owner keeps warming back to back until a command arrives).
+#[test]
+fn an_idle_gap_after_the_quiet_window_warms() {
+    let state = common::spawn_stage_owner();
+    state.open(&fixture("many_codes.usda"));
+    let sender = state.sender();
+
+    request_animated_pose(&sender, Some(3.0)).expect("pose should reply");
+    // WARMUP_QUIET_MS (150 ms in stage.rs) plus slack for the timer and the
+    // owner's poll.
+    std::thread::sleep(Duration::from_millis(200));
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let progress = loop {
+        let progress = request_warmup_progress(&sender).expect("progress should reply");
+        if progress.0 >= 1 {
+            break progress;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the quiet window never warmed: {progress:?}"
+        );
+    };
+    assert!(
+        progress.1 > 1,
+        "the queue is the authored code list: {progress:?}"
+    );
+}
+
+// The batch's first turn is a GetTimeCodes, so the codes fetch has to stamp the
+// timer as well: otherwise the owner warms in the gap between the codes reply
+// and the batch's first pose request, which is inside the same batch wall.
+#[test]
+fn a_codes_fetch_keeps_the_idle_owner_from_warming() {
+    let state = common::spawn_stage_owner();
+    state.open(&fixture("many_codes.usda"));
+    let sender = state.sender();
+
+    // The codes fetch builds the skeleton, so this is the first request after
+    // which the queue could fill.
+    request_time_codes(&sender).expect("time codes");
+    std::thread::sleep(Duration::from_millis(60));
+
+    let progress = request_warmup_progress(&sender).expect("progress should reply");
+    assert_eq!(
+        progress.0, 0,
+        "a warm step ran in the codes gap: {progress:?}"
+    );
+}
