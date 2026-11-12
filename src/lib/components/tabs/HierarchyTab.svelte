@@ -3,6 +3,7 @@
   import PrimTree from "$lib/components/stage/PrimTree.svelte";
   import PropertyInspector from "$lib/components/stage/PropertyInspector.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
+  import { bindSelectionBox } from "$lib/render/sceneIntegration";
   import type { RendererKit } from "$lib/three/RendererKit.svelte";
 
   let { viewer }: { viewer: RendererKit } = $props();
@@ -25,33 +26,13 @@
     // Toggle off if already selected
     if (node && selectedNodeId === node.uuid) {
       selectedNodeId = null;
-      viewer.selectedNode = null;
+      bindSelectionBox(viewer, null);
       stageState.deselectPrim();
-      if (viewer.selectionHelper) {
-        viewer.scene.remove(viewer.selectionHelper);
-        viewer.selectionHelper.dispose();
-        viewer.selectionHelper = null;
-      }
       return;
     }
 
     selectedNodeId = node ? node.uuid : null;
-    viewer.selectedNode = node ? node : null;
-
-    // Remove previous selection helper
-    if (viewer.selectionHelper) {
-      viewer.scene.remove(viewer.selectionHelper);
-      viewer.selectionHelper.dispose();
-      viewer.selectionHelper = null;
-    }
-
-    if (node) {
-      const box = new THREE.Box3();
-      box.setFromObject(node, true);
-      viewer.selectionHelper = new THREE.Box3Helper(box, new THREE.Color(0xffaa00)); // Orange highlight
-      viewer.selectionHelper.visible = !box.isEmpty();
-      viewer.scene.add(viewer.selectionHelper);
-    }
+    bindSelectionBox(viewer, node ?? null);
   }
 </script>
 

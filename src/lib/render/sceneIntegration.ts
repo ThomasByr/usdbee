@@ -28,6 +28,30 @@ import type { RendererKit } from "$lib/three/RendererKit.svelte";
 // settings-sync bodies. The Viewport owns the calls; the logic here is
 // moved verbatim from the pre-extraction page.
 
+// The orange selection box, one helper per selection, replaced wholesale.
+// Shared by a hierarchy click and the dev bridge's select_node.
+type SelectionTarget = {
+  scene: THREE.Scene;
+  selectedNode: THREE.Object3D | null;
+  selectionHelper: THREE.Box3Helper | null;
+};
+
+export function bindSelectionBox(viewer: SelectionTarget, node: THREE.Object3D | null) {
+  if (viewer.selectionHelper) {
+    viewer.scene.remove(viewer.selectionHelper);
+    viewer.selectionHelper.dispose();
+    viewer.selectionHelper = null;
+  }
+  viewer.selectedNode = node;
+  if (!node) return;
+  // Precise: once per selection, not per frame, and the cached per-geometry
+  // box would under-cover a deformed or instanced subtree.
+  const box = new THREE.Box3().setFromObject(node, true);
+  viewer.selectionHelper = new THREE.Box3Helper(box, new THREE.Color(0xffaa00)); // Orange highlight
+  viewer.selectionHelper.visible = !box.isEmpty();
+  viewer.scene.add(viewer.selectionHelper);
+}
+
 export function resetLoadedScene(viewer: RendererKit) {
   if (viewer.loadedGroup && viewer.scene) {
     viewer.scene.remove(viewer.loadedGroup);
