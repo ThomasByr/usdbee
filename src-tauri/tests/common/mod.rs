@@ -230,3 +230,28 @@ pub fn request_redo(state: &TestOwner) -> Result<bool, String> {
 pub fn undo_state(state: &TestOwner) -> usdbee_lib::stage::UndoState {
     usdbee_lib::stage::request_undo_state(&state.sender()).expect("undo state should serialize")
 }
+
+pub fn request_set_variant_selection(
+    state: &TestOwner,
+    path: &str,
+    variant_set: &str,
+    selection: Option<&str>,
+) -> Result<(), String> {
+    usdbee_lib::stage::request_set_variant_selection(&state.sender(), path, variant_set, selection)
+}
+
+pub fn variant_set<'a>(
+    details: &'a PrimDetails,
+    name: &str,
+) -> &'a usdbee_lib::values::VariantSetInfo {
+    details
+        .variant_sets
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected variant set {} in {:?}",
+                name, details.variant_sets
+            )
+        })
+}
