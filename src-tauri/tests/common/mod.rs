@@ -7,12 +7,15 @@
 #![allow(dead_code)]
 
 use std::cell::Cell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use usdbee_lib::stage::{StageInfo, StageRequest, StageState};
+use usdbee_lib::stage::{
+    request_edit_target, request_stage_details, EditTargetInfo, StageInfo, StageRequest, StageState,
+};
+use usdbee_lib::values::PrimDetails;
 
 pub struct TestOwner {
     pub state: StageState,
@@ -162,4 +165,68 @@ pub fn owner_with_events() -> (TestOwner, TestEvents) {
         last_id: Cell::new(0),
     };
     (owner, events)
+}
+
+pub fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+pub fn open_path_via_owner(state: &TestOwner, path: &Path) -> StageInfo {
+    state.open(path)
+}
+
+pub fn open_via_owner(state: &TestOwner, name: &str) {
+    state.open(&fixture(name));
+}
+
+pub fn details_via_owner(state: &TestOwner, path: &str, time: Option<f64>) -> PrimDetails {
+    request_stage_details(&state.sender(), path, time).expect("details should serialize")
+}
+
+pub fn attribute<'a>(
+    details: &'a PrimDetails,
+    name: &str,
+) -> &'a usdbee_lib::values::AttributeInfo {
+    details
+        .attributes
+        .iter()
+        .find(|a| a.name == name)
+        .unwrap_or_else(|| panic!("expected attribute {} in {:?}", name, details.attributes))
+}
+
+pub fn request_set_value(
+    state: &TestOwner,
+    path: &str,
+    name: &str,
+    value: usdbee_lib::values::ValuePayload,
+    time: Option<f64>,
+) -> Result<(), String> {
+    usdbee_lib::stage::request_set_attribute_value(&state.sender(), path, name, &value, time)
+}
+
+pub fn payload(r#type: &str, data: serde_json::Value) -> usdbee_lib::values::ValuePayload {
+    usdbee_lib::values::ValuePayload {
+        r#type: r#type.to_string(),
+        data,
+        truncated: None,
+        count: None,
+    }
+}
+
+pub fn edit_target(state: &TestOwner) -> EditTargetInfo {
+    request_edit_target(&state.sender()).expect("edit target should serialize")
+}
+
+pub fn request_undo(state: &TestOwner) -> Result<bool, String> {
+    usdbee_lib::stage::request_undo(&state.sender())
+}
+
+pub fn request_redo(state: &TestOwner) -> Result<bool, String> {
+    usdbee_lib::stage::request_redo(&state.sender())
+}
+
+pub fn undo_state(state: &TestOwner) -> usdbee_lib::stage::UndoState {
+    usdbee_lib::stage::request_undo_state(&state.sender()).expect("undo state should serialize")
 }

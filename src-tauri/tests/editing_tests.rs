@@ -4,58 +4,16 @@ use std::path::{Path, PathBuf};
 mod common;
 
 use usdbee_lib::stage::{
-    request_edit_target, request_geometry_data, request_list_dirty_layers, request_save_layers,
-    request_scene_manifest, request_set_edit_target, request_stage_details, request_stage_tree,
-    EditTargetInfo, LayerSaveRequest, RenderNode,
+    request_geometry_data, request_list_dirty_layers, request_save_layers, request_scene_manifest,
+    request_set_edit_target, request_stage_tree, LayerSaveRequest, RenderNode,
 };
 use usdbee_lib::values::PrimDetails;
 
-use common::{owner_with_events, spawn_stage_owner, TestOwner};
-
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name)
-}
-
-fn open_path_via_owner(state: &TestOwner, path: &Path) -> usdbee_lib::stage::StageInfo {
-    state.open(path)
-}
-
-fn open_via_owner(state: &TestOwner, name: &str) {
-    state.open(&fixture(name));
-}
-
-fn details_via_owner(state: &TestOwner, path: &str, time: Option<f64>) -> PrimDetails {
-    request_stage_details(&state.sender(), path, time).expect("details should serialize")
-}
-
-fn attribute<'a>(details: &'a PrimDetails, name: &str) -> &'a usdbee_lib::values::AttributeInfo {
-    details
-        .attributes
-        .iter()
-        .find(|a| a.name == name)
-        .unwrap_or_else(|| panic!("expected attribute {} in {:?}", name, details.attributes))
-}
-
-fn request_set_value(
-    state: &TestOwner,
-    path: &str,
-    name: &str,
-    value: usdbee_lib::values::ValuePayload,
-    time: Option<f64>,
-) -> Result<(), String> {
-    usdbee_lib::stage::request_set_attribute_value(&state.sender(), path, name, &value, time)
-}
-
-fn payload(r#type: &str, data: serde_json::Value) -> usdbee_lib::values::ValuePayload {
-    usdbee_lib::values::ValuePayload {
-        r#type: r#type.to_string(),
-        data,
-        truncated: None,
-        count: None,
-    }
-}
+use common::{
+    attribute, details_via_owner, edit_target, fixture, open_path_via_owner, open_via_owner,
+    owner_with_events, payload, request_redo, request_set_value, request_undo, spawn_stage_owner,
+    undo_state, TestOwner,
+};
 
 #[test]
 fn set_value_authors_composed_value_on_session_layer() {
@@ -781,10 +739,6 @@ fn edits_without_open_stage_fail() {
 }
 
 // --- Task 2: edit targets, dirty layers, save ---
-
-fn edit_target(state: &TestOwner) -> EditTargetInfo {
-    request_edit_target(&state.sender()).expect("edit target should serialize")
-}
 
 #[test]
 fn edit_target_defaults_to_session_and_switches_to_root() {
@@ -2012,18 +1966,6 @@ fn set_value_creates_the_first_op_and_order_on_a_plain_prim() {
 }
 
 // --- Task 5: undo/redo + unsaved-changes guards ---
-
-fn request_undo(state: &TestOwner) -> Result<bool, String> {
-    usdbee_lib::stage::request_undo(&state.sender())
-}
-
-fn request_redo(state: &TestOwner) -> Result<bool, String> {
-    usdbee_lib::stage::request_redo(&state.sender())
-}
-
-fn undo_state(state: &TestOwner) -> usdbee_lib::stage::UndoState {
-    usdbee_lib::stage::request_undo_state(&state.sender()).expect("undo state should serialize")
-}
 
 // FIRST undo pin (the Task 1 review flagged undo capture as spike-only
 // evidence): an authored value must revert through the actor's own UndoStage
