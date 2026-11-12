@@ -686,6 +686,53 @@ mod tests {
         Ok(())
     }
 
+    /// Spec R6: a `UsdUVTexture` feeding the displacement terminal serializes
+    /// its file and the primvar reader's name, not just a constant scale.
+    /// The texture output authors a value because the producer walk only
+    /// returns an output that does (an unauthored one answers no displacement).
+    #[test]
+    fn textured_displacement_resolves_file_and_primvar() -> openusd::Result<()> {
+        let stage = stage("displacement_texture.usda")?;
+        let material = Material::define(&stage, "/TexDisp")?;
+        let texture = UVTexture::define(&stage, "/TexDisp/Height")?;
+        texture
+            .shader()
+            .create_input("file", "asset")?
+            .set(Value::AssetPath(sdf::AssetPath::new("./checker.png")))?;
+        let reader = Shader::define(&stage, "/TexDisp/st")?;
+        reader
+            .create_id_attr()?
+            .set(Value::token("UsdPrimvarReader_float2"))?;
+        reader
+            .create_input("varname", "string")?
+            .set(Value::String("uv".to_string()))?;
+        let st = reader.create_output("result", "float2")?;
+        texture
+            .shader()
+            .create_input("st", "float2")?
+            .connect_to(&st)?;
+        let height = texture.shader().create_output("r", "float")?.set(1.0_f32)?;
+        material.create_displacement_output()?.connect_to(&height)?;
+
+        let displacement = material_info(&stage, "/TexDisp")
+            .expect("material serializes")
+            .displacement
+            .expect("a texture-fed terminal is displacement");
+        assert_eq!(displacement.scale, None, "a texture is no constant");
+        assert!(
+            displacement
+                .file_path
+                .expect("the texture file reaches the payload")
+                .ends_with("checker.png"),
+            "the texture's file resolves"
+        );
+        assert_eq!(
+            displacement.st_primvar, "uv",
+            "the reader names the primvar, not the fallback"
+        );
+        Ok(())
+    }
+
     /// Spec R3: a surface channel fed by a producer that is neither an authored
     /// interface input nor a `UsdUVTexture` output stays absent, even when that
     /// producer authors a value of its own (which only displacement folds).

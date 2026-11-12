@@ -214,6 +214,19 @@ def Scope "Materials"
             float2 outputs:result
         }
     }
+
+    # Bound only at full purpose by Tri_full: the rescue case for R1.
+    def Material "Cyan"
+    {
+        token outputs:surface.connect = </Materials/Cyan/Surface.outputs:surface>
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.1, 0.8, 0.8)
+            token outputs:surface
+        }
+    }
 }
 
 def Xform "Root"
@@ -326,6 +339,17 @@ def Xform "Root"
         int[] faceVertexIndices = [0, 1, 2]
         point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
         rel material:binding = </Materials/Tiled>
+    }
+
+    # No all-purpose binding at all: only the full-purpose query reaches Cyan.
+    def Mesh "Tri_full" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding:full = </Materials/Cyan>
     }
 
     # Bound to a Scope, not a Material: must answer unbound, never an error.

@@ -309,6 +309,7 @@ fn materials_full_fixture_opens() {
         "/Materials/Vol",
         "/Materials/Mul",
         "/Materials/Tiled",
+        "/Materials/Cyan",
         "/Root/Tri_collection",
         "/Root/Tri_preview",
         "/Root/Tri_graph_const",
@@ -319,6 +320,7 @@ fn materials_full_fixture_opens() {
         "/Root/Tri_vol",
         "/Root/Tri_mul",
         "/Root/Tri_tiled",
+        "/Root/Tri_full",
         "/Root/Tri_nonmat",
         "/Root/Anc/Tri_ancdirect",
     ] {
@@ -393,6 +395,18 @@ fn render_context_only_terminal_resolves() {
         bound_diffuse(&state, "/Root/Tri_context"),
         color(0.9, 0.9, 0.1),
         "a material with only a render-context surface terminal still serializes"
+    );
+}
+
+#[test]
+fn full_purpose_only_binding_resolves() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    assert_eq!(
+        bound_diffuse(&state, "/Root/Tri_full"),
+        color(0.1, 0.8, 0.8),
+        "a full-only binding is rescued by the second purpose query"
     );
 }
 
