@@ -308,6 +308,87 @@ describe("the look-ahead buffer", () => {
   });
 });
 
+// --- The wrap's abandoned tail batch -----------------------------------
+
+describe("a wrap's abandoned batch", () => {
+  it("lets the next claim adopt the wire instead of queueing behind it", () => {
+    // The wrap drops the end-of-loop window, but its batch is still on the
+    // serialized transport. Waiting for it costs a whole batch wall before the
+    // first post-wrap pose, and the poses it carries can never be consumed.
+    const abandoned = claimPoseBatch(CODES, 0)!;
+    invalidatePoseBuffer("wrap");
+
+    const adopted = claimPoseBatch(CODES, 0)!;
+    expect(adopted.times).toEqual(CODES.slice(1, 1 + POSE_PREFETCH));
+
+    // The abandoned batch lands stale: dropped, and its settle must not
+    // release the guard the adopted claim now owns. Releasing it there would
+    // stack a third batch on the wire behind the second.
+    settlePoseBatch(abandoned, frames(abandoned.times.length));
+    expect(poseCoverage(0)).toBe(0);
+    expect(claimPoseBatch(CODES, 0)).toBeNull();
+
+    // The adopted batch owns the guard: its own settle fills and releases.
+    settlePoseBatch(adopted, frames(adopted.times.length));
+    expect(poseCoverage(0)).toBe(POSE_PREFETCH);
+    takePose(1);
+    const refill = claimPoseBatch(CODES, 1);
+    expect(refill).not.toBeNull(); // the guard was released by its own settle
+    settleAll(refill);
+  });
+
+  it("carries the wrap target as slot 0 of the claim", () => {
+    // Claimed before the step: the pose the wrap frame asks for has to be in
+    // the batch, or that frame is a miss and single-fetches what the batch
+    // could have carried.
+    const claimed = claimPoseBatch(CODES, 6, 0, true)!;
+
+    expect(claimed.times).toEqual([6, ...CODES.slice(7, 7 + POSE_PREFETCH - 1)]);
+    settleAll(claimed);
+  });
+
+  it("carries an in-hole wrap target too, so the frame can hold for it", () => {
+    const claimed = claimPoseBatch(SPARSE, 4.1, 10, true)!;
+
+    expect(claimed.times[0]).toBe(4.1);
+    expect(claimed.times).toHaveLength(POSE_PREFETCH);
+    // A hold is only worth its deadline when the batch carries the time.
+    expect(holdsPoseStep(SPARSE, 4.1)).toBe(true);
+
+    settleAll(claimed);
+  });
+
+  it("bounds the adopted claim by the hold deadline", () => {
+    let clock = 1000;
+    setHoldClockForTests(() => clock);
+    const abandoned = claimPoseBatch(CODES, 0)!;
+    invalidatePoseBuffer("wrap");
+    const adopted = claimPoseBatch(CODES, 0, 0, true);
+    try {
+      expect(adopted).not.toBeNull();
+      expect(holdsPoseStep(CODES, 0)).toBe(true);
+      clock += POSE_HOLD_DEADLINE_MS;
+      // What the adopted claim waits behind is the abandoned tail's remaining
+      // wall: past the deadline the step may fetch rather than freeze.
+      expect(holdsPoseStep(CODES, 0)).toBe(false);
+    } finally {
+      settlePoseBatch(abandoned, frames(abandoned.times.length));
+      settlePoseBatch(adopted!, frames(adopted!.times.length));
+      setHoldClockForTests();
+    }
+  });
+
+  it("does not adopt a wire the wrap found empty", () => {
+    invalidatePoseBuffer("wrap");
+
+    const claimed = claimPoseBatch(CODES, 0, 0, true)!;
+    expect(claimed.times[0]).toBe(0);
+
+    settleAll(claimed);
+    expect(poseCoverage(0)).toBe(POSE_PREFETCH - 1);
+  });
+});
+
 // A frame whose node table is structurally scannable but semantically
 // corrupt (visibility byte 2): the split bounds it, the decode throws.
 function frameWithBadVisibility(): ArrayBuffer {

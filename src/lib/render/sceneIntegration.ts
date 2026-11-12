@@ -257,7 +257,15 @@ export function installPlaybackDriver(viewer: RendererKit) {
     // is already covered by the resync branch above.
     if (!resynced && lastEmitted !== null && next < lastEmitted) {
       frameDiag.onInvalidate("wrap");
-      invalidatePoseBuffer();
+      invalidatePoseBuffer("wrap");
+      // Claim the post-wrap window from the wrap target BEFORE the step. The
+      // step above it would otherwise find nothing buffered and nothing it may
+      // wait for, and single-fetch the very pose a batch could carry — behind
+      // the end-of-loop batch still on the transport (the wrap adopted its
+      // wire so the claim does not queue behind it). Claimed here, not after
+      // the step, because the batch has to be on the wire before the step
+      // decides whether to hold.
+      if (renderState.status === "ready") void prefetchPoses(next, tcps, true);
     }
     viewer.animationProgress = toPlayheadOffset(next, start);
     lastEmitted = next;

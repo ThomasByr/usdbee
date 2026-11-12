@@ -32,6 +32,12 @@ let epoch = 0;
 // Epoch of the batch in flight (-1 = none). Recorded by epoch so its own
 // settle releases the guard, never a later batch's.
 let inFlightEpoch = -1;
+// Set when a wrap invalidated the window while a batch was still on the wire.
+// That batch's remaining wall is the one wait a wrap cannot avoid, but queueing
+// a second batch behind it would pay two: the next claim adopts the wire
+// instead, taking over the guard (inFlightEpoch) while the abandoned batch's
+// own settle lands stale and finds a guard that is no longer its own.
+let adoptInFlight = false;
 // A failed batch keeps prefetch off for the rest of its own generation:
 // retrying at frame rate would spend one ~145 ms invoke per frame while it is
 // broken. Only a failure of the current generation lands here.
@@ -87,16 +93,31 @@ export interface ClaimedPoseBatch {
   times: number[];
 }
 
-/** Clears the look-ahead; an in-flight batch lands stale and is dropped. */
-export function invalidatePoseBuffer() {
+/**
+ * Clears the look-ahead; an in-flight batch lands stale and is dropped.
+ *
+ * `kind` decides what happens to a batch still on the wire. An edit or a load
+ * invalidates for content: its poses are wrong, not merely late, so the batch
+ * is abandoned and the next claim waits it out. A wrap only moves the playhead
+ * back to the stage start, and the abandoned tail batch holds nothing that can
+ * serve there — waiting for it costs a whole batch wall before the first
+ * post-wrap pose, so the wrap arms adoption for the next claim.
+ */
+export function invalidatePoseBuffer(kind: "edit" | "wrap" = "edit") {
   epoch++;
+  adoptInFlight = kind === "wrap" && inFlightEpoch !== -1;
   buffered = new Map();
   // The string tables belong to the invalidated generation: a new stage (or
   // an edit) ships different ones, and the blob compare would re-decode on
   // mismatch anyway — dropping them keeps one generation from borrowing
   // another's paths even if a frame slipped past the epoch guard.
   tableCache = null;
+  // The abandoned batch's times go with it: they are not what the next batch
+  // carries, and holding on them would wait for poses that will be dropped.
   inFlightTimes = [];
+  // The hold deadline restarts: it has to bound the claim the wrap is about to
+  // issue (waiting behind the abandoned tail batch's remaining wall), not the
+  // wait an abandoned batch has already spent.
   holding = false;
   anchoredAt = null;
 }
@@ -157,14 +178,30 @@ export function holeQueryTime(time: number, codes: readonly number[], tcps: numb
  * Inside a hole they are the grid times `holeQueryTime` produces, clamped at
  * the hole's exit code so one batch never spans the hole and the authored range
  * after it.
+ *
+ * `includeAnchor` adds the playhead's own time as slot 0. The wrap branch claims
+ * the post-wrap window BEFORE stepping, and that frame's pose is the wrap
+ * target itself: without it the frame is a miss, and `holdsPoseStep` refuses to
+ * wait for a time the batch does not carry, so it single-fetches the pose the
+ * batch could have carried. Every other claim starts strictly after the
+ * playhead, whose own pose is either held already or is being fetched as a
+ * single by the step that asked.
  */
-export function claimPoseBatch(codes: readonly number[], code: number, tcps = 0): ClaimedPoseBatch | null {
+export function claimPoseBatch(
+  codes: readonly number[],
+  code: number,
+  tcps = 0,
+  includeAnchor = false,
+): ClaimedPoseBatch | null {
   // The guard is global, not epoch-scoped: invalidation abandons the batch it
   // interrupts but that batch is still on the serialized transport, so a second
   // claim would queue behind it (a wrap then waits two batch walls for its
   // first pose). Trade-off: a wedged invoke blocks prefetch until it settles —
-  // the same exposure the non-invalidated path already has.
-  if (inFlightEpoch !== -1 || failedEpoch === epoch) return null;
+  // the same exposure the non-invalidated path already has. The wrap's
+  // abandoned tail batch is the one exception (see adoptInFlight): it carries
+  // nothing the new generation can consume, so the claim takes its place on the
+  // wire rather than waiting a batch wall for it to land.
+  if ((inFlightEpoch !== -1 && !adoptInFlight) || failedEpoch === epoch) return null;
   // Poses the playhead has passed can never be consumed again: never fetch
   // them, and never let them sit in the map. Both branches prune: in a hole the
   // authored codes behind the playhead would otherwise linger to the exit.
@@ -178,6 +215,8 @@ export function claimPoseBatch(codes: readonly number[], code: number, tcps = 0)
     // own wall time (~190 ms of buffer against a ~260 ms invoke), which dried
     // the buffer out every cycle.
     if (poseCoverage(code) >= POSE_PREFETCH) return null;
+    // Only the wrap claim carries the playhead's own time (see includeAnchor).
+    if (includeAnchor) times.push(code);
     // Only what is missing: a sliding window re-sent 6-11 poses that were
     // already decoded (~2x the transfer at a high batch duty cycle, real cost on
     // the serialized transport). Empty means the playhead sits on the stage's
@@ -201,6 +240,8 @@ export function claimPoseBatch(codes: readonly number[], code: number, tcps = 0)
       if (bufferedCode > code && bufferedCode < exitCode) ahead++;
     }
     if (ahead >= POSE_PREFETCH) return null;
+    // Only the wrap claim carries the playhead's own time (see includeAnchor).
+    if (includeAnchor) times.push(code);
     for (let slot = Math.floor(code * tcps) + 1; times.length < POSE_PREFETCH; slot++) {
       const time = slot / tcps;
       if (time >= exitCode) break;
@@ -212,6 +253,7 @@ export function claimPoseBatch(codes: readonly number[], code: number, tcps = 0)
   if (times.length === 0) return null;
   inFlightEpoch = epoch;
   inFlightTimes = times;
+  adoptInFlight = false;
   anchoredAt = code;
   return { epoch, times };
 }
@@ -274,6 +316,7 @@ export function settlePoseBatch(claimed: ClaimedPoseBatch, payload: ArrayBuffer 
   if (inFlightEpoch === claimed.epoch) {
     inFlightEpoch = -1;
     inFlightTimes = [];
+    adoptInFlight = false;
     // The batch the hold waited on has landed: its deadline is spent.
     holding = false;
   }

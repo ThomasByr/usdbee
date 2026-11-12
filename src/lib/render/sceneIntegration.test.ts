@@ -432,9 +432,11 @@ describe("installPlaybackDriver pose prefetch", () => {
 
     expect(poseCoverage(6)).toBe(0);
     expect(batchCalls()).toHaveLength(2);
+    // The wrap target is the claim's slot 0: the post-wrap window is claimed
+    // from it, before the step, so that frame's own pose is on the wire.
     expect(batchCalls()[1]![1]).toEqual({
       stageId: stageState.activeStageId,
-      times: loop.slice(7, 7 + 12),
+      times: loop.slice(6, 6 + 12),
     });
   });
 });
@@ -739,6 +741,67 @@ describe("installPlaybackDriver on a held code", () => {
     expect(diag.invalidateWrap).toBe(1);
     expect(diag.invalidateResync).toBe(0);
     expect(diag.rewindTotal).toBe(0);
+  });
+
+  it("claims the post-wrap window before stepping instead of single-fetching", async () => {
+    // The soak's wrap chain: the wrap drops the end-of-loop window while its
+    // batch is still on the wire, and the wrap frame then asks for a code
+    // nothing holds. Claiming the post-wrap window from the wrap target
+    // BEFORE the step puts that pose at slot 0, so the frame holds for the
+    // batch instead of paying a single fetch behind the tail batch's wall.
+    const loop = Array.from({ length: 40 }, (_, i) => i);
+    renderState.timeCodes = loop;
+    stageState.stageInfo = {
+      start_time_code: 0,
+      end_time_code: 39,
+      time_codes_per_second: 60,
+    } as any;
+    await flush(); // the load's own seed settles first
+    let releaseTail!: () => void;
+    const tailOnWire = new Promise<void>((resolve) => (releaseTail = resolve));
+    let batches = 0;
+    mockedInvoke.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === "get_scene_manifest") return [];
+      if (cmd === "get_time_codes") return loop;
+      if (cmd === "get_animated_pose") return encodePoseFrame([], emptyPoseBatch());
+      if (cmd === "get_animated_pose_batch") {
+        if (batches++ === 0) await tailOnWire; // the tail claim nobody consumes
+        return poseBatch(args.times.length);
+      }
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+    renderState.time = 33;
+    const v = viewer();
+    installPlaybackDriver(v);
+
+    v.onAdvanceTime!(0); // presents 33, claims the clamped tail 34..39 — hangs
+    await flush();
+    mockedInvoke.mockClear();
+
+    v.onAdvanceTime!(0.1); // 39: held on the tail batch
+    await flush();
+    v.onAdvanceTime!(0.1); // wraps to 6
+    await flush();
+
+    // Claimed, not refused behind the hanging tail batch (the adoption), and
+    // the wrap target it carries is what the frame waits for.
+    const batchesIssued = mockedInvoke.mock.calls.filter(([cmd]) => cmd === "get_animated_pose_batch");
+    expect(batchesIssued).toHaveLength(1);
+    expect(batchesIssued[0]![1]).toEqual({
+      stageId: stageState.activeStageId,
+      times: loop.slice(6, 6 + 12),
+    });
+    expect(singlePoseCalls()).toHaveLength(0);
+
+    // The tail batch lands stale: dropped, window intact.
+    releaseTail();
+    await flush();
+    expect(poseCoverage(6)).toBe(11);
+
+    // And the next code presents straight out of the window.
+    v.onAdvanceTime!(1 / 60); // code 7
+    expect(renderState.time).toBe(7);
+    expect(singlePoseCalls()).toHaveLength(0);
   });
 });
 

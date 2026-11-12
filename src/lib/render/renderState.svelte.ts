@@ -236,9 +236,10 @@ export function advanceStageTime(
 // missing, ONE background batch fetches the next K times — authored codes, or
 // the grid times of the hole the playhead is crossing. Detached on purpose —
 // the frame is stepped either way and the fill lands later; a stale or failed
-// batch is simply dropped.
-export function prefetchPoses(code: number, tcps = 0): Promise<void> {
-  const claimed = claimPoseBatch(renderState.timeCodes, code, tcps);
+// batch is simply dropped. `includeAnchor` is the wrap branch's claim: it
+// carries the playhead's own time as slot 0 (see claimPoseBatch).
+export function prefetchPoses(code: number, tcps = 0, includeAnchor = false): Promise<void> {
+  const claimed = claimPoseBatch(renderState.timeCodes, code, tcps, includeAnchor);
   if (!claimed) return Promise.resolve();
   return (async () => {
     const startedAt = performance.now();
