@@ -380,10 +380,11 @@ fn preview_surface(surface: &UsdPreviewSurface) -> Result<PreviewSurface, String
             &surface.emissive_color_input(),
             surface.emissive_color().map_err(err)?,
         )?,
-        specular_color: color_payload(
-            &surface.specular_color_input(),
-            surface.specular_color().map_err(err)?,
-        )?,
+        // shortcut: specularColor gets no definition default because USD gates its
+        // (0,0,0) to the specular workflow; three's 0x111111 default already plays
+        // the ior-derived dielectric F0 role, so a specular-workflow asset that
+        // leaves it unauthored gets three's sheen instead of USD-true black.
+        specular_color: color_payload(&surface.specular_color_input(), None)?,
         clearcoat: scalar_channel(
             &surface.clearcoat_input(),
             surface.clearcoat().map_err(err)?,
@@ -576,7 +577,8 @@ fn scalar(value: &Value) -> Option<f64> {
 }
 
 /// A colour channel payload, resolved like `scalar_channel`; the payload's type
-/// is the input's declared one, colour3f when it declares none.
+/// is the input's declared one, colour3f when it declares none. A `None`
+/// definition default makes the channel authored-only.
 fn color_payload(
     input: &Input,
     definition_default: Option<gf::Vec3f>,
