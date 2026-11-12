@@ -1868,7 +1868,7 @@ type Warmup = Option<(Vec<f64>, usize, usize)>;
 /// dev) lands on the next pose: the batch wall then reads as bimodal. A load's
 /// codes fetch stamps the timer too (the batch's first turn is one), so an
 /// animated stage's warmup starts this long after load instead of immediately.
-pub(crate) const WARMUP_QUIET_MS: u64 = 150;
+pub const WARMUP_QUIET_MS: u64 = 150;
 
 /// Whether one more warm step of `charge` bytes fits both caches without
 /// evicting. A step that would evict drops the oldest entry, which is the code

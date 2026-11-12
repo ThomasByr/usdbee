@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use usdbee_lib::stage::{
     request_animated_pose, request_set_attribute_value, request_time_codes,
-    request_warmup_progress, StageRequest,
+    request_warmup_progress, StageRequest, WARMUP_QUIET_MS,
 };
 use usdbee_lib::values::ValuePayload;
 
@@ -283,7 +283,7 @@ fn a_command_is_served_while_the_queue_is_still_pending() {
 // with a queue-empty gap between each, and the owner takes such a gap for a
 // warm step (~35-50 ms cold in dev), which the next pose then waits behind.
 // Pose traffic therefore holds the warmup off until the owner has seen
-// WARMUP_QUIET_MS (stage.rs, 150 ms) of quiet.
+// WARMUP_QUIET_MS of quiet.
 #[test]
 fn pose_traffic_keeps_the_idle_owner_from_warming() {
     let state = common::spawn_stage_owner();
@@ -293,9 +293,9 @@ fn pose_traffic_keeps_the_idle_owner_from_warming() {
     // The pose is the request that builds the skeleton the queue needs, so no
     // code can have warmed before it: every code is still ahead of the cursor.
     request_animated_pose(&sender, Some(3.0)).expect("pose should reply");
-    // Long past the owner's next idle poll, well inside the 150 ms window: a
+    // Long past the owner's next idle poll, well inside the quiet window: a
     // gap this short belongs to playback, not to the warmup.
-    std::thread::sleep(Duration::from_millis(60));
+    std::thread::sleep(Duration::from_millis(WARMUP_QUIET_MS / 3));
 
     let progress = request_warmup_progress(&sender).expect("progress should reply");
     assert_eq!(
@@ -314,9 +314,8 @@ fn an_idle_gap_after_the_quiet_window_warms() {
     let sender = state.sender();
 
     request_animated_pose(&sender, Some(3.0)).expect("pose should reply");
-    // WARMUP_QUIET_MS (150 ms in stage.rs) plus slack for the timer and the
-    // owner's poll.
-    std::thread::sleep(Duration::from_millis(200));
+    // WARMUP_QUIET_MS plus slack for the timer and the owner's poll.
+    std::thread::sleep(Duration::from_millis(WARMUP_QUIET_MS + 50));
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let progress = loop {
@@ -347,7 +346,7 @@ fn a_codes_fetch_keeps_the_idle_owner_from_warming() {
     // The codes fetch builds the skeleton, so this is the first request after
     // which the queue could fill.
     request_time_codes(&sender).expect("time codes");
-    std::thread::sleep(Duration::from_millis(60));
+    std::thread::sleep(Duration::from_millis(WARMUP_QUIET_MS / 3));
 
     let progress = request_warmup_progress(&sender).expect("progress should reply");
     assert_eq!(
