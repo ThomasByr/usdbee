@@ -13,6 +13,7 @@ use openusd::usd::{Prim, SchemaBase, Stage};
 use openusd_schemas::shade::nodes::{PreviewSurface as UsdPreviewSurface, Transform2d, UVTexture};
 use openusd_schemas::shade::{
     AttributeType, Connectable, Input, Material, MaterialBindingAPI, ProducerFilter, Shader,
+    ShadingAttribute,
 };
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +26,10 @@ use crate::values::{serialize_payload, ValuePayload};
 pub struct MaterialInfo {
     pub name: String,
     pub surface: Option<PreviewSurface>,
+    #[serde(default)]
+    pub displacement: Option<Displacement>,
+    #[serde(default)]
+    pub has_volume: bool,
 }
 
 /// The UsdPreviewSurface channels the viewport consumes. Unauthored channels
@@ -39,6 +44,34 @@ pub struct PreviewSurface {
     pub opacity: Option<f64>,
     pub normal: Option<TextureInfo>,
     pub textures: Vec<TextureInput>,
+    #[serde(default)]
+    pub emissive_color: Option<ValuePayload>,
+    #[serde(default)]
+    pub specular_color: Option<ValuePayload>,
+    #[serde(default)]
+    pub clearcoat: Option<f64>,
+    #[serde(default)]
+    pub clearcoat_roughness: Option<f64>,
+    #[serde(default)]
+    pub opacity_threshold: Option<f64>,
+    #[serde(default)]
+    pub ior: Option<f64>,
+    #[serde(default)]
+    pub occlusion: Option<f64>,
+}
+
+/// The Material's displacement terminal: a `scale` from an authored constant on
+/// the resolved output, or the `file_path`/`st_primvar` of a UsdUVTexture
+/// feeding it. `st_primvar` keeps the reader's name even when nothing feeds the
+/// terminal, so it always names the primvar a map would read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct Displacement {
+    #[serde(default)]
+    pub scale: Option<f64>,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    pub st_primvar: String,
 }
 
 /// The UsdTransform2d a texture's `inputs:st` connects to, serialized as the
@@ -142,6 +175,8 @@ fn unbound(prim: &Prim) -> MaterialInfo {
     MaterialInfo {
         name: prim.path().name().unwrap_or_default().to_string(),
         surface: None,
+        displacement: None,
+        has_volume: false,
     }
 }
 
@@ -154,7 +189,42 @@ fn serialize_material(material: &Material) -> Result<MaterialInfo, String> {
             .unwrap_or_default()
             .to_string(),
         surface: surface(material)?,
+        displacement: displacement(material)?,
+        has_volume: material.compute_volume_source(&[]).map_err(err)?.is_some(),
     })
+}
+
+/// The Material's displacement terminal (spec R6). The terminal walk stops on
+/// the shader output, so the texture or constant feeding it comes from walking
+/// that output's own producers.
+/// shortcut: only a float constant maps to `scale` and only a resolved asset
+/// to `file_path`; upgrade if an asset authors a vector displacement or a map
+/// whose file resolves nowhere
+fn displacement(material: &Material) -> Result<Option<Displacement>, String> {
+    let Some(terminal) = material.compute_displacement_source(&[]).map_err(err)? else {
+        return Ok(None);
+    };
+    let Some(source) = terminal.sources().first() else {
+        return Ok(None);
+    };
+    let producers = match source.attribute() {
+        ShadingAttribute::Input(input) => input.value_producing_attributes(ProducerFilter::Any),
+        ShadingAttribute::Output(output) => output.value_producing_attributes(ProducerFilter::Any),
+    };
+    let mut displacement = Displacement {
+        scale: None,
+        file_path: None,
+        st_primvar: "st".to_string(),
+    };
+    match channel_from_producers(producers)? {
+        Some(Channel::Constant(value)) => displacement.scale = scalar(&value),
+        Some(Channel::Texture(texture)) => {
+            displacement.file_path = texture_file(&texture.file_input())?;
+            displacement.st_primvar = st_primvar(&texture)?;
+        }
+        None => {}
+    }
+    Ok(Some(displacement))
 }
 
 /// The Material's surface terminal -> connected shader, serialized when it is
@@ -209,23 +279,36 @@ enum Channel {
 /// absent, and so does a cycle or a chain past the crate's depth budget —
 /// those answer an empty walk or a refusal, never a panic and never an error.
 fn resolve_channel(input: &Input) -> Result<Option<Channel>, String> {
-    let Ok(producers) = input.value_producing_attributes(ProducerFilter::Any) else {
+    channel_from_producers(input.value_producing_attributes(ProducerFilter::Any))
+}
+
+/// The channel a producer walk answers: a `UsdUVTexture` output anywhere in the
+/// walk wins, else an authored value, else nothing. A refused walk (cycle,
+/// depth budget) drops the channel.
+fn channel_from_producers(
+    producers: Result<Vec<ShadingAttribute>, openusd_schemas::SchemaError>,
+) -> Result<Option<Channel>, String> {
+    let Ok(producers) = producers else {
         return Ok(None);
     };
     let mut constant = None;
     for producer in producers {
+        let attribute = producer.attribute();
         match producer.attribute_type() {
             AttributeType::Output => {
-                let Some(shader) = Shader::from_prim(producer.attribute().prim()).map_err(err)?
-                else {
-                    continue;
-                };
-                if let Some(texture) = UVTexture::from_shader(shader).map_err(err)? {
-                    return Ok(Some(Channel::Texture(texture)));
+                if let Some(shader) = Shader::from_prim(attribute.prim()).map_err(err)? {
+                    if let Some(texture) = UVTexture::from_shader(shader).map_err(err)? {
+                        return Ok(Some(Channel::Texture(texture)));
+                    }
+                }
+                // A shader output may author a constant itself, as a
+                // displacement signal does; an unauthored output is no value.
+                if constant.is_none() && attribute.has_authored_value().map_err(err)? {
+                    constant = attribute.value_at::<Value>(None).map_err(err)?;
                 }
             }
             AttributeType::Input if constant.is_none() => {
-                constant = producer.attribute().value_at::<Value>(None).map_err(err)?;
+                constant = attribute.value_at::<Value>(None).map_err(err)?;
             }
             AttributeType::Input => {}
         }
@@ -279,6 +362,31 @@ fn preview_surface(surface: &UsdPreviewSurface) -> Result<PreviewSurface, String
         opacity: scalar_channel(&surface.opacity_input(), surface.opacity().map_err(err)?)?,
         normal,
         textures,
+        emissive_color: color_payload(
+            &surface.emissive_color_input(),
+            surface.emissive_color().map_err(err)?,
+        )?,
+        specular_color: color_payload(
+            &surface.specular_color_input(),
+            surface.specular_color().map_err(err)?,
+        )?,
+        clearcoat: scalar_channel(
+            &surface.clearcoat_input(),
+            surface.clearcoat().map_err(err)?,
+        )?,
+        clearcoat_roughness: scalar_channel(
+            &surface.clearcoat_roughness_input(),
+            surface.clearcoat_roughness().map_err(err)?,
+        )?,
+        opacity_threshold: scalar_channel(
+            &surface.opacity_threshold_input(),
+            surface.opacity_threshold().map_err(err)?,
+        )?,
+        ior: scalar_channel(&surface.ior_input(), surface.ior().map_err(err)?)?,
+        occlusion: scalar_channel(
+            &surface.occlusion_input(),
+            surface.occlusion().map_err(err)?,
+        )?,
     })
 }
 

@@ -156,6 +156,8 @@ fn unbound_mesh_answers_prim_name_with_no_surface() {
         MaterialInfo {
             name: "Unbound".to_string(),
             surface: None,
+            displacement: None,
+            has_volume: false,
         }
     );
 }
@@ -418,6 +420,8 @@ fn binding_to_non_material_prim_answers_unbound() {
         MaterialInfo {
             name: "Tri_nonmat".to_string(),
             surface: None,
+            displacement: None,
+            has_volume: false,
         }
     );
 }
@@ -607,6 +611,94 @@ fn cyclic_connection_drops_channel_fail_soft() {
         "an empty walk with a connection is a cycle, not a default"
     );
     assert_eq!(surface.roughness, None, "the cyclic channel drops");
+}
+
+// Channel widening and terminal serialization (spec R5/R6) over
+// materials_full.usda: the widened PreviewSurface channels, the displacement
+// terminal and the volume flag.
+#[test]
+fn wide_channels_serialize() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    let surface = surface_of(&state, "/Root/Tri_wide");
+    assert_eq!(
+        surface.emissive_color.expect("authored emissiveColor").data,
+        color(1.0, 0.5, 0.1)
+    );
+    assert_eq!(
+        surface.specular_color.expect("authored specularColor").data,
+        color(0.2, 0.2, 0.2)
+    );
+    assert_eq!(surface.clearcoat, Some(0.8f32 as f64));
+    assert_eq!(surface.clearcoat_roughness, Some(0.2f32 as f64));
+    assert_eq!(surface.ior, Some(1.4f32 as f64));
+    assert_eq!(surface.opacity_threshold, Some(0.5f32 as f64));
+    assert_eq!(
+        surface.occlusion, None,
+        "occlusion is textured, so it serializes no constant"
+    );
+
+    let checker = std::fs::canonicalize(fixture("checker.png")).expect("fixture texture");
+    let occlusion = surface
+        .textures
+        .iter()
+        .find(|texture| texture.input == "occlusion")
+        .expect("occlusion texture input must reach the frontend");
+    assert_eq!(Path::new(&occlusion.file_path), checker);
+    assert_eq!(occlusion.st_primvar, "st");
+}
+
+#[test]
+fn tri_wide_constant_and_texture_both_absent_double_check() {
+    // Texture-wins rule (spec R3), pinned on the widened occlusion channel:
+    // a texture-fed channel serializes no constant at all, not even the node
+    // definition's 1.0 default, while its constant neighbours keep their own
+    // values.
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    let surface = surface_of(&state, "/Root/Tri_wide");
+    assert_eq!(surface.occlusion, None, "texture-fed: no constant");
+    assert_eq!(
+        surface.clearcoat,
+        Some(0.8f32 as f64),
+        "a constant channel beside it is unaffected"
+    );
+    assert!(
+        surface
+            .textures
+            .iter()
+            .any(|texture| texture.input == "occlusion"),
+        "the occlusion texture is listed"
+    );
+}
+
+#[test]
+fn displacement_terminal_serializes() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    let info = request_material_data(&state.sender(), "/Root/Tri_disp")
+        .expect("a displacement-only material resolves");
+    assert_eq!(info.surface, None, "Disp authors no surface terminal");
+    let displacement = info
+        .displacement
+        .expect("the displacement terminal serializes");
+    assert_eq!(displacement.scale, Some(0.05f32 as f64));
+    assert_eq!(displacement.file_path, None, "a constant is no texture");
+}
+
+#[test]
+fn volume_terminal_flags_has_volume() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "materials_full.usda");
+
+    let info = request_material_data(&state.sender(), "/Root/Tri_vol")
+        .expect("a volume-only material resolves");
+    assert!(info.has_volume, "the volume terminal answers Some");
+    assert_eq!(info.surface, None, "Vol authors no surface terminal");
+    assert_eq!(info.displacement, None, "Vol authors no displacement");
 }
 
 // Batched material fetch (Phase 2 Task 3): one channel round trip for many
