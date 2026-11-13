@@ -176,6 +176,31 @@ mod tests {
     }
 
     #[test]
+    fn get_launch_options_payload_shape_is_stable() {
+        let payload = LaunchOptionsJson {
+            files: args(&["a.usd"]),
+            camera_position: Some([1.0, 2.0, 3.0]),
+            camera_target: Some([4.0, 5.0, 6.0]),
+        };
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap(),
+            serde_json::json!({
+                "files": ["a.usd"],
+                "camera_position": [1.0, 2.0, 3.0],
+                "camera_target": [4.0, 5.0, 6.0],
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(LaunchOptionsJson::default()).unwrap(),
+            serde_json::json!({
+                "files": [],
+                "camera_position": null,
+                "camera_target": null,
+            })
+        );
+    }
+
+    #[test]
     fn parse_launch_unknown_flag_is_an_error_with_usage() {
         let error =
             parse_launch_args(&args(&["--nope", "a.usd"])).expect_err("unknown flag must fail");

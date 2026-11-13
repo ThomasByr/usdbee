@@ -132,6 +132,8 @@ Pass one or more USD files to open them as tabs on startup. `-p` / `--camera-pos
 
 `-h` / `--help` prints the usage line. An unknown option or a malformed coordinate triple prints the usage line and exits with status 1.
 
+On Windows release builds the binary uses the GUI subsystem, so nothing attaches a console: `-h` / `--help` prints nothing and a flag error exits with status 1 silently. Opening files and the camera flags work normally; macOS, Linux and dev builds print as described above.
+
 ## Limitations
 
 [Three.js USD Composer](https://threejs.org/docs/index.html?q=USD#USDComposer) is used as the primary USD parser and renderer. It supports a subset of USD features, and some complex USD files may not render correctly, throw errors, or fail to load. The application is primarily intended for simple USD files (.usdz, .usd, .usda) containing basic geometry and materials.
