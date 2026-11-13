@@ -32,6 +32,9 @@ export function tabDisplayName(tab: Pick<TabRecord, "root_identifier">): string 
 export const tabsState = $state({
   stages: [] as TabRecord[],
   activeId: 0,
+  // Previously active tab ids, newest first (cap 10); the palette's
+  // "last tab" command reads it.
+  recentIds: [] as number[],
   // The tab awaiting the close-confirm modal; null when none asks.
   pendingCloseId: null as number | null,
   pendingCloseDirty: 0,
@@ -147,6 +150,12 @@ export const tabsState = $state({
   async setActive(id: number): Promise<void> {
     const tab = this.find(id);
     if (!tab || id === this.activeId) return;
+    if (this.activeId !== 0) {
+      this.recentIds = [this.activeId, ...this.recentIds.filter((recent) => recent !== this.activeId)].slice(
+        0,
+        10,
+      );
+    }
     const generation = ++activationGeneration;
     this.activeId = id;
     loadOrchestrator.rootFile = tab.root_file;
@@ -155,6 +164,30 @@ export const tabsState = $state({
     if (generation !== activationGeneration || id !== this.activeId) return;
     void editState.refresh();
     await this.loadScene();
+  },
+
+  // Palette tab commands: jump back to the last active tab, cycle through
+  // the tabs, reorder the active tab. History ids of closed tabs are
+  // pruned here, so nothing has to be kept in sync on close.
+  async activateRecent(): Promise<void> {
+    this.recentIds = this.recentIds.filter((id) => this.find(id));
+    const id = this.recentIds[0];
+    if (id === undefined) return;
+    await this.setActive(id);
+  },
+
+  async cycleTab(delta: 1 | -1): Promise<void> {
+    const count = this.stages.length;
+    const index = this.stages.findIndex((tab) => tab.stage_id === this.activeId);
+    if (count < 2 || index === -1) return;
+    await this.setActive(this.stages[(index + delta + count) % count].stage_id);
+  },
+
+  // moveTab clamps the target slot, so the ends are a no-op.
+  swapTab(delta: 1 | -1): void {
+    const index = this.stages.findIndex((tab) => tab.stage_id === this.activeId);
+    if (index === -1) return;
+    this.moveTab(this.activeId, index + delta);
   },
 
   // The tab close x: a stage with dirty layers — or the active stage with

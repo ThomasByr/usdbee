@@ -127,6 +127,7 @@ beforeEach(async () => {
 
   tabsState.stages = [];
   tabsState.activeId = 0;
+  tabsState.recentIds = [];
   tabsState.pendingCloseId = null;
   tabsState.pendingCloseDirty = 0;
   tabsState.loadScene = vi.fn().mockResolvedValue(undefined);
@@ -558,6 +559,108 @@ describe("moveTab", () => {
 
     tabsState.moveTab(1, 0);
     expect(tabsState.stages.map((t) => t.stage_id)).toEqual([1, 2, 3]);
+  });
+});
+
+describe("tab history", () => {
+  it("pushes the previously active tab to the front of the history", async () => {
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    await openTab("/scene/c.usda");
+    expect(tabsState.recentIds).toEqual([2, 1]);
+
+    await tabsState.setActive(1);
+
+    expect(tabsState.recentIds).toEqual([3, 2, 1]);
+  });
+
+  it("caps the history at ten entries", async () => {
+    for (let i = 1; i <= 12; i += 1) await openTab(`/scene/${i}.usda`);
+
+    expect(tabsState.recentIds).toEqual([11, 10, 9, 8, 7, 6, 5, 4, 3, 2]);
+  });
+});
+
+describe("activateRecent", () => {
+  it("reactivates the previously active tab", async () => {
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    (tabsState.loadScene as ReturnType<typeof vi.fn>).mockClear();
+
+    await tabsState.activateRecent();
+
+    expect(tabsState.activeId).toBe(1);
+    expect(stageState.stageInfo?.stage_id).toBe(1);
+    expect(tabsState.loadScene).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips ids of tabs that no longer exist", async () => {
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    await openTab("/scene/c.usda");
+    expect(tabsState.recentIds).toEqual([2, 1]);
+    await tabsState.closeTab(2);
+
+    await tabsState.activateRecent();
+
+    expect(tabsState.activeId).toBe(1);
+    expect(tabsState.recentIds).not.toContain(2);
+  });
+
+  it("no-ops when the history is empty", async () => {
+    await openTab("/scene/a.usda");
+    (tabsState.loadScene as ReturnType<typeof vi.fn>).mockClear();
+
+    await tabsState.activateRecent();
+
+    expect(tabsState.activeId).toBe(1);
+    expect(tabsState.loadScene).not.toHaveBeenCalled();
+  });
+});
+
+describe("cycleTab", () => {
+  it("wraps forward and backward through the tabs", async () => {
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    await openTab("/scene/c.usda");
+
+    await tabsState.cycleTab(1);
+    expect(tabsState.activeId).toBe(1);
+
+    await tabsState.cycleTab(-1);
+    expect(tabsState.activeId).toBe(3);
+  });
+
+  it("no-ops with fewer than two tabs", async () => {
+    await openTab("/scene/a.usda");
+    (tabsState.loadScene as ReturnType<typeof vi.fn>).mockClear();
+
+    await tabsState.cycleTab(1);
+
+    expect(tabsState.activeId).toBe(1);
+    expect(tabsState.loadScene).not.toHaveBeenCalled();
+  });
+});
+
+describe("swapTab", () => {
+  it("moves the active tab one slot and clamps at the ends", async () => {
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    await openTab("/scene/c.usda");
+    await tabsState.setActive(1);
+
+    tabsState.swapTab(-1);
+    expect(tabsState.stages.map((t) => t.stage_id)).toEqual([1, 2, 3]);
+
+    tabsState.swapTab(1);
+    expect(tabsState.stages.map((t) => t.stage_id)).toEqual([2, 1, 3]);
+
+    tabsState.swapTab(1);
+    expect(tabsState.stages.map((t) => t.stage_id)).toEqual([2, 3, 1]);
+
+    tabsState.swapTab(1);
+    expect(tabsState.stages.map((t) => t.stage_id)).toEqual([2, 3, 1]);
+    expect(tabsState.activeId).toBe(1);
   });
 });
 
