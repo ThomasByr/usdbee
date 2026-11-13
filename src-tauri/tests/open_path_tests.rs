@@ -106,6 +106,59 @@ fn tilde_open_reports_the_same_expanded_path_everywhere() {
 }
 
 #[test]
+fn relative_open_reports_the_same_absolute_path_everywhere() {
+    // A CLI launch passes the file as typed, often relative. OpenUSD reports
+    // the root layer identifier as absolute, so the events must be absolute
+    // too: the frontend compares root_layer against usd-load-start's path and
+    // drops the stage-opened event (silently, with no tab) on a mismatch.
+    let absolute = fixture("basic.usda");
+    let cwd = std::env::current_dir().expect("the test host must have a cwd");
+    let relative = pathdiff::diff_paths(&absolute, &cwd).expect("a relative path is derivable");
+    assert!(
+        relative.is_relative(),
+        "the test needs a relative input path"
+    );
+
+    let app = mock_app();
+    let start: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let sink = start.clone();
+    app.listen("usd-load-start", move |event| {
+        let payload: serde_json::Value =
+            serde_json::from_str(event.payload()).expect("the payload must be a JSON path");
+        *sink.lock().unwrap() = payload.as_str().map(str::to_string);
+    });
+    let scene_root: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let sink = scene_root.clone();
+    app.listen("usd-scene-loaded", move |event| {
+        let payload: serde_json::Value =
+            serde_json::from_str(event.payload()).expect("the payload must be the scene JSON");
+        *sink.lock().unwrap() = payload["root_file"].as_str().map(str::to_string);
+    });
+
+    let info = tauri::async_runtime::block_on(open_usd_file_path(
+        app.handle().clone(),
+        relative.to_string_lossy().into_owned(),
+    ))
+    .expect("a relative path should open through the path command");
+
+    let expected = absolute.to_string_lossy().into_owned();
+    assert_eq!(
+        info.root_layer, expected,
+        "the opened stage must carry the absolute path, not the relative input"
+    );
+    assert_eq!(
+        start.lock().unwrap().as_deref(),
+        Some(expected.as_str()),
+        "usd-load-start must carry the same absolute path the stage reports"
+    );
+    assert_eq!(
+        scene_root.lock().unwrap().as_deref(),
+        Some(expected.as_str()),
+        "the scene's root_file must be the same absolute path"
+    );
+}
+
+#[test]
 fn extracts_and_opens_usdz_via_path_command() {
     let dir = tempfile::tempdir().expect("temp dir should be created");
     let source = fixture("basic.usda");

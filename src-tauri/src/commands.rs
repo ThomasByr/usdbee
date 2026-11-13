@@ -255,8 +255,12 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
     path: String,
 ) -> Result<StageInfo, String> {
     // `~` is expanded once, here: the events, the scene's root_file, the stage
-    // open and the returned StageInfo must all name the same path.
+    // open and the returned StageInfo must all name the same path. A relative
+    // argument (a CLI launch) is made absolute for the same reason: OpenUSD
+    // reports the root layer identifier as absolute, so the frontend's
+    // root comparison would drop this open's own stage-opened event.
     let file_path = expand_home(&path);
+    let file_path = std::path::absolute(&file_path).unwrap_or(file_path);
     let mut path = file_path.to_string_lossy().into_owned();
 
     app.emit("usd-load-start", path.clone())
