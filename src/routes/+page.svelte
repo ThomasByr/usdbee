@@ -42,6 +42,9 @@
   import type { GizmoMode } from "$lib/render/xformOps";
   import { stageModalErrorLines } from "$lib/stage/modalErrors";
   import Viewport from "$lib/components/Viewport.svelte";
+  import CommandPalette from "$lib/components/CommandPalette.svelte";
+  import { paletteState } from "$lib/state/commandPaletteState.svelte";
+  import { matchesBinding } from "$lib/utils/keys";
   import { RendererKit } from "$lib/three/RendererKit.svelte";
 
   // State
@@ -190,6 +193,14 @@
 
     // Global keyboard shortcuts
     const handleGlobalKeydown = (e: KeyboardEvent) => {
+      // The palette owns the keyboard while it is open: the camera, gizmo and
+      // file shortcuts must stay inert behind the overlay.
+      if (paletteState.open) return;
+      if (matchesBinding(e, controlsState.keybindings.commandPalette)) {
+        e.preventDefault();
+        paletteState.openPalette();
+        return;
+      }
       if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA")
         return;
       viewer.keysPressed.add(e.key.toLowerCase());
@@ -590,3 +601,5 @@
     </div>
   </Modal>
 {/if}
+
+<CommandPalette />

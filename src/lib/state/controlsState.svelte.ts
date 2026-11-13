@@ -18,6 +18,7 @@ export const controlsState = $state({
     gizmoTranslate: "1",
     gizmoRotate: "2",
     gizmoScale: "3",
+    commandPalette: "mod+p",
   },
 });
 
