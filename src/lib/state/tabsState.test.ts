@@ -519,6 +519,32 @@ describe("setActive", () => {
     expect(applyCamera).toHaveBeenCalledTimes(1);
     expect(applyCamera).toHaveBeenLastCalledWith(null);
   });
+
+  it("does not capture the viewport while a switch is still loading", async () => {
+    const viewA: TabCameraView = { position: [1, 2, 3], target: [0, 0, 0], fov: 40 };
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    await openTab("/scene/c.usda");
+    tabsState.readCamera = vi.fn(() => viewA);
+    const applyCamera = vi.fn();
+    tabsState.applyCamera = applyCamera;
+    let release!: () => void;
+    (tabsState.loadScene as ReturnType<typeof vi.fn>).mockClear();
+    (tabsState.loadScene as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+
+    const first = tabsState.setActive(1);
+    await vi.waitFor(() => expect(tabsState.loadScene).toHaveBeenCalledTimes(1));
+    // The viewport still shows tab 3: this view is not tab 1's.
+    await tabsState.setActive(2);
+    release();
+    await first;
+
+    await tabsState.setActive(1);
+
+    expect(applyCamera).toHaveBeenLastCalledWith(null);
+  });
 });
 
 describe("closeTab", () => {
@@ -761,6 +787,24 @@ describe("swapTab", () => {
     tabsState.swapTab(1);
     expect(tabsState.stages.map((t) => t.stage_id)).toEqual([2, 3, 1]);
     expect(tabsState.activeId).toBe(1);
+  });
+});
+
+describe("refreshSummaries", () => {
+  it("drops the camera of a stage that vanished from the backend list", async () => {
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    tabsState.cameras.set(2, { position: [1, 2, 3], target: [0, 0, 0], fov: 40 });
+    mockedInvoke.mockImplementation((cmd, args) =>
+      cmd === "list_stages"
+        ? Promise.resolve([{ stage_id: 1, root_identifier: "/scene/a.usda", dirty_count: 0 }])
+        : Promise.resolve(commands(cmd, (args ?? {}) as Record<string, unknown>)),
+    );
+
+    await tabsState.refreshSummaries();
+
+    expect(tabsState.stages.map((tab) => tab.stage_id)).toEqual([1]);
+    expect(tabsState.cameras.has(2)).toBe(false);
   });
 });
 

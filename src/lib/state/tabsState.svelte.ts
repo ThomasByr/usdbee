@@ -16,6 +16,10 @@ import type { StageInfo, StageSummary } from "../stage/types";
 // time.
 
 let activationGeneration = 0;
+// The number of setActive calls awaiting their scene rebuild. The viewport
+// still shows the previous scene until loadScene returns, so a capture taken
+// while one is in flight would file that view under the wrong tab.
+let activateInFlight = 0;
 
 export interface TabRecord extends StageSummary {
   stage_info: StageInfo;
@@ -76,7 +80,11 @@ export const tabsState = $state({
   async refreshSummaries(): Promise<void> {
     try {
       const summaries = await invoke<StageSummary[]>("list_stages");
-      this.stages = this.stages.filter((tab) => summaries.some((s) => s.stage_id === tab.stage_id));
+      const keptIds = new Set(summaries.map((summary) => summary.stage_id));
+      for (const tab of this.stages) {
+        if (!keptIds.has(tab.stage_id)) this.forgetCamera(tab.stage_id);
+      }
+      this.stages = this.stages.filter((tab) => keptIds.has(tab.stage_id));
       for (const tab of this.stages) {
         const summary = summaries.find((s) => s.stage_id === tab.stage_id);
         if (summary) {
@@ -184,19 +192,28 @@ export const tabsState = $state({
         0,
         10,
       );
-      const view = this.readCamera();
-      if (view) this.cameras.set(this.activeId, view);
+      // Skip the capture while a switch loads: readCamera would return the
+      // in-flight tab's view, not this tab's.
+      if (activateInFlight === 0) {
+        const view = this.readCamera();
+        if (view) this.cameras.set(this.activeId, view);
+      }
     }
-    const generation = ++activationGeneration;
-    this.activeId = id;
-    loadOrchestrator.rootFile = tab.root_file;
-    loadOrchestrator.dependencies = tab.dependencies;
-    await stageState.adoptOpenedStage(tab.stage_info);
-    if (generation !== activationGeneration || id !== this.activeId) return;
-    void editState.refresh();
-    await this.loadScene();
-    if (generation !== activationGeneration || id !== this.activeId) return;
-    this.applyCamera(this.cameras.get(id) ?? null);
+    activateInFlight += 1;
+    try {
+      const generation = ++activationGeneration;
+      this.activeId = id;
+      loadOrchestrator.rootFile = tab.root_file;
+      loadOrchestrator.dependencies = tab.dependencies;
+      await stageState.adoptOpenedStage(tab.stage_info);
+      if (generation !== activationGeneration || id !== this.activeId) return;
+      void editState.refresh();
+      await this.loadScene();
+      if (generation !== activationGeneration || id !== this.activeId) return;
+      this.applyCamera(this.cameras.get(id) ?? null);
+    } finally {
+      activateInFlight -= 1;
+    }
   },
 
   // Palette tab commands: jump back to the last active tab, cycle through
@@ -260,7 +277,7 @@ export const tabsState = $state({
     const index = this.stages.findIndex((tab) => tab.stage_id === id);
     if (index === -1) return;
     this.stages.splice(index, 1);
-    this.cameras.delete(id);
+    this.forgetCamera(id);
     if (id !== this.activeId) return;
     // Activate the removed tab's neighbor (the next one, else the
     // previous); no tabs left means the empty no-stage view.
