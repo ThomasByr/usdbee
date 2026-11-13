@@ -24,6 +24,7 @@
   import type { GizmoMode } from "$lib/render/xformOps";
   import type { RendererKit } from "$lib/three/RendererKit.svelte";
   import { controlsState } from "$lib/state/controlsState.svelte";
+  import { consumeLaunchOptions } from "$lib/commands/launch";
   import { setBridgeViewer } from "$lib/commands/viewerRef";
   import { formatTimeline, formatTimelineEnd, playbackState } from "$lib/state/playbackState.svelte";
   import * as THREE from "three";
@@ -163,6 +164,10 @@
     // The palette runs the same commands the dev bridge does and has no
     // viewer of its own: publish the live one for the whole mount.
     setBridgeViewer(viewer);
+
+    // CLI files open as tabs and the camera options pin the view; it waits
+    // for the viewer above and runs at most once per app start.
+    void consumeLaunchOptions();
 
     // Dev-only MCP bridge. The dynamic import sits behind the same DEV flag
     // the bridge's own gate uses, so a release bundle carries neither.

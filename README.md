@@ -116,6 +116,22 @@ curl -L -o assets/CarbonFrameBike.usdz https://github.com/usd-wg/assets/raw/refs
 
 Then open the `assets/CarbonFrameBike.usdz` file in USDBEE.
 
+### Command line
+
+```
+usage: usdbee [-h] [-p x,y,z | --camera-position x,y,z] [-t x,y,z | --camera-target x,y,z] [FILE...]
+```
+
+Pass one or more USD files to open them as tabs on startup. `-p` / `--camera-position` sets the camera location and `-t` / `--camera-target` sets the point it looks at, in world units. Both take three numbers, written `1,2,3` or `1 2 3`. The view is pinned, so it survives a scene rebuild.
+
+```bash
+./usdbee scene.usda
+./usdbee -p 4,3,6 -t 0,0,0 scene.usda other.usdz
+./usdbee --camera-position 4 3 6 scene.usda
+```
+
+`-h` / `--help` prints the usage line. An unknown option or a malformed coordinate triple prints the usage line and exits with status 1.
+
 ## Limitations
 
 [Three.js USD Composer](https://threejs.org/docs/index.html?q=USD#USDComposer) is used as the primary USD parser and renderer. It supports a subset of USD features, and some complex USD files may not render correctly, throw errors, or fail to load. The application is primarily intended for simple USD files (.usdz, .usd, .usda) containing basic geometry and materials.

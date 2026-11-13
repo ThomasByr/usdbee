@@ -1,3 +1,4 @@
+mod cli;
 mod commands;
 mod fetcher;
 pub use commands::{open_usd_file_path, LoadGate, OPEN_IN_FLIGHT_MESSAGE};
@@ -42,11 +43,25 @@ fn build_system_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if cli::wants_help(&args) {
+        println!("{}", cli::USAGE);
+        std::process::exit(0);
+    }
+    let launch_options = match cli::parse_launch_args(&args) {
+        Ok(options) => options,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    };
+
     tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
+        .setup(move |app| {
+            app.manage(launch_options);
             app.manage(LoadGate::default());
             let handle = app.handle().clone();
             app.manage(stage::StageState::new(std::sync::Arc::new(
@@ -125,7 +140,8 @@ pub fn run() {
             stage::import_layer_text,
             stage::list_stage_layers,
             omniverse::set_omniverse_url,
-            omniverse::get_omniverse_url
+            omniverse::get_omniverse_url,
+            cli::get_launch_options
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

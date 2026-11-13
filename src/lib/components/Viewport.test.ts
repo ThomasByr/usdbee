@@ -74,6 +74,7 @@ vi.mock("$lib/state/editState.svelte", () => ({
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: () => Promise.resolve(() => {}) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("$lib/commands/launch", () => ({ consumeLaunchOptions: vi.fn(async () => {}) }));
 
 import Viewport from "./Viewport.svelte";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
