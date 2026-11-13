@@ -5,6 +5,100 @@
   import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
   import Icon from "./icons/Icon.svelte";
   import Modal from "./Modal.svelte";
+  import { displacedShift, dragTargetIndex, type TabRect } from "./tabDrag";
+
+  // Drag state lives on the bar, not the chips: the chips move in the DOM on
+  // commit, the bar does not, so pointer capture cannot be lost to a reorder.
+  interface DragState {
+    id: number;
+    from: number;
+    startX: number;
+    dx: number;
+    width: number;
+    rects: TabRect[];
+    to: number;
+    moved: boolean;
+  }
+
+  // Below this many pixels the gesture is a click, not a drag.
+  const DRAG_THRESHOLD = 4;
+
+  let drag = $state<DragState | null>(null);
+  let bar = $state<HTMLDivElement | null>(null);
+
+  function chipStyle(index: number, id: number): string {
+    if (!drag || !drag.moved) return "";
+    if (id === drag.id) return `transform: translateX(${drag.dx}px);`;
+    const shift = displacedShift(index, drag.from, drag.to, drag.width);
+    return shift === 0 ? "" : `transform: translateX(${shift}px);`;
+  }
+
+  function chipFrom(target: EventTarget | null): HTMLElement | null {
+    const el = target instanceof Element ? target.closest<HTMLElement>(".stage-tab") : null;
+    return el?.dataset.stageId === undefined ? null : el;
+  }
+
+  function onPointerDown(e: PointerEvent): void {
+    const chip = chipFrom(e.target);
+    if (!chip || !bar) return;
+    const id = Number(chip.dataset.stageId);
+    // Middle click closes through the guarded path (dirty tabs ask first).
+    if (e.button === 1) {
+      e.preventDefault();
+      void tabsState.closeTab(id);
+      return;
+    }
+    if (e.button !== 0) return;
+    // The close x is its own control; a press there must not start a drag.
+    if (e.target instanceof Element && e.target.closest(".stage-tab-close")) return;
+    // Measured once, pre-transform: live re-measuring would feed the
+    // animation back into the maths.
+    const rects = Array.from(bar.querySelectorAll<HTMLElement>(".stage-tab")).map((el) => {
+      const rect = el.getBoundingClientRect();
+      return { left: rect.left, width: rect.width };
+    });
+    const from = tabsState.stages.findIndex((tab) => tab.stage_id === id);
+    if (from === -1) return;
+    drag = {
+      id,
+      from,
+      startX: e.clientX,
+      dx: 0,
+      width: rects[from]?.width ?? 0,
+      rects,
+      to: from,
+      moved: false,
+    };
+    bar.setPointerCapture?.(e.pointerId);
+  }
+
+  function onPointerMove(e: PointerEvent): void {
+    if (!drag) return;
+    const dx = e.clientX - drag.startX;
+    if (!drag.moved && Math.abs(dx) < DRAG_THRESHOLD) return;
+    drag.moved = true;
+    drag.dx = dx;
+    drag.to = dragTargetIndex(drag.rects, e.clientX);
+  }
+
+  function onPointerUp(e: PointerEvent): void {
+    if (!drag) return;
+    const { id, to, moved } = drag;
+    // Clear before the splice so the transforms drop in the same flush as the
+    // reorder: the chip lands in its new slot without a jump.
+    drag = null;
+    releaseCapture(e.pointerId);
+    if (moved) tabsState.moveTab(id, to);
+  }
+
+  function onPointerCancel(e: PointerEvent): void {
+    drag = null;
+    releaseCapture(e.pointerId);
+  }
+
+  function releaseCapture(pointerId: number): void {
+    if (bar?.hasPointerCapture?.(pointerId)) bar.releasePointerCapture(pointerId);
+  }
 
   // The active tab's dot reads the live edit state (a save cleans it
   // immediately, without waiting for a summary refresh); inactive tabs
@@ -15,9 +109,32 @@
   }
 </script>
 
-<div class="stage-tab-bar" role="tablist" aria-label="Stage tabs">
-  {#each tabsState.stages as tab (tab.stage_id)}
-    <div class="stage-tab" class:active={tab.stage_id === tabsState.activeId}>
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape" && drag?.moved) drag = null;
+  }}
+/>
+
+<div
+  class="stage-tab-bar"
+  class:dragging={drag?.moved}
+  role="tablist"
+  aria-label="Stage tabs"
+  tabindex="-1"
+  bind:this={bar}
+  onpointerdown={onPointerDown}
+  onpointermove={onPointerMove}
+  onpointerup={onPointerUp}
+  onpointercancel={onPointerCancel}
+>
+  {#each tabsState.stages as tab, i (tab.stage_id)}
+    <div
+      class="stage-tab"
+      class:active={tab.stage_id === tabsState.activeId}
+      class:drag-source={drag?.id === tab.stage_id}
+      data-stage-id={tab.stage_id}
+      style={chipStyle(i, tab.stage_id)}
+    >
       <button
         class="stage-tab-btn"
         role="tab"
@@ -145,6 +262,22 @@
     padding: 4px 12px;
     font-size: 15px;
     cursor: pointer;
+  }
+
+  .stage-tab-bar.dragging {
+    user-select: none;
+    cursor: grabbing;
+  }
+
+  .stage-tab-bar.dragging .stage-tab {
+    transition: transform 150ms ease;
+  }
+
+  .stage-tab-bar.dragging .stage-tab.drag-source {
+    transition: none;
+    z-index: 1;
+    box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+    opacity: 0.9;
   }
 
   .stage-tab-add:hover {
