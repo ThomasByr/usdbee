@@ -13,8 +13,10 @@
     id: number;
     from: number;
     startX: number;
+    pointerId: number;
     dx: number;
-    width: number;
+    // Measured when the drag starts, pre-transform: live re-measuring would
+    // feed the animation back into the maths.
     rects: TabRect[];
     to: number;
     moved: boolean;
@@ -27,10 +29,18 @@
   let bar = $state<HTMLDivElement | null>(null);
 
   function chipStyle(index: number, id: number): string {
-    if (!drag || !drag.moved) return "";
+    if (!drag?.moved) return "";
     if (id === drag.id) return `transform: translateX(${drag.dx}px);`;
-    const shift = displacedShift(index, drag.from, drag.to, drag.width);
+    const shift = displacedShift(index, drag.from, drag.to, drag.rects[drag.from]?.width ?? 0);
     return shift === 0 ? "" : `transform: translateX(${shift}px);`;
+  }
+
+  function measureChips(): TabRect[] {
+    if (!bar) return [];
+    return Array.from(bar.querySelectorAll<HTMLElement>(".stage-tab")).map((chip) => {
+      const rect = chip.getBoundingClientRect();
+      return { left: rect.left, width: rect.width };
+    });
   }
 
   function chipFrom(target: EventTarget | null): HTMLElement | null {
@@ -40,7 +50,7 @@
 
   function onPointerDown(e: PointerEvent): void {
     const chip = chipFrom(e.target);
-    if (!chip || !bar) return;
+    if (!chip) return;
     const id = Number(chip.dataset.stageId);
     // Middle click closes through the guarded path (dirty tabs ask first).
     if (e.button === 1) {
@@ -51,33 +61,27 @@
     if (e.button !== 0) return;
     // The close x is its own control; a press there must not start a drag.
     if (e.target instanceof Element && e.target.closest(".stage-tab-close")) return;
-    // Measured once, pre-transform: live re-measuring would feed the
-    // animation back into the maths.
-    const rects = Array.from(bar.querySelectorAll<HTMLElement>(".stage-tab")).map((el) => {
-      const rect = el.getBoundingClientRect();
-      return { left: rect.left, width: rect.width };
-    });
+    // Nothing to reorder, and a lone chip must not lift off its slot.
+    if (tabsState.stages.length < 2) return;
     const from = tabsState.stages.findIndex((tab) => tab.stage_id === id);
     if (from === -1) return;
-    drag = {
-      id,
-      from,
-      startX: e.clientX,
-      dx: 0,
-      width: rects[from]?.width ?? 0,
-      rects,
-      to: from,
-      moved: false,
-    };
+    drag = { id, from, startX: e.clientX, pointerId: e.pointerId, dx: 0, rects: [], to: from, moved: false };
   }
 
   function onPointerMove(e: PointerEvent): void {
     if (!drag) return;
+    // The release happened off-window and its pointerup never arrived: drop the
+    // gesture instead of resuming it on the next hover.
+    if (e.buttons === 0) {
+      cancelDrag();
+      return;
+    }
     const dx = e.clientX - drag.startX;
     // Capture only once this is a drag: capturing on pointerdown retargets the
     // pointerup, and the click with it, so a plain click would stop activating.
     if (!drag.moved) {
       if (Math.abs(dx) < DRAG_THRESHOLD) return;
+      drag.rects = measureChips();
       drag.moved = true;
       bar?.setPointerCapture?.(e.pointerId);
     }
@@ -85,19 +89,22 @@
     drag.to = dragTargetIndex(drag.rects, e.clientX);
   }
 
+  // Pointer up/cancel live on the window: a lost capture (alt-tab, a webview
+  // without pointer capture) must still end the gesture.
   function onPointerUp(e: PointerEvent): void {
     if (!drag) return;
-    const { id, to, moved } = drag;
+    const { id, to, moved, pointerId } = drag;
     // Clear before the splice so the transforms drop in the same flush as the
     // reorder: the chip lands in its new slot without a jump.
     drag = null;
-    releaseCapture(e.pointerId);
+    releaseCapture(pointerId);
     if (moved) tabsState.moveTab(id, to);
   }
 
-  function onPointerCancel(e: PointerEvent): void {
+  function cancelDrag(): void {
+    const pointerId = drag?.pointerId;
     drag = null;
-    releaseCapture(e.pointerId);
+    if (pointerId !== undefined) releaseCapture(pointerId);
   }
 
   function releaseCapture(pointerId: number): void {
@@ -115,8 +122,10 @@
 
 <svelte:window
   onkeydown={(e) => {
-    if (e.key === "Escape" && drag?.moved) drag = null;
+    if (e.key === "Escape") cancelDrag();
   }}
+  onpointerup={onPointerUp}
+  onpointercancel={cancelDrag}
 />
 
 <div
@@ -128,8 +137,6 @@
   bind:this={bar}
   onpointerdown={onPointerDown}
   onpointermove={onPointerMove}
-  onpointerup={onPointerUp}
-  onpointercancel={onPointerCancel}
 >
   {#each tabsState.stages as tab, i (tab.stage_id)}
     <div

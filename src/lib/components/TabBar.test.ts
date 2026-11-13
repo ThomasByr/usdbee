@@ -116,6 +116,7 @@ describe("TabBar chrome", () => {
 
   it("reorders on release past a neighbour and clears the transforms", async () => {
     tabsState.stages.push(tabRecord, { ...tabRecord, stage_id: 2 }, { ...tabRecord, stage_id: 3 });
+    tabsState.activeId = 1;
     instance = mount(TabBar, { target: document.body });
     await tick();
 
@@ -124,13 +125,78 @@ describe("TabBar chrome", () => {
     pointer(chips[0], "pointerdown", { clientX: 10 });
     pointer(chips[0], "pointermove", { clientX: 250 });
     await tick();
-    expect(document.querySelector<HTMLElement>(".stage-tab-bar")!.classList.contains("dragging")).toBe(true);
 
-    pointer(chips[0], "pointerup", { clientX: 250 });
+    const bar = document.querySelector<HTMLElement>(".stage-tab-bar")!;
+    expect(bar.classList.contains("dragging")).toBe(true);
+    // The dragged chip tracks the cursor; the crossed chips open the gap.
+    expect(chips[0].style.transform).toBe("translateX(240px)");
+    expect(chips[1].style.transform).toBe("translateX(-100px)");
+    expect(chips[2].style.transform).toBe("translateX(-100px)");
+
+    pointer(document.body, "pointerup", { clientX: 250, buttons: 0 });
     await tick();
 
     expect(tabsState.stages.map((tab) => tab.stage_id)).toEqual([2, 3, 1]);
-    const moved = document.querySelectorAll<HTMLElement>(".stage-tab");
-    expect(moved[1].style.transform).toBe("");
+    // The drag must not steal the active tab.
+    expect(tabsState.activeId).toBe(1);
+    document.querySelectorAll<HTMLElement>(".stage-tab").forEach((chip) => {
+      expect(chip.style.transform).toBe("");
+    });
+    expect(document.querySelector<HTMLElement>(".stage-tab-bar")!.classList.contains("dragging")).toBe(false);
+  });
+
+  it("treats a press that stays under the drag threshold as a click", async () => {
+    tabsState.stages.push(tabRecord, { ...tabRecord, stage_id: 2 });
+    instance = mount(TabBar, { target: document.body });
+    await tick();
+
+    const chips = document.querySelectorAll<HTMLElement>(".stage-tab");
+    stubRects(chips);
+    pointer(chips[0], "pointerdown", { clientX: 10 });
+    pointer(chips[0], "pointermove", { clientX: 12 });
+    await tick();
+
+    expect(document.querySelector<HTMLElement>(".stage-tab-bar")!.classList.contains("dragging")).toBe(false);
+    expect(chips[0].style.transform).toBe("");
+
+    pointer(document.body, "pointerup", { clientX: 12, buttons: 0 });
+    await tick();
+    expect(tabsState.stages.map((tab) => tab.stage_id)).toEqual([1, 2]);
+  });
+
+  it("does not lift a lone tab", async () => {
+    tabsState.stages.push(tabRecord);
+    instance = mount(TabBar, { target: document.body });
+    await tick();
+
+    const chips = document.querySelectorAll<HTMLElement>(".stage-tab");
+    stubRects(chips);
+    pointer(chips[0], "pointerdown", { clientX: 10 });
+    pointer(chips[0], "pointermove", { clientX: 300 });
+    await tick();
+
+    expect(document.querySelector<HTMLElement>(".stage-tab-bar")!.classList.contains("dragging")).toBe(false);
+    expect(chips[0].classList.contains("drag-source")).toBe(false);
+    expect(chips[0].style.transform).toBe("");
+  });
+
+  it("drops a drag whose button was released off-window", async () => {
+    tabsState.stages.push(tabRecord, { ...tabRecord, stage_id: 2 });
+    instance = mount(TabBar, { target: document.body });
+    await tick();
+
+    const chips = document.querySelectorAll<HTMLElement>(".stage-tab");
+    stubRects(chips);
+    pointer(chips[0], "pointerdown", { clientX: 10 });
+    pointer(chips[0], "pointermove", { clientX: 150 });
+    await tick();
+    expect(document.querySelector<HTMLElement>(".stage-tab-bar")!.classList.contains("dragging")).toBe(true);
+
+    // A bare hover: no buttons pressed, so the gesture was never released here.
+    pointer(chips[0], "pointermove", { clientX: 160, buttons: 0 });
+    await tick();
+
+    expect(document.querySelector<HTMLElement>(".stage-tab-bar")!.classList.contains("dragging")).toBe(false);
+    expect(tabsState.stages.map((tab) => tab.stage_id)).toEqual([1, 2]);
   });
 });
