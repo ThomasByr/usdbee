@@ -15,7 +15,6 @@ vi.mock("$lib/commands/dispatch", () => ({
 }));
 
 import CommandPalette from "./CommandPalette.svelte";
-import { invoke } from "@tauri-apps/api/core";
 import { COMMANDS, type Command } from "$lib/commands/registry.mjs";
 import { paletteState } from "$lib/state/commandPaletteState.svelte";
 
@@ -63,56 +62,5 @@ describe("palette overlay dismissal", () => {
 
     expect(paletteState.open).toBe(true);
     expect(paletteState.context?.values).toEqual({ query: "", limit: "" });
-  });
-});
-
-describe("palette path listing cache", () => {
-  const entries = [
-    { name: "Models", is_dir: true },
-    { name: "model.usda", is_dir: false },
-    { name: "bike.usda", is_dir: false },
-  ];
-
-  function rows(): string[] {
-    return [...document.querySelectorAll(".suggestion")].map((el) => el.textContent?.trim() ?? "");
-  }
-
-  async function settle(): Promise<void> {
-    await tick();
-    await vi.advanceTimersByTimeAsync(200);
-    await tick();
-  }
-
-  beforeEach(async () => {
-    vi.useFakeTimers();
-    vi.mocked(invoke).mockResolvedValue({ entries });
-    paletteState.startContext(command("load_scene"));
-    await settle();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("lists a directory once the debounce elapses", async () => {
-    expect(rows()).toEqual(["~/Models/", "~/model.usda", "~/bike.usda"]);
-  });
-
-  it("filters the cached listing with no further call", async () => {
-    paletteState.setValue("path", "~/mod");
-    await tick();
-
-    expect(rows()).toEqual(["~/Models/", "~/model.usda"]);
-    expect(vi.mocked(invoke)).toHaveBeenCalledTimes(1);
-  });
-
-  it("asks again when the typed path enters another directory", async () => {
-    paletteState.setValue("path", "~/Models/");
-    await settle();
-
-    expect(vi.mocked(invoke)).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(invoke)).toHaveBeenLastCalledWith("suggest_dir_entries", {
-      prefix: "~/Models/",
-    });
   });
 });

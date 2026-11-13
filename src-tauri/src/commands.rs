@@ -562,15 +562,7 @@ fn read_dir_entries(dir: &Path) -> std::io::Result<Vec<(String, bool)>> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
-        // Most filesystems report the type in readdir, so only a symlink pays
-        // a stat. `path().is_dir()` stats every entry.
-        let is_dir = match entry.file_type() {
-            Ok(file_type) if file_type.is_symlink() => {
-                entry.metadata().map(|meta| meta.is_dir()).unwrap_or(false)
-            }
-            Ok(file_type) => file_type.is_dir(),
-            Err(_) => false,
-        };
+        let is_dir = entry.path().is_dir();
         entries.push((entry.file_name().to_string_lossy().into_owned(), is_dir));
     }
     Ok(entries)
@@ -583,28 +575,16 @@ fn suggest_dir_entries_inner(
     list_dir: impl Fn(&Path) -> std::io::Result<Vec<(String, bool)>>,
 ) -> SuggestEntries {
     let expanded = expand_home_with(prefix, home);
-    // A trailing partial component is a seed: it must filter before the cap, or
-    // a name past the 500th row can never complete.
-    let seed = if prefix.is_empty() || prefix == "~" || prefix.ends_with(['/', '\\']) {
-        None
-    } else {
+    let dir = if prefix.is_empty() || prefix == "~" || prefix.ends_with(['/', '\\']) {
         expanded
-            .file_name()
-            .map(|name| name.to_string_lossy().to_lowercase())
-    };
-    let dir = match &seed {
-        Some(_) => expanded.parent().map(Path::to_path_buf).unwrap_or_default(),
-        None => expanded,
+    } else {
+        expanded.parent().map(Path::to_path_buf).unwrap_or_default()
     };
 
     let mut entries: Vec<DirEntry> = list_dir(&dir)
         .unwrap_or_default()
         .into_iter()
         .filter(|(name, is_dir)| *is_dir || is_usd_file(name))
-        .filter(|(name, _)| match &seed {
-            Some(seed) => name.to_lowercase().contains(seed),
-            None => true,
-        })
         .map(|(name, is_dir)| DirEntry { name, is_dir })
         .collect();
     entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
@@ -1005,7 +985,7 @@ mod tests {
             ("README", false),
         ];
 
-        let result = suggest_dir_entries_inner("/a/", Path::new("/h"), fake_listing(ENTRIES));
+        let result = suggest_dir_entries_inner("/a/b", Path::new("/h"), fake_listing(ENTRIES));
 
         assert_eq!(
             names(&result),
@@ -1028,7 +1008,7 @@ mod tests {
             ("aaa.usd", false),
         ];
 
-        let result = suggest_dir_entries_inner("/a/", Path::new("/h"), fake_listing(ENTRIES));
+        let result = suggest_dir_entries_inner("/a/b", Path::new("/h"), fake_listing(ENTRIES));
 
         assert_eq!(
             names(&result),
@@ -1041,7 +1021,7 @@ mod tests {
         let entries: Vec<(String, bool)> =
             (0..600).map(|i| (format!("dir_{:03}", i), true)).collect();
 
-        let result = suggest_dir_entries_inner("/a/", Path::new("/h"), |_| Ok(entries.clone()));
+        let result = suggest_dir_entries_inner("/a/b", Path::new("/h"), |_| Ok(entries.clone()));
 
         assert_eq!(result.entries.len(), 500, "the list caps at 500 entries");
         assert_eq!(
@@ -1079,33 +1059,6 @@ mod tests {
             read_dir_entries,
         );
 
-        assert_eq!(names(&result), vec!["model.usda"]);
-    }
-
-    #[test]
-    fn suggest_dir_seed_filters_before_the_cap() {
-        // 600 alphabetical frames bury one name past the 500-row cap.
-        let mut entries: Vec<(String, bool)> = (0..600)
-            .map(|i| (format!("frame_{i:03}.usda"), false))
-            .collect();
-        entries.push(("zebra.usda".to_string(), false));
-
-        let result =
-            suggest_dir_entries_inner("/a/zebra", Path::new("/h"), |_| Ok(entries.clone()));
-
-        assert_eq!(names(&result), vec!["zebra.usda"]);
-    }
-
-    #[test]
-    fn suggest_dir_seed_matches_case_insensitively() {
-        static ENTRIES: &[(&str, bool)] = &[
-            ("BikeFrame.usdc", false),
-            ("bike.usda", false),
-            ("kite.usda", false),
-        ];
-
-        let result = suggest_dir_entries_inner("/a/BIKE", Path::new("/h"), fake_listing(ENTRIES));
-
-        assert_eq!(names(&result), vec!["BikeFrame.usdc", "bike.usda"]);
+        assert_eq!(names(&result), vec!["assets", "model.usda"]);
     }
 }

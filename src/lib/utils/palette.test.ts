@@ -4,7 +4,6 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  dirKey,
   filterDirEntries,
   filterPrimPaths,
   pngBase64,
@@ -35,22 +34,6 @@ describe("splitPrefix", () => {
   it("treats home as a directory, not a seed", () => {
     expect(splitPrefix("~")).toEqual({ parent: "~", seed: "" });
     expect(splitPrefix("")).toEqual({ parent: "", seed: "" });
-  });
-});
-
-describe("dirKey", () => {
-  it("gives one spelling per directory", () => {
-    expect(dirKey("~/mod")).toBe("~/");
-    expect(dirKey("~/")).toBe("~/");
-    expect(dirKey("~")).toBe("~/");
-    expect(dirKey("/usr/loc")).toBe("/usr/");
-    expect(dirKey("/usr/")).toBe("/usr/");
-  });
-
-  it("keeps the relative and empty roots apart", () => {
-    expect(dirKey("")).toBe("");
-    expect(dirKey("rel/x")).toBe("rel/");
-    expect(dirKey("/")).toBe("/");
   });
 });
 
