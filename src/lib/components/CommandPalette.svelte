@@ -11,6 +11,7 @@
   import { stageState } from "$lib/stage/stageState.svelte";
   import type { RenderNode } from "$lib/stage/types";
   import {
+    dirKey,
     filterDirEntries,
     filterPrimPaths,
     pngBase64,
@@ -32,6 +33,10 @@
   let manifestCache: { stageId: number; paths: string[] } | null = null;
   // Last-wins token: a slow suggestion response for old text is dropped.
   let generation = 0;
+  // One directory listing, unproxied on purpose: the backend caps it at 500
+  // rows, so typing inside that directory filters in place with no round trip.
+  // shortcut: a single entry, upgrade to a small LRU if users hop directories.
+  let listing: { dir: string; entries: { name: string; is_dir: boolean }[] } | null = null;
 
   const matches = $derived(paletteState.matches());
   const ctx = $derived(paletteState.context);
@@ -51,13 +56,14 @@
     return out;
   }
 
-  async function loadFilePaths(prefix: string, gen: number): Promise<void> {
+  async function loadFilePaths(prefix: string, dir: string, gen: number): Promise<void> {
     try {
       const answer = await invoke<{ entries: { name: string; is_dir: boolean }[] }>("suggest_dir_entries", {
         prefix,
       });
       if (gen !== generation) return;
-      suggestions = filterDirEntries(prefix, answer.entries ?? []);
+      listing = { dir, entries: answer.entries ?? [] };
+      suggestions = filterDirEntries(prefix, listing.entries);
     } catch {
       if (gen === generation) suggestions = [];
     }
@@ -84,6 +90,8 @@
     const arg = focusedArg;
     if (!paletteState.open || dismissed || !arg?.autocomplete) {
       suggestions = [];
+      // A closed palette must not serve a listing it read in an earlier session.
+      if (!paletteState.open) listing = null;
       return;
     }
     const prefix = ctx?.values[arg.key] ?? "";
@@ -91,7 +99,13 @@
       void loadPrimPaths(prefix, gen);
       return;
     }
-    const timer = setTimeout(() => void loadFilePaths(prefix, gen), DEBOUNCE_MS);
+    const dir = dirKey(prefix);
+    if (listing?.dir === dir) {
+      suggestions = filterDirEntries(prefix, listing.entries);
+      suggestionIndex = 0;
+      return;
+    }
+    const timer = setTimeout(() => void loadFilePaths(prefix, dir, gen), DEBOUNCE_MS);
     return () => clearTimeout(timer);
   });
 
