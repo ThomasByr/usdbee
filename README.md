@@ -134,6 +134,16 @@ Pass one or more USD files to open them as tabs on startup. `-p` / `--camera-pos
 
 On Windows release builds the binary uses the GUI subsystem, so nothing attaches a console: `-h` / `--help` prints nothing and a flag error exits with status 1 silently. Opening files and the camera flags work normally; macOS, Linux and dev builds print as described above.
 
+### Command palette
+
+<kbd><kbd>Ctrl</kbd>+<kbd>P</kbd></kbd> (<kbd><kbd>Cmd</kbd>+<kbd>P</kbd></kbd> on macOS) opens the command palette. The binding, and whether <kbd>Tab</kbd> runs the highlighted command, are set in SETTINGS under "Keybindings & Control".
+
+The palette exposes the same commands as the MCP bridge plus the tab commands (recent, next / previous with wrap-around, swap left / right). Matches on a command name rank above matches on its description.
+
+Commands that take arguments open a form. Path arguments autocomplete: file paths from a directory listing, prim paths from the loaded stage. Optional fields can be left empty, and <kbd>Backspace</kbd> in an empty field returns to the command list.
+
+Read-only commands (status, inspect, performance reports, screenshot) show their result inside the palette instead of closing it.
+
 ## Limitations
 
 [Three.js USD Composer](https://threejs.org/docs/index.html?q=USD#USDComposer) is used as the primary USD parser and renderer. It supports a subset of USD features, and some complex USD files may not render correctly, throw errors, or fail to load. The application is primarily intended for simple USD files (.usdz, .usd, .usda) containing basic geometry and materials.
