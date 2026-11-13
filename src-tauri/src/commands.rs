@@ -252,8 +252,13 @@ async fn process_usd_file<R: tauri::Runtime>(
 
 async fn process_usd_file_inner<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
-    mut path: String,
+    path: String,
 ) -> Result<StageInfo, String> {
+    // `~` is expanded once, here: the events, the scene's root_file, the stage
+    // open and the returned StageInfo must all name the same path.
+    let file_path = expand_home(&path);
+    let mut path = file_path.to_string_lossy().into_owned();
+
     app.emit("usd-load-start", path.clone())
         .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-start: {}", e));
 
@@ -266,9 +271,6 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
     )
     .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
 
-    // `~` is expanded for the filesystem only: `path` stays as typed for the
-    // events, the scene's root_file and the tab record.
-    let file_path = expand_home(&path);
     if !file_path.exists() {
         return Err("File does not exist".into());
     }
@@ -315,7 +317,7 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
         .clone();
 
     let (scan, stage_info) = match tauri::async_runtime::spawn_blocking({
-        let p_str = expand_home(&path).to_string_lossy().into_owned();
+        let p_str = path.clone();
         let stage_app = app.clone();
         // The open's cleanup-owned extraction dir: the owner thread
         // records it and deletes it on close_stage (the session layer file

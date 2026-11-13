@@ -47,6 +47,65 @@ fn opens_plain_usda_fixture_via_path_command() {
 }
 
 #[test]
+fn tilde_open_reports_the_same_expanded_path_everywhere() {
+    // A `~`-prefixed open must expand exactly once: the frontend compares the
+    // stage's root_layer against the path in usd-load-start, so a typed `~/...`
+    // in one and an expanded path in the other closes the tab silently.
+    // The fixture lives under the real home so `~/...` resolves; the TempDir
+    // cleans it up on drop.
+    let home = std::env::home_dir().expect("the test host must have a home dir");
+    let dir = tempfile::Builder::new()
+        .prefix("usdbee-tilde-open-")
+        .tempdir_in(&home)
+        .expect("a temp dir under home should be created");
+    let copy = dir.path().join("basic.usda");
+    std::fs::copy(fixture("basic.usda"), &copy).expect("the fixture should copy");
+    let typed = format!(
+        "~/{}",
+        copy.strip_prefix(&home)
+            .expect("the copy sits under home")
+            .to_string_lossy()
+    );
+
+    let app = mock_app();
+    let start: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let sink = start.clone();
+    app.listen("usd-load-start", move |event| {
+        let payload: serde_json::Value =
+            serde_json::from_str(event.payload()).expect("the payload must be a JSON path");
+        *sink.lock().unwrap() = payload.as_str().map(str::to_string);
+    });
+    let scene_root: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let sink = scene_root.clone();
+    app.listen("usd-scene-loaded", move |event| {
+        let payload: serde_json::Value =
+            serde_json::from_str(event.payload()).expect("the payload must be the scene JSON");
+        *sink.lock().unwrap() = payload["root_file"].as_str().map(str::to_string);
+    });
+
+    let info =
+        tauri::async_runtime::block_on(open_usd_file_path(app.handle().clone(), typed.clone()))
+            .expect("a ~-prefixed path should open through the path command");
+
+    let expanded = copy.to_string_lossy().into_owned();
+    assert_eq!(
+        info.root_layer, expanded,
+        "the opened stage must carry the expanded path, not the typed {}",
+        typed
+    );
+    assert_eq!(
+        start.lock().unwrap().as_deref(),
+        Some(expanded.as_str()),
+        "usd-load-start must carry the same expanded path the stage reports"
+    );
+    assert_eq!(
+        scene_root.lock().unwrap().as_deref(),
+        Some(expanded.as_str()),
+        "the scene's root_file must be the same expanded path"
+    );
+}
+
+#[test]
 fn extracts_and_opens_usdz_via_path_command() {
     let dir = tempfile::tempdir().expect("temp dir should be created");
     let source = fixture("basic.usda");

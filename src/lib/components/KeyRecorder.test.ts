@@ -85,16 +85,31 @@ describe("KeyRecorder", () => {
     expect(document.querySelector(".keybtn")!.textContent!.trim()).toBe("Press keys…");
   });
 
-  it("keeps recording for ctrl+shift combos too", async () => {
-    const { wire } = mountRecorder("z");
+  it("records ctrl+shift combos, since a mod combo does not look at shift", async () => {
+    // matchesBinding has no shift term for "mod+p", so the recorded binding
+    // is exactly what Ctrl+Shift+P will fire.
+    const { onchange, wire } = mountRecorder("z");
     await tick();
     await startRecording();
 
     press({ key: "P", ctrlKey: true, shiftKey: true });
     await tick();
 
-    expect(wire.binding).toBe("z");
-    expect(document.querySelector(".keybtn")!.textContent!.trim()).toBe("Press keys…");
+    expect(wire.binding).toBe("mod+p");
+    expect(onchange).toHaveBeenCalledWith("mod+p");
+  });
+
+  it("records shift-held keys, so AZERTY digits are bindable", async () => {
+    // Shift+1 is how the "1" key is typed on a French layout.
+    const { onchange, wire } = mountRecorder("z");
+    await tick();
+    await startRecording();
+
+    press({ key: "1", shiftKey: true });
+    await tick();
+
+    expect(wire.binding).toBe("1");
+    expect(onchange).toHaveBeenCalledWith("1");
   });
 
   it("cancels on Escape without changing the binding", async () => {

@@ -18,12 +18,14 @@
     return e.ctrlKey || e.metaKey ? `mod+${key}` : key;
   }
 
-  // A binding string cannot carry alt/shift next to another key, so such a
-  // chord is dropped and recording continues rather than recording the plain
-  // key (Alt+G would otherwise fire on G).
+  // A binding string cannot carry alt next to another key, and matchesBinding
+  // rejects alt-held presses, so such a chord is dropped and recording
+  // continues rather than recording the plain key (Alt+G would fire on G).
+  // Shift-held captures are fine: a single-key binding ignores shiftKey, so
+  // Shift+1 on a French layout records "1" — the key that gets pressed.
   function unbindable(e: KeyboardEvent): boolean {
     if (MODIFIERS.includes(e.key.toLowerCase())) return false;
-    return e.altKey || e.shiftKey;
+    return e.altKey;
   }
 
   $effect(() => {
