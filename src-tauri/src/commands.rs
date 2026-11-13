@@ -515,6 +515,77 @@ pub async fn save_file_bytes(path: String, bytes: Vec<u8>) -> Result<(), String>
     std::fs::write(&path, bytes).map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize, Debug)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+#[derive(serde::Serialize, Debug)]
+pub struct SuggestEntries {
+    pub entries: Vec<DirEntry>,
+}
+
+const SUGGEST_EXTENSIONS: &[&str] = &["usd", "usda", "usdc", "usdz"];
+const SUGGEST_LIMIT: usize = 500;
+
+fn read_dir_entries(dir: &Path) -> std::io::Result<Vec<(String, bool)>> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let is_dir = entry.path().is_dir();
+        entries.push((entry.file_name().to_string_lossy().into_owned(), is_dir));
+    }
+    Ok(entries)
+}
+
+/// Sync and tauri-free so unit tests inject their own lister.
+fn suggest_dir_entries_inner(
+    prefix: &str,
+    home: &Path,
+    list_dir: impl Fn(&Path) -> std::io::Result<Vec<(String, bool)>>,
+) -> SuggestEntries {
+    let dir = if prefix == "~" {
+        home.to_path_buf()
+    } else {
+        let expanded = match prefix.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => std::path::PathBuf::from(prefix),
+        };
+        if prefix.is_empty() || prefix.ends_with(['/', '\\']) {
+            expanded
+        } else {
+            expanded.parent().map(Path::to_path_buf).unwrap_or_default()
+        }
+    };
+
+    let mut entries: Vec<DirEntry> = list_dir(&dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(name, is_dir)| *is_dir || is_usd_file(name))
+        .map(|(name, is_dir)| DirEntry { name, is_dir })
+        .collect();
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+    entries.truncate(SUGGEST_LIMIT);
+    SuggestEntries { entries }
+}
+
+fn is_usd_file(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| SUGGEST_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Directory listing for the palette's path completion. A bad path is empty
+/// suggestions, never an error, so typing never flashes a failure.
+#[tauri::command]
+pub async fn suggest_dir_entries(prefix: String) -> Result<SuggestEntries, String> {
+    let home = std::env::home_dir().unwrap_or_default();
+    Ok(suggest_dir_entries_inner(&prefix, &home, read_dir_entries))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -760,5 +831,173 @@ mod tests {
             !out_dir.exists(),
             "a rejected archive must not leave partially extracted content"
         );
+    }
+
+    fn fake_listing(
+        entries: &'static [(&'static str, bool)],
+    ) -> impl Fn(&Path) -> std::io::Result<Vec<(String, bool)>> {
+        move |_| {
+            Ok(entries
+                .iter()
+                .map(|(name, is_dir)| (name.to_string(), *is_dir))
+                .collect())
+        }
+    }
+
+    fn names(entries: &SuggestEntries) -> Vec<&str> {
+        entries.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    fn listing_seen(
+        prefix: &str,
+        home: &Path,
+    ) -> (std::cell::RefCell<Vec<std::path::PathBuf>>, SuggestEntries) {
+        let seen: std::cell::RefCell<Vec<std::path::PathBuf>> = Default::default();
+        let result = suggest_dir_entries_inner(prefix, home, |dir| {
+            seen.borrow_mut().push(dir.to_path_buf());
+            Ok(Vec::new())
+        });
+        (seen, result)
+    }
+
+    #[test]
+    fn suggest_dir_expands_tilde_into_home() {
+        let home = Path::new("/home/beekeeper");
+        let (seen, _) = listing_seen("~/projects/model", home);
+
+        assert_eq!(
+            seen.borrow().as_slice(),
+            [home.join("projects")],
+            "a ~ prefix must resolve under the injected home"
+        );
+    }
+
+    #[test]
+    fn suggest_dir_lists_home_for_bare_tilde() {
+        let home = Path::new("/home/beekeeper");
+        let (seen, _) = listing_seen("~", home);
+
+        assert_eq!(seen.borrow().as_slice(), [home.to_path_buf()]);
+    }
+
+    #[test]
+    fn suggest_dir_lists_tilde_dir_with_trailing_slash() {
+        let home = Path::new("/home/beekeeper");
+        let (seen, _) = listing_seen("~/projects/", home);
+
+        assert_eq!(seen.borrow().as_slice(), [home.join("projects")]);
+    }
+
+    #[test]
+    fn suggest_dir_lists_parent_of_last_component() {
+        let home = Path::new("/home/beekeeper");
+        let (seen, _) = listing_seen("/a/b", home);
+
+        assert_eq!(seen.borrow().as_slice(), [Path::new("/a")]);
+    }
+
+    #[test]
+    fn suggest_dir_lists_dir_when_prefix_ends_in_separator() {
+        let home = Path::new("/home/beekeeper");
+        let (seen, _) = listing_seen("/a/", home);
+
+        assert_eq!(seen.borrow().as_slice(), [Path::new("/a")]);
+    }
+
+    #[test]
+    fn suggest_dir_lists_prefix_verbatim_when_empty() {
+        let home = Path::new("/home/beekeeper");
+        let (seen, _) = listing_seen("", home);
+
+        assert_eq!(seen.borrow().as_slice(), [Path::new("")]);
+    }
+
+    #[test]
+    fn suggest_dir_keeps_dirs_and_usd_files_only() {
+        static ENTRIES: &[(&str, bool)] = &[
+            ("assets", true),
+            ("model.usda", false),
+            ("SHADED.USDZ", false),
+            ("packed.usdc", false),
+            ("legacy.usd", false),
+            ("notes.txt", false),
+            ("README", false),
+        ];
+
+        let result = suggest_dir_entries_inner("/a/b", Path::new("/h"), fake_listing(ENTRIES));
+
+        assert_eq!(
+            names(&result),
+            vec![
+                "assets",
+                "SHADED.USDZ",
+                "legacy.usd",
+                "model.usda",
+                "packed.usdc"
+            ]
+        );
+    }
+
+    #[test]
+    fn suggest_dir_sorts_dirs_first_then_name() {
+        static ENTRIES: &[(&str, bool)] = &[
+            ("zeta", true),
+            ("beta.usda", false),
+            ("alpha", true),
+            ("aaa.usd", false),
+        ];
+
+        let result = suggest_dir_entries_inner("/a/b", Path::new("/h"), fake_listing(ENTRIES));
+
+        assert_eq!(
+            names(&result),
+            vec!["alpha", "zeta", "aaa.usd", "beta.usda"]
+        );
+    }
+
+    #[test]
+    fn suggest_dir_caps_at_500_entries() {
+        let entries: Vec<(String, bool)> =
+            (0..600).map(|i| (format!("dir_{:03}", i), true)).collect();
+
+        let result = suggest_dir_entries_inner("/a/b", Path::new("/h"), |_| Ok(entries.clone()));
+
+        assert_eq!(result.entries.len(), 500, "the list caps at 500 entries");
+        assert_eq!(
+            result.entries[0].name, "dir_000",
+            "the cap keeps the sorted head"
+        );
+        assert_eq!(result.entries[499].name, "dir_499");
+    }
+
+    #[test]
+    fn suggest_dir_unreadable_dir_is_empty_not_err() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing/inner");
+
+        let result = suggest_dir_entries_inner(
+            missing.to_string_lossy().as_ref(),
+            Path::new("/h"),
+            read_dir_entries,
+        );
+
+        assert!(result.entries.is_empty(), "a missing dir yields no entries");
+    }
+
+    #[test]
+    fn suggest_dir_reads_a_real_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("assets")).unwrap();
+        fs::write(tmp.path().join("model.usda"), b"#usda 1.0").unwrap();
+        fs::write(tmp.path().join("notes.txt"), b"hi").unwrap();
+
+        let prefix = tmp.path().join("model");
+        let result = suggest_dir_entries_inner(
+            prefix.to_string_lossy().as_ref(),
+            Path::new("/h"),
+            read_dir_entries,
+        );
+
+        assert_eq!(names(&result), vec!["assets", "model.usda"]);
     }
 }

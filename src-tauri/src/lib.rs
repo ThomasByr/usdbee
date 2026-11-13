@@ -95,6 +95,7 @@ pub fn run() {
             commands::set_fallback_color,
             commands::read_file_bytes,
             commands::save_file_bytes,
+            commands::suggest_dir_entries,
             stage::open_usd_path,
             stage::close_stage,
             stage::list_stages,
