@@ -397,7 +397,14 @@ async function handleGizmoCommit(commit: GizmoCommit) {
     // (a second drag never starts from the pre-commit pose). An empty
     // queue means no write landed, so there is nothing to refresh.
     const deferred = drainDeferredStagePaths();
-    if (deferred.length > 0) await refreshSceneAfterEdit(viewer, deferred);
+    // A throw here must not strand the commit: the lock it leaves behind
+    // keeps the commit gate swallowing every later stage event, and the
+    // controls stay disabled. Surface the failure and release either way.
+    try {
+      if (deferred.length > 0) await refreshSceneAfterEdit(viewer, deferred);
+    } catch (e) {
+      gizmoPolicy.error = typeof e === "string" ? e : String(e);
+    }
     releasePreviewNode(viewer, keepPreviewPose);
     gizmoCommitInFlight = false;
     if (gizmo) gizmo.controls.enabled = true;

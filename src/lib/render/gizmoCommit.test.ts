@@ -18,11 +18,23 @@ vi.mock("$lib/stage/stageState.svelte", () => {
   return { stageState };
 });
 
+vi.mock("$lib/render/sceneIntegration", () => ({
+  refreshSceneAfterEdit: vi.fn(async () => {}),
+}));
+
 import { stageState } from "$lib/stage/stageState.svelte";
 import { renderState } from "$lib/render/renderState.svelte";
 import { RendererKit } from "$lib/three/RendererKit.svelte";
 import type { PrimDetails } from "$lib/stage/types";
-import { disposeGizmo, frameSyncGizmo, gizmoPolicy, initGizmo, syncGizmoAnchor } from "./gizmoCommit.svelte";
+import {
+  disposeGizmo,
+  frameSyncGizmo,
+  gateCommitStageRefresh,
+  gizmoPolicy,
+  initGizmo,
+  syncGizmoAnchor,
+} from "./gizmoCommit.svelte";
+import { refreshSceneAfterEdit } from "$lib/render/sceneIntegration";
 import { consumeShadowUpdate } from "$lib/three/shadowMapUpdate";
 
 const stage = stageState as unknown as {
@@ -348,6 +360,34 @@ describe("stale stack guard", () => {
     expect(writes[0].value.type).toBe("float3");
     // xformOpOrder is uniform: it never takes a time sample.
     expect(writes[2].time).toBeNull();
+  });
+});
+
+describe("a commit refresh that throws never keeps the lock", () => {
+  it("restores the controls and lets the next commit author", async () => {
+    const viewer = makeViewer(new THREE.Object3D());
+    stage.details = detailsAt(5);
+    initGizmo(viewer, () => "translate");
+    // The commit's own stage event lands mid-write, so the finally drains it
+    // and awaits the scene refresh — which throws here.
+    stage.setAttributeValues.mockImplementation(async () => {
+      gateCommitStageRefresh(["/Scene/Prim"]);
+      return null;
+    });
+    vi.mocked(refreshSceneAfterEdit).mockRejectedValueOnce(new Error("scene rebuild failed"));
+
+    await commit(5, 8);
+
+    expect(refreshSceneAfterEdit).toHaveBeenCalled();
+    expect(gizmoPolicy.kit!.controls.enabled).toBe(true);
+    // The commit lock cleared: the gate no longer swallows events and the
+    // gizmo's next drag authors (details refreshed, as a real commit does).
+    stage.setAttributeValues.mockReset();
+    stage.setAttributeValues.mockResolvedValue(null);
+    stage.details = detailsAt(8);
+    await commit(8, 9);
+    expect(stage.setAttributeValues).toHaveBeenCalledTimes(1);
+    expect(gateCommitStageRefresh(["/Scene/Prim"])).toBe(false);
   });
 });
 
