@@ -19,8 +19,19 @@ const dev = vi.hoisted(() => ({
 
 // The idle predicate reads live render state; a mutable stub stands in for it
 // so the states the real module would be in (a scrub's pose step on the wire,
-// a load) can be set without driving a pose.
-const state = vi.hoisted(() => ({ status: "idle", scrubInFlight: false }));
+// a load) can be set without driving a pose. `time` is a reactive SvelteMap so
+// the viewport's effects re-run on a write, exactly like the real $state store.
+const state = vi.hoisted(() => ({
+  status: "idle",
+  scrubInFlight: false,
+  times: null as null | {
+    get(key: string): number | null | undefined;
+    set(key: string, value: number | null): void;
+  },
+  setTime(time: number | null) {
+    state.times?.set("time", time);
+  },
+}));
 
 const scene = vi.hoisted(() => ({
   installPlaybackDriver: vi.fn(),
@@ -31,18 +42,26 @@ vi.mock("$lib/dev/transportKeepAlive", async () => {
   return { startTransportKeepAlive: dev.startTransportKeepAlive };
 });
 vi.mock("$lib/dev/mcpBridge.svelte", () => ({ startMcpBridge: dev.startMcpBridge }));
-vi.mock("$lib/render/renderState.svelte", () => ({
-  renderState: {
-    get status() {
-      return state.status;
+vi.mock("$lib/render/renderState.svelte", async () => {
+  const { SvelteMap } = await import("svelte/reactivity");
+  state.times = new SvelteMap<string, number | null>([[`time`, null]]);
+  return {
+    renderState: {
+      get status() {
+        return state.status;
+      },
+      get isTimeStepInFlight() {
+        return state.scrubInFlight;
+      },
+      get time() {
+        return state.times!.get("time") ?? null;
+      },
     },
-    get isTimeStepInFlight() {
-      return state.scrubInFlight;
-    },
-  },
-  snapToTimeCodes: (time: number) => time,
-  toAbsoluteTime: (offset: number, start: number) => offset + start,
-}));
+    snapToTimeCodes: (time: number) => time,
+    toAbsoluteTime: (offset: number, start: number) => offset + start,
+    toPlayheadOffset: (time: number, start: number) => time - start,
+  };
+});
 vi.mock("$lib/render/sceneIntegration", () => ({
   integrateScene: vi.fn(),
   loadRustScene: vi.fn(),
@@ -77,9 +96,14 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("$lib/commands/launch", () => ({ consumeLaunchOptions: vi.fn(async () => {}) }));
 
 import Viewport from "./Viewport.svelte";
+import { SvelteMap } from "svelte/reactivity";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
 
+// A reactive mirror of the kit's $state fields the template reads: a plain
+// object would swallow the writes the effects make, which is exactly what the
+// dim bar looked like.
 function viewer(): RendererKit {
+  const progress = new SvelteMap<string, number>([[`value`, 0]]);
   return {
     init: vi.fn(),
     scene: null,
@@ -91,7 +115,12 @@ function viewer(): RendererKit {
     fov: 0,
     triangleCount: 0,
     animationDuration: 0,
-    animationProgress: 0,
+    get animationProgress() {
+      return progress.get("value")!;
+    },
+    set animationProgress(value: number) {
+      progress.set("value", value);
+    },
     isPlayingAnim: false,
     hasAnimation: false,
     dispose: vi.fn(),
@@ -110,6 +139,7 @@ beforeEach(() => {
   scene.installPlaybackDriver.mockClear();
   state.status = "idle";
   state.scrubInFlight = false;
+  state.setTime(null);
   localStorage.clear();
 });
 
@@ -118,6 +148,30 @@ afterEach(async () => {
   instance = null;
   document.body.innerHTML = "";
   vi.unstubAllEnvs();
+});
+
+describe("timeline bar", () => {
+  it("follows a stage time written without a driver tick", async () => {
+    // The palette, CLI and dev-bridge set_time write the stage time directly:
+    // no driver tick follows, so the bar's own mirror has to move with it.
+    const kit = viewer();
+    kit.hasAnimation = true;
+    kit.animationDuration = 100;
+    instance = mount(Viewport, {
+      target: document.body,
+      props: { viewer: kit, lightAzimuth: 0, lightElevation: 0, gizmoMode: "translate" },
+    });
+    await tick();
+    const slider = () => document.querySelector<HTMLInputElement>(".timeline-slider")!;
+    const readout = () => document.querySelector(".timeline-time")!.textContent ?? "";
+    expect(slider().value).toBe("0");
+
+    state.setTime(40);
+    flushSync();
+
+    expect(slider().value).toBe("40");
+    expect(readout()).toContain("40");
+  });
 });
 
 describe("dev keep-alive wiring", () => {

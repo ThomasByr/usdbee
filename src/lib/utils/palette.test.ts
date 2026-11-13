@@ -3,7 +3,14 @@
 // payload rendering.
 
 import { describe, expect, it } from "vitest";
-import { filterDirEntries, filterPrimPaths, pngBase64, resultText, splitPrefix } from "./palette";
+import {
+  filterDirEntries,
+  filterPrimPaths,
+  pngBase64,
+  resultText,
+  splitPrefix,
+  stepSuggestion,
+} from "./palette";
 
 const entries = [
   { name: "Code", is_dir: true },
@@ -88,6 +95,20 @@ describe("filterPrimPaths", () => {
   it("caps the rows it returns", () => {
     const many = Array.from({ length: 500 }, (_, i) => `/Prim${i}`);
     expect(filterPrimPaths("", many).length).toBeLessThanOrEqual(100);
+  });
+});
+
+describe("stepSuggestion", () => {
+  it("moves down and up, wrapping at both ends", () => {
+    expect(stepSuggestion(0, 1, 3)).toBe(1);
+    expect(stepSuggestion(2, 1, 3)).toBe(0);
+    expect(stepSuggestion(0, -1, 3)).toBe(2);
+    expect(stepSuggestion(1, -1, 3)).toBe(0);
+  });
+
+  it("stays at the first row when the list is empty", () => {
+    expect(stepSuggestion(0, 1, 0)).toBe(0);
+    expect(stepSuggestion(0, -1, 0)).toBe(0);
   });
 });
 

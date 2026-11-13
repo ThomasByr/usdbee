@@ -15,6 +15,7 @@
     filterPrimPaths,
     pngBase64,
     resultText,
+    stepSuggestion,
     type Suggestion,
   } from "$lib/utils/palette";
 
@@ -149,13 +150,13 @@
         return;
       case "ArrowDown":
         e.preventDefault();
-        if (listOpen) suggestionIndex = Math.min(suggestionIndex + 1, suggestions.length - 1);
+        if (listOpen) suggestionIndex = stepSuggestion(suggestionIndex, 1, suggestions.length);
         else if (ctx) moveFocus(1);
         else paletteState.highlighted = Math.min(paletteState.highlighted + 1, Math.max(rows.length - 1, 0));
         return;
       case "ArrowUp":
         e.preventDefault();
-        if (listOpen) suggestionIndex = Math.max(suggestionIndex - 1, 0);
+        if (listOpen) suggestionIndex = stepSuggestion(suggestionIndex, -1, suggestions.length);
         else if (ctx) moveFocus(-1);
         else paletteState.highlighted = Math.max(paletteState.highlighted - 1, 0);
         return;

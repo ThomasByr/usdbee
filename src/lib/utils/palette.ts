@@ -45,6 +45,12 @@ export function filterPrimPaths(query: string, paths: string[]): Suggestion[] {
     .map((path) => ({ value: path, is_dir: false }));
 }
 
+/** Arrow-key movement over a suggestion list: the ends wrap to each other. */
+export function stepSuggestion(index: number, delta: -1 | 1, count: number): number {
+  if (count <= 0) return 0;
+  return (index + delta + count) % count;
+}
+
 /** The screenshot payload's base64, when the payload carries one. */
 export function pngBase64(payload: unknown): string | null {
   if (typeof payload !== "object" || payload === null) return null;

@@ -4,7 +4,12 @@
   import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
   import { tabsState } from "$lib/state/tabsState.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
-  import { renderState, snapToTimeCodes, toAbsoluteTime } from "$lib/render/renderState.svelte";
+  import {
+    renderState,
+    snapToTimeCodes,
+    toAbsoluteTime,
+    toPlayheadOffset,
+  } from "$lib/render/renderState.svelte";
   import {
     integrateScene,
     loadRustScene,
@@ -89,6 +94,15 @@
 
   $effect(() => {
     if (viewer.boxHelper) viewer.boxHelper.visible = viewer.showBoundingBox;
+  });
+
+  // The bar mirrors the stage time, not just the playback driver's ticks: a
+  // palette, CLI or MCP set_time writes the time without ticking the driver,
+  // and the slider and readout stayed put. The driver still owns the
+  // continuous value between writes, so a held pose keeps the bar moving.
+  $effect(() => {
+    const time = renderState.time;
+    if (time !== null) viewer.animationProgress = toPlayheadOffset(time, startTimeCode());
   });
 
   // The graphics-sync bodies live in sceneIntegration.ts; the reads inside
@@ -251,7 +265,19 @@
         onclick={() => (viewer.isPlayingAnim = !viewer.isPlayingAnim)}
         title={viewer.isPlayingAnim ? "Pause" : "Play"}
       >
-        {viewer.isPlayingAnim ? "⏸" : "▶"}
+        <!-- Drawn rather than typed: the ▶/⏸ glyphs differ in both advance
+             width and inner weight, so the bar moved and the pause bars
+             looked undersized next to the triangle. -->
+        {#if viewer.isPlayingAnim}
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <rect x="3" y="2" width="3.5" height="12" fill="currentColor" />
+            <rect x="9.5" y="2" width="3.5" height="12" fill="currentColor" />
+          </svg>
+        {:else}
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path d="M4 2 L13.5 8 L4 14 Z" fill="currentColor" />
+          </svg>
+        {/if}
       </button>
       <input
         type="range"
@@ -329,6 +355,20 @@
     min-width: 300px;
     backdrop-filter: blur(4px);
     border: 1px solid var(--border);
+  }
+
+  /* ▶ and ⏸ do not share an advance width or an inner weight, so the bar
+     resized on play/pause and the pause bars read as too small. The icons are
+     now inline SVG; this keeps the button box fixed either way. */
+  .timeline-overlay .icon-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    margin: 0;
+    padding: 0;
+    flex: none;
   }
 
   .timeline-slider {

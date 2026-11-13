@@ -66,6 +66,11 @@ export function resetLoadedScene(viewer: RendererKit) {
   // The only images the memo holds belong to the scene just dropped: a
   // stage closed with no reload after it would keep them for the session.
   clearTextureCache();
+  // The timeline bar reads these: left set, it would hang over the empty
+  // view after a close and over the next stage for the whole load.
+  viewer.hasAnimation = false;
+  viewer.animationDuration = 0;
+  viewer.animationProgress = 0;
 }
 
 // Camera fit / grid / light framing for the rust scene (no skinned

@@ -844,6 +844,28 @@ describe("resetLoadedScene", () => {
     expect(kit.selectedNode).toBeNull();
     expect(helper.visible).toBe(false);
   });
+
+  it("hides the timeline bar so no stale player hangs over the empty view or the next load", () => {
+    // The bar renders on viewer.hasAnimation alone: a close (or the reset at
+    // the next load-start) left the previous stage's flags set, so the bar
+    // stayed on screen doing nothing until the new scene integrated.
+    const group = new THREE.Group();
+    const scene = new THREE.Scene();
+    scene.add(group);
+    const kit = {
+      loadedGroup: group,
+      scene,
+      hasAnimation: true,
+      animationDuration: 96,
+      animationProgress: 42,
+    } as unknown as RendererKit;
+
+    resetLoadedScene(kit);
+
+    expect(kit.hasAnimation).toBe(false);
+    expect(kit.animationDuration).toBe(0);
+    expect(kit.animationProgress).toBe(0);
+  });
 });
 
 describe("integrateScene", () => {
