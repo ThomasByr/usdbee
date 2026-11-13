@@ -165,14 +165,16 @@
         else if (ctx) void paletteState.submit();
         else startCommand(rows[paletteState.highlighted]);
         return;
+      // Tab runs a command from the list only; inside the argument form it
+      // accepts the suggestion or moves to the next field.
       case "Tab":
         e.preventDefault();
-        if (tabExecutes()) {
-          void paletteState.submitWithTab();
+        if (ctx) {
+          if (listOpen) acceptSuggestion();
+          else moveFocus(1);
           return;
         }
-        if (listOpen) acceptSuggestion();
-        else moveFocus(1);
+        if (tabExecutes()) void paletteState.submitWithTab();
         return;
       case "Backspace": {
         const target = e.target as HTMLInputElement | null;

@@ -34,6 +34,10 @@ function press(init: KeyboardEventInit & { key: string }) {
   window.dispatchEvent(new KeyboardEvent("keydown", init));
 }
 
+function release(init: KeyboardEventInit & { key: string }) {
+  window.dispatchEvent(new KeyboardEvent("keyup", init));
+}
+
 async function startRecording() {
   document.querySelector<HTMLButtonElement>(".keybtn")!.click();
   await tick();
@@ -58,18 +62,55 @@ describe("KeyRecorder", () => {
     expect(onchange).toHaveBeenCalledWith("mod+p");
   });
 
-  it("captures a plain key lowercased, and a lone modifier by name", async () => {
+  it("captures a plain key lowercased", async () => {
     const { wire } = mountRecorder("z");
     await tick();
     await startRecording();
     press({ key: "K" });
     await tick();
     expect(wire.binding).toBe("k");
+  });
 
+  it("records a lone modifier on its release, not on its press", async () => {
+    const { onchange, wire } = mountRecorder("z");
+    await tick();
     await startRecording();
+
     press({ key: "Shift" });
     await tick();
+    expect(onchange).not.toHaveBeenCalled();
+
+    release({ key: "Shift" });
+    await tick();
     expect(wire.binding).toBe("shift");
+    expect(onchange).toHaveBeenCalledWith("shift");
+  });
+
+  it("records a modifier pressed before a chord key", async () => {
+    const { onchange, wire } = mountRecorder("z");
+    await tick();
+    await startRecording();
+
+    press({ key: "Control" });
+    await tick();
+    press({ key: "p", ctrlKey: true });
+    await tick();
+
+    expect(wire.binding).toBe("mod+p");
+    expect(onchange).toHaveBeenCalledWith("mod+p");
+  });
+
+  it("records ctrl+shift+p as mod+p", async () => {
+    const { wire } = mountRecorder("z");
+    await tick();
+    await startRecording();
+
+    press({ key: "Control" });
+    press({ key: "Shift" });
+    press({ key: "p", ctrlKey: true, shiftKey: true });
+    await tick();
+
+    expect(wire.binding).toBe("mod+p");
   });
 
   it("keeps recording when a chord cannot be expressed as a binding", async () => {

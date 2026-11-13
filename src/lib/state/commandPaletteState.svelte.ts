@@ -125,8 +125,8 @@ export const paletteState = $state({
     await this.execute();
   },
 
-  // Tab executes too, unless settings turn that off — then Tab is free for
-  // the suggestion list.
+  // Tab runs the highlighted command from the list; inside the argument form
+  // the component keeps Tab for the suggestion list.
   async submitWithTab(): Promise<void> {
     const executes =
       (controlsState as unknown as { paletteTabExecutes?: boolean }).paletteTabExecutes ?? true;

@@ -11,10 +11,12 @@
 
   let recording = $state(false);
   let root = $state<HTMLDivElement | null>(null);
+  // Modifier held since the last non-modifier key: it records as a lone
+  // binding only if it is released before a chord key arrives.
+  let pending: string | null = null;
 
   function toBinding(e: KeyboardEvent): string {
     const key = e.key.toLowerCase();
-    if (MODIFIERS.includes(key)) return key;
     return e.ctrlKey || e.metaKey ? `mod+${key}` : key;
   }
 
@@ -30,6 +32,7 @@
 
   $effect(() => {
     if (!recording) return;
+    pending = null;
 
     function onKeydown(e: KeyboardEvent) {
       e.preventDefault();
@@ -38,8 +41,23 @@
         recording = false;
         return;
       }
+      // A modifier press alone is a binding of its own, but only once it is
+      // released: recording it here would end the capture before a chord key
+      // such as P in Ctrl+P arrives.
+      const key = e.key.toLowerCase();
+      if (MODIFIERS.includes(key)) {
+        pending = key;
+        return;
+      }
       if (unbindable(e)) return;
       binding = toBinding(e);
+      recording = false;
+      onchange(binding);
+    }
+
+    function onKeyup(e: KeyboardEvent) {
+      if (e.key.toLowerCase() !== pending) return;
+      binding = pending;
       recording = false;
       onchange(binding);
     }
@@ -49,9 +67,11 @@
     }
 
     window.addEventListener("keydown", onKeydown, true);
+    window.addEventListener("keyup", onKeyup, true);
     window.addEventListener("mousedown", onMousedown, true);
     return () => {
       window.removeEventListener("keydown", onKeydown, true);
+      window.removeEventListener("keyup", onKeyup, true);
       window.removeEventListener("mousedown", onMousedown, true);
     };
   });
