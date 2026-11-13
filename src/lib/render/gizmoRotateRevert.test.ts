@@ -143,8 +143,8 @@ let onWrite: () => void = () => {};
 
 let holdNextWrites = 0;
 const heldWrites: (() => void)[] = [];
-// A write matching this name fails (backend error) instead of authoring:
-// the partial-commit tests need write 2 to fail after write 1 landed.
+// A batch containing this write name is refused instead of authored: the
+// all-or-nothing test needs a commit that lands nothing.
 let failWriteName: string | null = null;
 
 function releaseWrites(n = 1) {
@@ -226,12 +226,14 @@ function installBackend() {
         ];
       case "get_time_codes":
         return [];
-      case "set_attribute_value": {
+      case "set_attribute_values": {
         const done = () => {
-          if (failWriteName !== null && args.name === failWriteName)
+          if (failWriteName !== null && args.writes.some((w: { name: string }) => w.name === failWriteName))
             return Promise.reject("backend write failed");
-          write(args.name, args.value.data);
-          writeLog.push({ name: args.name, data: args.value.data, path: args.path, stageId: args.stageId });
+          for (const w of args.writes) {
+            write(w.name, w.value.data);
+            writeLog.push({ name: w.name, data: w.value.data, path: args.path, stageId: args.stageId });
+          }
           onWrite();
           return null;
         };
@@ -372,13 +374,13 @@ afterEach(() => {
 
 describe("move then rotate keeps the moved position", () => {
   async function moveThenRotate(opts: {
-    holdBetweenWrites?: boolean;
+    staleManifest?: boolean;
     releaseAt: "mid-drag" | "after-commit" | "after-drain";
     existingOp?: boolean;
   }) {
     if (opts.existingOp) stage.order = ["xformOp:translate"];
     onWrite = () => {
-      if (opts.holdBetweenWrites && writeLog.length === 1) holdNextManifests += 1;
+      if (opts.staleManifest && writeLog.length > 0) holdNextManifests += 1;
       void renderState.refreshAfterEdit([PATH]);
       void stageState.refreshAfterEdit();
     };
@@ -418,22 +420,22 @@ describe("move then rotate keeps the moved position", () => {
   });
 
   it("stale manifest mid-rotate-drag", async () => {
-    const tx = await moveThenRotate({ holdBetweenWrites: true, releaseAt: "mid-drag" });
+    const tx = await moveThenRotate({ staleManifest: true, releaseAt: "mid-drag" });
     expect(tx).toBeCloseTo(5, 6);
   });
 
   it("stale manifest after the rotate commit", async () => {
-    const tx = await moveThenRotate({ holdBetweenWrites: true, releaseAt: "after-commit" });
+    const tx = await moveThenRotate({ staleManifest: true, releaseAt: "after-commit" });
     expect(tx).toBeCloseTo(5, 6);
   });
 
   it("stale manifest after the queue drain (last writer)", async () => {
-    const tx = await moveThenRotate({ holdBetweenWrites: true, releaseAt: "after-drain" });
+    const tx = await moveThenRotate({ staleManifest: true, releaseAt: "after-drain" });
     expect(tx).toBeCloseTo(5, 6);
   });
 
   it("existing translate op (1-write move)", async () => {
-    const tx = await moveThenRotate({ holdBetweenWrites: true, releaseAt: "mid-drag", existingOp: true });
+    const tx = await moveThenRotate({ staleManifest: true, releaseAt: "mid-drag", existingOp: true });
     expect(tx).toBeCloseTo(5, 6);
   });
 });
@@ -490,81 +492,61 @@ describe("stale details payload at the rotate commit", () => {
   });
 });
 
-describe("commit writes follow the drag's prim, not the live selection", () => {
-  // The tree stays clickable while a commit's writes await IPC: a
-  // selection change (or a tab switch) mid-commit must not redirect the
-  // later writes onto another prim/stage.
-  it("authors both writes on the original prim when the selection changes mid-commit", async () => {
+describe("the commit write follows the drag's prim, not the live selection", () => {
+  // The tree stays clickable while the commit's write awaits IPC: a
+  // selection change (or a tab switch) mid-write must not redirect it onto
+  // another prim/stage.
+  it("authors on the original prim and stage when the selection changes mid-write", async () => {
     await boot();
-    // A tree click lands the instant write 1 resolves: the live selection
-    // (and the active tab's stage) change while write 2 is still pending.
-    onWrite = () => {
-      if (writeLog.length === 1) {
-        stageState.selectedPath = "/Scene";
-        stageState.activeStageId = 2;
-      }
-    };
-    holdNextWrites = 2;
+    holdNextWrites = 1;
     beginDrag((p) => p.position.set(p.position.x + 5, p.position.y, p.position.z));
     const pending = endDrag();
     await flush();
-    releaseWrites(1); // write 1 resolves; the selection flips right here
-    await flush(); // write 2 (xformOpOrder) computes its target
+    // A tree click and a tab switch land while the write is pending.
+    stageState.selectedPath = "/Scene";
+    stageState.activeStageId = 2;
     releaseWrites(1);
     await pending;
     await flush();
 
-    const commitWrites = writeLog.filter((w) => w.name.startsWith("xformOp"));
-    expect(commitWrites).toHaveLength(2);
+    expect(writeLog.map((w) => w.name)).toEqual(["xformOp:translate", "xformOpOrder"]);
     expect(
-      commitWrites.every((w) => w.path === PATH && w.stageId === 1),
-      `writes went to ${JSON.stringify(commitWrites.map((w) => [w.path, w.stageId]))}`,
+      writeLog.every((w) => w.path === PATH && w.stageId === 1),
+      `writes went to ${JSON.stringify(writeLog.map((w) => [w.path, w.stageId]))}`,
     ).toBe(true);
     expect(stage.order).toEqual(["xformOp:translate"]);
   });
 });
 
-describe("a partially authored commit lands on stage truth", () => {
-  it("keeps the refreshed partial truth instead of the pre-drag latch when write 2 fails", async () => {
-    // Both ops exist, so the rotate drag emits exactly two writes: the
-    // rotateXYZ update and the pivot-residual translate update. Write 2
-    // fails on the backend after write 1 already landed: the node must
-    // sit on the stage's PARTIAL truth (rotated, stale translate), not
-    // snap back to the pre-drag latch.
+describe("a refused commit authors nothing and restores the pre-drag pose", () => {
+  it("keeps the pre-drag pose when the batch is refused", async () => {
+    // Both ops exist, so the rotate drag emits the rotateXYZ update and the
+    // pivot-residual translate update in one batch. The batch is refused:
+    // nothing lands, so the node goes back to its pre-drag matrix.
     stage.order = ["xformOp:rotateXYZ", "xformOp:translate"];
     stage.translate = [3, 0, 0];
     failWriteName = "xformOp:translate";
     mode = "rotate";
-    // The viewport's usd-stage-changed listener refreshes the scene as
-    // write 1 lands (partial truth reaches the node before write 2 fails).
-    onWrite = () => {
-      void renderState.refreshAfterEdit([PATH]);
-    };
     await boot();
     await drag((p) => {
       p.rotation.z += Math.PI / 2; // pivot at (3, 0, 0): a translate residual
     });
     await flush();
-    await flush();
 
     expect(gizmoPolicy.error).toContain("backend write failed");
-    // Write 1 landed; write 2 was refused by the backend.
-    expect(writeLog.map((w) => w.name)).toEqual(["xformOp:rotateXYZ"]);
-    const truth = composedLocal().toArray() as number[]; // Rz(90) * T(3)
-    const latch = new THREE.Matrix4().makeTranslation(3, 0, 0).toArray() as number[];
+    expect(writeLog).toHaveLength(0);
     const elements = node().matrix.elements;
+    const latch = new THREE.Matrix4().makeTranslation(3, 0, 0).toArray();
     for (let i = 0; i < 16; i++) {
-      expect(Math.abs(elements[i] - truth[i])).toBeLessThan(1e-6);
+      expect(Math.abs(elements[i] - latch[i])).toBeLessThan(1e-6);
     }
-    expect(truth).not.toEqual(latch); // control: the two poses genuinely differ
   });
 });
 
-describe("a multi-write commit refreshes the scene once, after its writes", () => {
-  // The viewport's usd-stage-changed listener, gate included: one event
-  // per write IPCs, so an ungated listener refreshes MID-COMMIT and
-  // renders the intermediate pose (a fresh rotateXYZ value the order does
-  // not carry yet composes as the original pose — the release snap-back).
+describe("a commit refreshes the scene once, after its write", () => {
+  // The viewport's usd-stage-changed listener, gate included: the commit
+  // owns the one refresh of its write, so an ungated listener must not
+  // refresh onto the pre-commit stage.
   function viewportListener() {
     onWrite = () => {
       if (gateCommitStageRefresh([PATH])) return;
@@ -572,26 +554,18 @@ describe("a multi-write commit refreshes the scene once, after its writes", () =
     };
   }
 
-  it("runs no manifest fetch while the write IPCs are in flight", async () => {
+  it("runs no manifest fetch while the write IPC is in flight", async () => {
     viewportListener();
     await boot();
     const before = manifestCalls;
-    // Fresh stack: the rotate creates xformOp:rotateXYZ and authors
-    // xformOpOrder, so the commit is two writes and two events.
     mode = "rotate";
-    holdNextWrites = 2;
+    holdNextWrites = 1;
     beginDrag((p) => {
       p.rotation.z += Math.PI / 2;
     });
     const pending = endDrag();
     await flush();
-    releaseWrites(1);
-    await flush();
 
-    // Write 1 landed, the order has not: a refresh here renders the
-    // ORIGINAL pose, which is exactly the flicker.
-    expect(stage.order).toEqual([]);
-    expect(stage.rotateXYZ[2]).toBeCloseTo(90, 6);
     expect(manifestCalls, "a mid-commit event refreshed the scene").toBe(before);
 
     releaseWrites(1);

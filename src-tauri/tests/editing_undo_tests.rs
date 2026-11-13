@@ -431,3 +431,161 @@ fn undo_redo_without_open_stage_fail() {
     let error = state.state.sender(0).expect_err("no stage is open");
     assert!(error.contains("no stage 0"), "got: {}", error);
 }
+
+// One gizmo commit is ONE undo step. The commit writes the mode op, its
+// pivot-residual translate and the xformOpOrder separately; as three
+// transactions the stack held entries whose value reverts composed to nothing
+// (the order write reverts first and takes the ops out of the order), which
+// read as dead undo presses. The batch request seals the commit as one entry.
+fn commit_writes(time: Option<f64>) -> Vec<usdbee_lib::stage::AttributeWrite> {
+    vec![
+        usdbee_lib::stage::AttributeWrite {
+            name: "xformOp:rotateXYZ".to_string(),
+            value: payload("float3", serde_json::json!([10.0, 20.0, 30.0])),
+            time,
+        },
+        usdbee_lib::stage::AttributeWrite {
+            name: "xformOp:translate".to_string(),
+            value: payload("double3", serde_json::json!([0.5, 0.0, 0.0])),
+            time,
+        },
+        usdbee_lib::stage::AttributeWrite {
+            name: "xformOpOrder".to_string(),
+            value: payload(
+                "token_array",
+                serde_json::json!(["xformOp:translate", "xformOp:rotateXYZ"]),
+            ),
+            time: None,
+        },
+    ]
+}
+
+const IDENTITY: [f64; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
+#[test]
+fn one_batched_commit_costs_one_undo_and_one_redo() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+    let before = details_via_owner(&state, "/World/Ball", None)
+        .local_transform
+        .expect("a prim with no ops reports an identity transform");
+    assert_eq!(before, IDENTITY);
+
+    usdbee_lib::stage::request_set_attribute_values(
+        &state.sender(),
+        "/World/Ball",
+        &commit_writes(None),
+    )
+    .expect("the whole commit authors");
+
+    let edited = details_via_owner(&state, "/World/Ball", None)
+        .local_transform
+        .expect("the commit authored a transform");
+    assert_ne!(edited, before, "the commit moved and rotated the prim");
+
+    assert!(request_undo(&state).expect("undo"));
+    assert_eq!(
+        details_via_owner(&state, "/World/Ball", None).local_transform,
+        Some(before),
+        "one undo restores the pre-commit pose exactly"
+    );
+    let undo = undo_state(&state);
+    assert!(!undo.can_undo, "the commit was one entry, not three");
+    assert!(undo.can_redo);
+
+    // Redo symmetry: the redo applies the entry's diff as one transaction, so
+    // it too leaves exactly one undo entry.
+    assert!(request_redo(&state).expect("redo"));
+    assert_eq!(
+        details_via_owner(&state, "/World/Ball", None).local_transform,
+        Some(edited),
+        "one redo re-applies the whole commit"
+    );
+    assert!(request_undo(&state).expect("undo the redo"));
+    assert!(
+        !undo_state(&state).can_undo,
+        "the redone commit is one entry too"
+    );
+    assert_eq!(
+        details_via_owner(&state, "/World/Ball", None).local_transform,
+        Some(before)
+    );
+}
+
+// The animated path samples the op values at the playhead and authors the
+// order at the default time — the same split, one entry.
+#[test]
+fn one_batched_commit_on_an_animated_stage_costs_one_undo() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "animated.usda");
+    let time = Some(24.0);
+    let before = details_via_owner(&state, "/Scene/Pulse", time)
+        .local_transform
+        .expect("the sampled translate composes");
+
+    usdbee_lib::stage::request_set_attribute_values(
+        &state.sender(),
+        "/Scene/Pulse",
+        &commit_writes(time),
+    )
+    .expect("the whole commit authors");
+
+    let edited = details_via_owner(&state, "/Scene/Pulse", time)
+        .local_transform
+        .expect("the commit authored a transform");
+    assert_ne!(edited, before);
+
+    assert!(request_undo(&state).expect("undo"));
+    assert_eq!(
+        details_via_owner(&state, "/Scene/Pulse", time).local_transform,
+        Some(before),
+        "one undo restores the sampled pose exactly"
+    );
+    assert!(!undo_state(&state).can_undo, "the commit was one entry");
+}
+
+// All or nothing: a batch whose second write is refused authors no part of
+// itself, so a half-applied commit can never reach the stage (or the stack).
+#[test]
+fn a_refused_batch_authors_nothing() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+
+    let error = usdbee_lib::stage::request_set_attribute_values(
+        &state.sender(),
+        "/World/Ball",
+        &[
+            usdbee_lib::stage::AttributeWrite {
+                name: "xformOp:translate".to_string(),
+                value: payload("double3", serde_json::json!([1.0, 2.0, 3.0])),
+                time: None,
+            },
+            // radius is declared float: a string value is refused.
+            usdbee_lib::stage::AttributeWrite {
+                name: "radius".to_string(),
+                value: payload("string", serde_json::json!("nope")),
+                time: None,
+            },
+        ],
+    )
+    .expect_err("the second write is refused");
+    assert!(!error.is_empty());
+
+    let details = details_via_owner(&state, "/World/Ball", None);
+    assert_eq!(
+        details.local_transform,
+        Some(IDENTITY),
+        "the first write did not land"
+    );
+    assert_eq!(
+        attribute(&details, "radius").value.data,
+        serde_json::json!(1.0),
+        "the refused write left the declared value alone"
+    );
+    assert!(
+        !undo_state(&state).can_undo,
+        "nothing joined the undo stack"
+    );
+}

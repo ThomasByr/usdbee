@@ -138,12 +138,10 @@ function pauseOnDragStart() {
 let gizmoCommitInFlight = false;
 
 // A commit is not one write: the mode op, its pivot-residual translate and
-// xformOpOrder author separately, and each write makes the backend emit a
-// usd-stage-changed event. An event handled MID-COMMIT refreshes the scene
-// onto an intermediate stage (a new op value the order does not carry yet
-// composes as the original pose), which renders as the release snap-back.
-// The viewport listener gates its events through gateCommitStageRefresh;
-// the commit runs one refresh of its own once its writes are done.
+// xformOpOrder author together. They land in ONE layer transaction, so the
+// backend emits one usd-stage-changed event. The viewport listener still
+// gates events through gateCommitStageRefresh: the commit owns the one
+// refresh of its own, once every write is on the stage.
 const deferredStagePaths = new Set<string>();
 
 // The viewport's usd-stage-changed gate: while a commit is in flight the
@@ -155,9 +153,8 @@ export function gateCommitStageRefresh(paths: string[]): boolean {
   return true;
 }
 
-// The one refresh a commit runs: whatever its own writes deferred, seeded
-// with the prim it authored (the partial-commit case refreshes that prim
-// itself). Ordered so the prim's own paths lead.
+// The one refresh a commit runs, over whatever its own write deferred (one
+// path, normally the prim it authored). Ordered so the seed leads.
 function drainDeferredStagePaths(seed: string[]): string[] {
   const paths = [...new Set([...seed, ...deferredStagePaths])];
   deferredStagePaths.clear();
@@ -175,15 +172,10 @@ const latchedNodeMatrix = new THREE.Matrix4();
 const latchedGroupMatrix = new THREE.Matrix4();
 let previewActive = false;
 
-// Drag-end bookkeeping: the release pose is a three-way policy. Full
-// success keeps the previewed pose (it equals the committed truth, so the
-// scene refresh lands seamlessly). A PARTIALLY authored commit (write 1
-// landed, write 2 failed) also keeps the pose — the awaited edit refresh
-// has already re-posed the node onto the partial stage truth, and a latch
-// restore would diverge it from the stage with nothing left to correct
-// it. Every other exit (guard refusal, no-op, failed compose, details
-// missing, nothing authored at all) hands the node back to its pre-drag
-// stage-truth matrix.
+// Drag-end bookkeeping: an all-or-nothing commit has two outcomes.
+// Authored: the previewed pose equals the committed truth, so keeping it
+// is seamless. Refused or failed: nothing landed, so the node goes back to
+// its pre-drag stage-truth matrix.
 function releasePreviewNode(viewer: RendererKit, keepPose: boolean) {
   if (!previewActive) return;
   previewActive = false;
@@ -284,30 +276,26 @@ function composeFor(details: PrimDetails, gizmoMode: GizmoMode, target: number[]
   });
 }
 
-// One composed op update -> set_attribute_value writes. Stops at the first
-// backend error; `authored` counts the writes that landed, which is what
-// the partial-commit path below turns on.
+// One composed op update -> ONE set_attribute_values call, so the whole
+// commit is a single layer transaction (one undo entry) and lands all at
+// once. Returns the backend error, or null on success.
 async function writeOpUpdate(
   writes: OpWrite[],
   opTime: number | null,
   primPath: string,
   stageId: number,
-): Promise<{ error: string | null; authored: number }> {
-  let authored = 0;
-  for (const write of writes) {
-    // xformOpOrder is uniform: it authors its default, never a time
-    // sample.
-    const error = await stageState.setAttributeValue(
-      write.name,
-      { type: write.type, data: write.data },
-      write.name === "xformOpOrder" ? null : opTime,
-      primPath,
-      stageId,
-    );
-    if (error !== null) return { error, authored };
-    authored++;
-  }
-  return { error: null, authored };
+): Promise<string | null> {
+  return stageState.setAttributeValues(
+    writes.map((write) => ({
+      name: write.name,
+      value: { type: write.type, data: write.data },
+      // xformOpOrder is uniform: it authors its default, never a time
+      // sample.
+      time: write.name === "xformOpOrder" ? null : opTime,
+    })),
+    primPath,
+    stageId,
+  );
 }
 
 // Absolute local-transform authoring for a prim that no drag owns (the dev
@@ -324,8 +312,7 @@ export async function authorLocalTransform(
   // Hybrid authoring time, same as the commit: a static stage authors at
   // the default time.
   const opTime: number | null = renderState.hasAnimated ? renderState.time : null;
-  const { error } = await writeOpUpdate(result.writes, opTime, details.path, stageState.activeStageId);
-  return error;
+  return writeOpUpdate(result.writes, opTime, details.path, stageState.activeStageId);
 }
 
 // Drag end -> desired USD local matrix -> the op(s) to author. The
@@ -379,12 +366,10 @@ async function handleGizmoCommit(commit: GizmoCommit) {
       if (gizmo) reattach(gizmo, viewer, commit.endWorld);
       return;
     }
-    // Whether ANY write landed: a partial commit's refresh must run, and
-    // its verdict decides the release pose (see releasePreviewNode).
-    // The writes must not follow the live selection: the tree (and the tab
-    // bar) stay clickable while they await IPC, so a mid-commit selection
-    // change would redirect the later writes onto another prim/stage. Pin
-    // the drag's prim and stage for every write.
+    // The write must not follow the live selection: the tree (and the tab
+    // bar) stay clickable while it awaits IPC, so a mid-commit selection
+    // change would redirect it onto another prim/stage. Pin the drag's prim
+    // and stage.
     const primPath = details.path;
     const stageId = stageState.activeStageId;
     // Hybrid authoring time: on a static stage the op values author at
@@ -395,25 +380,16 @@ async function handleGizmoCommit(commit: GizmoCommit) {
     // shortcut: stage-level granularity, not per-prim; per-prim when
     // animated stages' static prims feel slow to release
     const opTime: number | null = renderState.hasAnimated ? renderState.time : null;
-    const write = await writeOpUpdate(result.writes, opTime, primPath, stageId);
-    const failed = write.error !== null;
-    const authoredAny = write.authored > 0;
-    if (failed) gizmoPolicy.error = write.error;
-    keepPreviewPose = !failed;
-    if (failed && authoredAny) {
-      // Write 1's event refresh already applied the partial truth to the
-      // node; restoring the pre-drag latch now would leave the node
-      // diverged from the stage with nothing to correct it. Await a scene
-      // refresh on the drag's prim: its manifest application re-poses the
-      // node onto (partial) stage truth, so the release keeps this pose.
-      // Runs inside the try: the controls stay disabled until it lands.
-      // Its gated events ride along, so the finally drains nothing here.
-      await refreshSceneAfterEdit(viewer, drainDeferredStagePaths([primPath]));
-      keepPreviewPose = true;
+    const error = await writeOpUpdate(result.writes, opTime, primPath, stageId);
+    if (error !== null) {
+      gizmoPolicy.error = error;
+      if (gizmo) reattach(gizmo, viewer, commit.endWorld);
+      return;
     }
+    keepPreviewPose = true;
     // Keep commits disabled until fresh details land; a second drag must
     // never compute from the pre-commit local transform.
-    if (!failed) await stageState.refreshAfterEdit();
+    await stageState.refreshAfterEdit();
     if (gizmo) reattach(gizmo, viewer, commit.endWorld);
   } finally {
     // The commit's writes deferred their events: one refresh applies the

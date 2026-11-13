@@ -125,6 +125,7 @@ pub fn run() {
             stage::get_material_data,
             stage::get_material_batch,
             stage::set_attribute_value,
+            stage::set_attribute_values,
             stage::set_prim_metadata,
             stage::set_variant_selection,
             stage::set_prim_texture,

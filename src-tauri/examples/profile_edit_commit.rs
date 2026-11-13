@@ -1,6 +1,9 @@
 // Gizmo-commit cost probe over the real stage-owner path: simulates the
 // exact request sequence a viewport drag-release triggers (commit lock:
 // details -> op writes -> tree -> details; then per-write event refreshes:
+// the single-write path (commit B) against the batched request (commit C),
+// which is what the gizmo commit sends: one transaction, one event, one
+// cache clear.
 // manifest + geometry prefetch + tree) and prints per-step wall times plus
 // tessellation re-runs, so a "the app hangs after I release the gizmo"
 // report can be attributed to a step instead of guessed at.
@@ -13,7 +16,8 @@ use std::time::{Duration, Instant};
 
 use usdbee_lib::stage::{
     noop_sink, request_geometry_data, request_scene_manifest, request_set_attribute_value,
-    request_stage_details, request_stage_tree, StageState,
+    request_set_attribute_values, request_stage_details, request_stage_tree, AttributeWrite,
+    StageState,
 };
 use usdbee_lib::values::{PrimDetails, ValuePayload};
 
@@ -280,12 +284,72 @@ fn main() {
         event_b, tess_b
     );
 
+    // --- Commit C: the batched request (one transaction) ----------------
+    println!("\n-- commit C: rotate release, batched (one write, one event) --");
+    let start = Instant::now();
+    request_stage_details(&sender, &target_path, time).unwrap();
+    let mut lock_c = step("lock: refreshSelectedDetails", start, "");
+    let start = Instant::now();
+    request_set_attribute_values(
+        &sender,
+        &target_path,
+        &[
+            AttributeWrite {
+                name: "xformOp:rotateXYZ".into(),
+                value: ValuePayload {
+                    r#type: "float3".into(),
+                    data: serde_json::json!([0.0, 0.0, 45.0]),
+                    truncated: None,
+                    count: None,
+                },
+                time: None,
+            },
+            AttributeWrite {
+                name: "xformOpOrder".into(),
+                value: ValuePayload {
+                    r#type: "token_array".into(),
+                    data: serde_json::json!(order_with_rotate),
+                    truncated: None,
+                    count: None,
+                },
+                time: None,
+            },
+        ],
+    )
+    .expect("batched rotate write");
+    lock_c += step("lock: write the whole batch", start, "");
+    let start = Instant::now();
+    let _ = request_stage_tree(&sender).unwrap();
+    lock_c += step("lock: refreshAfterEdit tree", start, "cache cleared once");
+    let start = Instant::now();
+    request_stage_details(&sender, &target_path, time).unwrap();
+    lock_c += step("lock: reselect details", start, "");
+    println!("LOCK TOTAL {:.1} ms (gizmo stays disabled)", lock_c);
+
+    println!("-- commit C: event refresh (one event) --");
+    let start = Instant::now();
+    let _ = request_scene_manifest(&sender, time).unwrap();
+    let mut event_c = step("event: manifest", start, "");
+    let start = Instant::now();
+    request_geometry_data(&sender, &target_path, time).expect("geometry prefetch");
+    event_c += step("event: geometry prefetch", start, "");
+    let start = Instant::now();
+    let _ = request_stage_tree(&sender).unwrap();
+    event_c += step("event: page tree", start, "");
+    let tess_c = state.mesh_tessellations(info.stage_id).unwrap() - tessellations - tess_a - tess_b;
     println!(
-        "\nSUMMARY move: lock {:.0} ms + events {:.0} ms | rotate: lock {:.0} ms + events {:.0} ms | re-tessellations {}",
+        "EVENT TOTAL {:.1} ms  (re-tessellations: {})",
+        event_c, tess_c
+    );
+
+    println!(
+        "\nSUMMARY move: lock {:.0} ms + events {:.0} ms | rotate (3 writes): lock {:.0} ms + events {:.0} ms | rotate (batched): lock {:.0} ms + events {:.0} ms | re-tessellations {}",
         lock_a,
         ev_manifest + ev_geometry + ev_tree,
         lock_b,
         event_b,
-        tess_a + tess_b
+        lock_c,
+        event_c,
+        tess_a + tess_b + tess_c
     );
 }

@@ -20,7 +20,7 @@ vi.mock("$lib/stage/stageState.svelte", () => {
     refreshAfterEdit: vi.fn(async () => {}),
     selectPrim: vi.fn(async () => true),
     deselectPrim: vi.fn(),
-    setAttributeValue: vi.fn(async () => null),
+    setAttributeValues: vi.fn(async () => null),
   };
   return { stageState };
 });
@@ -70,7 +70,7 @@ const stage = stageState as unknown as {
   refreshAfterEdit: ReturnType<typeof vi.fn>;
   selectPrim: ReturnType<typeof vi.fn>;
   deselectPrim: ReturnType<typeof vi.fn>;
-  setAttributeValue: ReturnType<typeof vi.fn>;
+  setAttributeValues: ReturnType<typeof vi.fn>;
 };
 const tabs = tabsState as unknown as {
   openTab: ReturnType<typeof vi.fn>;
@@ -177,7 +177,7 @@ beforeEach(() => {
   stage.fetchPrimDetails.mockResolvedValue(details());
   stage.refreshAfterEdit.mockReset();
   stage.refreshAfterEdit.mockResolvedValue(undefined);
-  stage.setAttributeValue.mockReset();
+  stage.setAttributeValues.mockReset();
   tabs.openTab.mockReset();
   tabs.closeConfirmed.mockReset();
   state.time = 5;
@@ -493,7 +493,7 @@ describe("transform_object", () => {
     expect(mode).toBe("translate");
     expect(matrix).toEqual(new THREE.Matrix4().makeTranslation(1, 2, 3).toArray());
     // Never a raw attribute write from the bridge.
-    expect(stage.setAttributeValue).not.toHaveBeenCalled();
+    expect(stage.setAttributeValues).not.toHaveBeenCalled();
     expect(stage.refreshAfterEdit).toHaveBeenCalled();
   });
 

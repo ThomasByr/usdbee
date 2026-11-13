@@ -367,6 +367,29 @@ describe("stageState", () => {
     expect(stageState.selectedPath).toBe("/A");
   });
 
+  it("setAttributeValues sends the whole write list in one call", async () => {
+    mockedInvoke.mockResolvedValueOnce(info);
+    await stageState.loadStage("/a.usda");
+    await stageState.selectPrim("/A");
+    mockedInvoke.mockResolvedValue(undefined);
+    const writes = [
+      { name: "xformOp:translate", value: { type: "vec3d", data: [1, 2, 3] }, time: 7 },
+      { name: "xformOpOrder", value: { type: "token_array", data: ["xformOp:translate"] }, time: null },
+    ];
+
+    const error = await stageState.setAttributeValues(writes as never);
+
+    expect(error).toBeNull();
+    expect(mockedInvoke).toHaveBeenLastCalledWith("set_attribute_values", {
+      stageId: 7,
+      path: "/A",
+      writes,
+    });
+
+    stageState.deselectPrim();
+    expect(await stageState.setAttributeValues(writes as never)).toBe("no prim selected");
+  });
+
   it("setPrimMetadata authors an explicit path and surfaces backend errors", async () => {
     mockedInvoke.mockResolvedValueOnce(info);
     await stageState.loadStage("/a.usda");

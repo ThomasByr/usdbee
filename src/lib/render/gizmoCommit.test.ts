@@ -12,7 +12,7 @@ vi.mock("$lib/stage/stageState.svelte", () => {
     selectedPath: "/Scene/Prim" as string | null,
     details: null as unknown,
     refreshSelectedDetails: vi.fn(async () => {}),
-    setAttributeValue: vi.fn(async () => null),
+    setAttributeValues: vi.fn(async () => null),
     refreshAfterEdit: vi.fn(async () => {}),
   };
   return { stageState };
@@ -29,7 +29,7 @@ const stage = stageState as unknown as {
   selectedPath: string | null;
   details: PrimDetails | null;
   refreshSelectedDetails: ReturnType<typeof vi.fn>;
-  setAttributeValue: ReturnType<typeof vi.fn>;
+  setAttributeValues: ReturnType<typeof vi.fn>;
   refreshAfterEdit: ReturnType<typeof vi.fn>;
 };
 
@@ -118,8 +118,8 @@ beforeEach(() => {
   stage.details = null;
   stage.refreshSelectedDetails.mockReset();
   stage.refreshSelectedDetails.mockResolvedValue(undefined);
-  stage.setAttributeValue.mockReset();
-  stage.setAttributeValue.mockResolvedValue(null);
+  stage.setAttributeValues.mockReset();
+  stage.setAttributeValues.mockResolvedValue(null);
   stage.refreshAfterEdit.mockReset();
   stage.refreshAfterEdit.mockResolvedValue(undefined);
 });
@@ -289,7 +289,7 @@ describe("shadow requests", () => {
 
     await commit(5, 5); // no-op drag: nothing authored, pose restored
 
-    expect(stage.setAttributeValue).not.toHaveBeenCalled();
+    expect(stage.setAttributeValues).not.toHaveBeenCalled();
     expect(consumeShadowUpdate()).toBe(true);
   });
 });
@@ -305,7 +305,7 @@ describe("stale stack guard", () => {
 
     await commit(5, 8);
 
-    expect(stage.setAttributeValue).not.toHaveBeenCalled();
+    expect(stage.setAttributeValues).not.toHaveBeenCalled();
     expect(stage.refreshAfterEdit).not.toHaveBeenCalled();
     expect(gizmoPolicy.error).toContain("selection changed during the drag");
   });
@@ -318,13 +318,32 @@ describe("stale stack guard", () => {
     await commit(5, 8);
 
     expect(gizmoPolicy.error).toBeNull();
-    expect(stage.setAttributeValue).toHaveBeenCalledWith(
-      "xformOp:translate",
-      { type: "double3", data: [8, 0, 0] },
-      null,
+    expect(stage.setAttributeValues).toHaveBeenCalledTimes(1);
+    expect(stage.setAttributeValues).toHaveBeenCalledWith(
+      [{ name: "xformOp:translate", value: { type: "double3", data: [8, 0, 0] }, time: null }],
       "/Scene/Prim",
       1,
     );
+  });
+
+  it("sends the op and the order as one call, in compose order", async () => {
+    const viewer = makeViewer(new THREE.Object3D());
+    stage.details = detailsAt(5);
+    initGizmo(viewer, () => "rotate");
+
+    await commit(5, 8);
+
+    expect(stage.setAttributeValues).toHaveBeenCalledTimes(1);
+    const [writes, path, stageId] = stage.setAttributeValues.mock.calls[0];
+    expect(writes.map((w: { name: string }) => w.name)).toEqual([
+      "xformOp:rotateXYZ",
+      "xformOp:translate",
+      "xformOpOrder",
+    ]);
+    expect(path).toBe("/Scene/Prim");
+    expect(stageId).toBe(1);
+    // xformOpOrder is uniform: it never takes a time sample.
+    expect(writes[2].time).toBeNull();
   });
 });
 
@@ -338,10 +357,8 @@ describe("hybrid authoring time", () => {
 
     await commit(5, 8);
 
-    expect(stage.setAttributeValue).toHaveBeenCalledWith(
-      "xformOp:translate",
-      { type: "double3", data: [8, 0, 0] },
-      null,
+    expect(stage.setAttributeValues).toHaveBeenCalledWith(
+      [{ name: "xformOp:translate", value: { type: "double3", data: [8, 0, 0] }, time: null }],
       "/Scene/Prim",
       1,
     );
@@ -356,10 +373,8 @@ describe("hybrid authoring time", () => {
 
     await commit(5, 8);
 
-    expect(stage.setAttributeValue).toHaveBeenCalledWith(
-      "xformOp:translate",
-      { type: "double3", data: [8, 0, 0] },
-      5,
+    expect(stage.setAttributeValues).toHaveBeenCalledWith(
+      [{ name: "xformOp:translate", value: { type: "double3", data: [8, 0, 0] }, time: 5 }],
       "/Scene/Prim",
       1,
     );
@@ -433,15 +448,13 @@ describe("pause on gizmo drag start", () => {
     // The drag moved the prim +3 from its animated pose at 5.
     const pending = commit(5, 8);
     expect(stage.refreshSelectedDetails).toHaveBeenCalledTimes(1);
-    expect(stage.setAttributeValue).not.toHaveBeenCalled();
+    expect(stage.setAttributeValues).not.toHaveBeenCalled();
 
     release();
     await pending;
     // Fresh details (5) + the +3 delta: the stale 1 would author 4.
-    expect(stage.setAttributeValue).toHaveBeenCalledWith(
-      "xformOp:translate",
-      { type: "double3", data: [8, 0, 0] },
-      null,
+    expect(stage.setAttributeValues).toHaveBeenCalledWith(
+      [{ name: "xformOp:translate", value: { type: "double3", data: [8, 0, 0] }, time: null }],
       "/Scene/Prim",
       1,
     );
@@ -468,15 +481,13 @@ describe("pause on gizmo drag start", () => {
 
     const pending = commit(5, 8);
     expect(stage.refreshSelectedDetails).toHaveBeenCalledTimes(1);
-    expect(stage.setAttributeValue).not.toHaveBeenCalled();
+    expect(stage.setAttributeValues).not.toHaveBeenCalled();
 
     release();
     await pending;
     // Fresh details (5) + the +3 delta: the stale 1 would author 4.
-    expect(stage.setAttributeValue).toHaveBeenCalledWith(
-      "xformOp:translate",
-      { type: "double3", data: [8, 0, 0] },
-      null,
+    expect(stage.setAttributeValues).toHaveBeenCalledWith(
+      [{ name: "xformOp:translate", value: { type: "double3", data: [8, 0, 0] }, time: null }],
       "/Scene/Prim",
       1,
     );

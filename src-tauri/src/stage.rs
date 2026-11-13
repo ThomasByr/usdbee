@@ -32,6 +32,17 @@ use crate::values::{
     local_transform, serialize_details, value_payload_to_sdf, PrimDetails, ValuePayload, XformQuery,
 };
 
+/// One attribute value a batched commit authors: the write
+/// `set_attribute_value` takes, listed so the whole commit is one layer
+/// transaction (one undo entry) instead of one per write.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttributeWrite {
+    pub name: String,
+    pub value: ValuePayload,
+    /// USD time code (frames), never seconds; None = the default value.
+    pub time: Option<f64>,
+}
+
 pub enum StageRequest {
     Open {
         path: PathBuf,
@@ -133,6 +144,15 @@ pub enum StageRequest {
         value: ValuePayload,
         // USD time code (frames), never seconds; None = the default value.
         time: Option<f64>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    // One commit's writes as ONE layer transaction: the mode op, its pivot
+    // residual translate and the xformOpOrder undo together. Sent as separate
+    // SetValues they seal one undo entry each, and reverting an op value the
+    // order no longer carries changes no matrix (dead undo presses).
+    SetValues {
+        path: String,
+        writes: Vec<AttributeWrite>,
         reply: mpsc::Sender<Result<(), String>>,
     },
     SetMetadata {
@@ -1063,6 +1083,68 @@ fn spawn_stage_owner_for(
                     }
                     let _ = reply.send(response);
                 }
+                StageRequest::SetValues {
+                    path,
+                    writes,
+                    reply,
+                } => {
+                    let response = match current_stage {
+                        Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            author_attribute_values(stage, &path, &writes)
+                        }))
+                        .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    if response.is_ok() {
+                        if let (Some(ref stage), Some(ref replay)) =
+                            (&current_stage, &current_replay)
+                        {
+                            let emitted = edit_emission_path(stage, &path);
+                            // The same keep the single write earns, decided over
+                            // the whole batch: one sampled or non-xform write
+                            // takes the coarse clear.
+                            let warm_xform = writes.iter().all(|write| {
+                                write.time.is_none()
+                                    && (write.name == "xformOpOrder"
+                                        || write.name.starts_with("xformOp:"))
+                            });
+                            record_user_mutation(
+                                replay,
+                                &mut undo_journal,
+                                &mut redo_stack,
+                                &mut dirty_ledger,
+                                stage.edit_target().layer_identifier(),
+                                &path,
+                                warm_xform,
+                            );
+                            if warm_xform {
+                                warm_xform_keep(
+                                    &sink,
+                                    &mut mesh_cache,
+                                    &mut pose_frames,
+                                    &mut manifest_skeleton,
+                                    &mut resolve_memo,
+                                    &mut transform_memo,
+                                    &mut warm,
+                                    &emitted,
+                                );
+                            } else {
+                                after_mutation(
+                                    &sink,
+                                    &mut mesh_cache,
+                                    &mut pose_frames,
+                                    &mut manifest_skeleton,
+                                    &mut stage_tree,
+                                    &mut resolve_memo,
+                                    &mut transform_memo,
+                                    &mut warm,
+                                    &emitted,
+                                );
+                            }
+                        }
+                    }
+                    let _ = reply.send(response);
+                }
                 StageRequest::SetMetadata {
                     path,
                     key,
@@ -1797,6 +1879,61 @@ fn author_attribute_value(
         }
     }
     Ok(())
+}
+
+/// Author a batch of attribute writes on one prim as ONE layer transaction,
+/// so the crate seals one undo entry for the whole commit. The authoring rules
+/// are `author_attribute_value`'s (set a composed value, create what nothing
+/// declares), queued into one `Stage::edit`.
+fn author_attribute_values(
+    stage: &Stage,
+    path: &str,
+    writes: &[AttributeWrite],
+) -> Result<(), String> {
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let prim = editable_prim(stage, path, false)?;
+    let declared = prim.attributes().map_err(stage_err)?;
+    let mut prepared = Vec::with_capacity(writes.len());
+    for write in writes {
+        let value = value_payload_to_sdf(&write.value)?;
+        // The composed declaration outranks the payload spelling: an existing
+        // op keeps the type the stage gives it.
+        let declared_type = declared
+            .iter()
+            .find(|attribute| attribute.name() == write.name.as_str())
+            .map(|attribute| attribute.type_name())
+            .transpose()
+            .map_err(stage_err)?
+            .flatten();
+        let type_name = match declared_type {
+            Some(type_name) => type_name,
+            None => payload_type_name(&write.value)?,
+        };
+        let property_path = prim
+            .path()
+            .append_property(&write.name)
+            .map_err(|e| format!("invalid attribute path {}.{}: {}", path, write.name, e))?;
+        prepared.push((
+            property_path,
+            value,
+            write.time.map(TimeCode::new),
+            type_name,
+        ));
+    }
+    // All or nothing: the crate drops the queued writes when the closure
+    // fails, so a refused batch authors nothing.
+    stage
+        .edit(|edit| -> Result<(), StageAuthoringError> {
+            for (property_path, value, time, type_name) in prepared {
+                edit.attribute_builder(property_path, type_name)
+                    .set_at(value, time)
+                    .build()?;
+            }
+            Ok(())
+        })
+        .map_err(|e| format!("failed to author {}: {}", path, e))
 }
 
 /// Author a prim metadata field on the current edit target. Only the keys
@@ -5142,6 +5279,36 @@ pub fn request_material_batch(
     sender
         .send(StageRequest::GetMaterialBatch {
             paths: paths.to_vec(),
+            reply,
+        })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Async command so Tauri runs it off the main thread; the body stays
+// synchronous and blocks its runtime worker until the stage owner replies.
+#[tauri::command]
+pub async fn set_attribute_values(
+    stage_id: u64,
+    path: String,
+    writes: Vec<AttributeWrite>,
+    state: tauri::State<'_, StageState>,
+) -> Result<(), String> {
+    request_set_attribute_values(&state.sender(stage_id)?, &path, &writes)
+}
+
+pub fn request_set_attribute_values(
+    sender: &mpsc::Sender<StageRequest>,
+    path: &str,
+    writes: &[AttributeWrite],
+) -> Result<(), String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::SetValues {
+            path: path.to_string(),
+            writes: writes.to_vec(),
             reply,
         })
         .map_err(|_| "stage service unavailable".to_string())?;

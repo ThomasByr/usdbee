@@ -284,6 +284,28 @@ export const stageState = $state({
     }
   },
 
+  // Author several attribute values on one prim in ONE layer transaction
+  // (one undo entry; all-or-nothing). The gizmo commit needs this: its op
+  // value, pivot residual and xformOpOrder author together.
+  async setAttributeValues(
+    writes: { name: string; value: ValuePayload; time: number | null }[],
+    path: string | null = null,
+    stageId: number | null = null,
+  ): Promise<string | null> {
+    const target = path ?? this.selectedPath;
+    if (!target) return "no prim selected";
+    try {
+      await invoke("set_attribute_values", {
+        stageId: stageId ?? this.activeStageId,
+        path: target,
+        writes,
+      });
+      return null;
+    } catch (e) {
+      return typeof e === "string" ? e : String(e);
+    }
+  },
+
   // Author a metadata field on the selected prim; an explicit `path`
   // (appearance popover, branch application) authors that prim instead.
   // The usd-stage-changed event drives the tree/details/manifest refresh.
