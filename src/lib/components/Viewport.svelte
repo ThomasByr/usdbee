@@ -24,6 +24,7 @@
   import type { GizmoMode } from "$lib/render/xformOps";
   import type { RendererKit } from "$lib/three/RendererKit.svelte";
   import { controlsState } from "$lib/state/controlsState.svelte";
+  import { setBridgeViewer } from "$lib/commands/viewerRef";
   import { formatTimeline, formatTimelineEnd, playbackState } from "$lib/state/playbackState.svelte";
   import * as THREE from "three";
   import Toolbar from "./Toolbar.svelte";
@@ -159,6 +160,10 @@
 
     installPlaybackDriver(viewer);
 
+    // The palette runs the same commands the dev bridge does and has no
+    // viewer of its own: publish the live one for the whole mount.
+    setBridgeViewer(viewer);
+
     // Dev-only MCP bridge. The dynamic import sits behind the same DEV flag
     // the bridge's own gate uses, so a release bundle carries neither.
     let stopBridge: (() => void) | null = null;
@@ -212,6 +217,7 @@
 
     return () => {
       disposed = true;
+      setBridgeViewer(null);
       stopBridge?.();
       stopKeepAlive?.();
       unlisteners.forEach((u) => u.then((f) => f()));
