@@ -1,4 +1,5 @@
-export function formatKeyName(key: string) {
+export function formatKeyName(key: string): string {
+  if (key.startsWith("mod+")) return "Ctrl+" + formatKeyName(key.slice(4));
   if (key === " ") return "Space";
   if (key === "control") return "Ctrl";
   if (key === "shift") return "Shift";

@@ -1,4 +1,19 @@
-export const controlsState = $state({
+export const DEFAULT_KEYBINDINGS = {
+  forward: "z",
+  backward: "s",
+  left: "q",
+  right: "d",
+  turnLeft: "a",
+  turnRight: "e",
+  up: " ",
+  down: "shift",
+  gizmoTranslate: "1",
+  gizmoRotate: "2",
+  gizmoScale: "3",
+  commandPalette: "mod+p",
+};
+
+const CONTROL_DEFAULTS = {
   moveSpeedFactor: 1.0,
   rotSpeedFactor: 1.0,
   invertMouseX: false,
@@ -6,20 +21,12 @@ export const controlsState = $state({
   mouseButtonLeft: "rotate",
   mouseButtonMiddle: "zoom",
   mouseButtonRight: "pan",
-  keybindings: {
-    forward: "z",
-    backward: "s",
-    left: "q",
-    right: "d",
-    turnLeft: "a",
-    turnRight: "e",
-    up: " ",
-    down: "shift",
-    gizmoTranslate: "1",
-    gizmoRotate: "2",
-    gizmoScale: "3",
-    commandPalette: "mod+p",
-  },
+  paletteTabExecutes: true,
+};
+
+export const controlsState = $state({
+  ...CONTROL_DEFAULTS,
+  keybindings: { ...DEFAULT_KEYBINDINGS },
 });
 
 export function saveControlPreferences() {
@@ -33,8 +40,24 @@ export function saveControlPreferences() {
       mouseButtonLeft: controlsState.mouseButtonLeft,
       mouseButtonMiddle: controlsState.mouseButtonMiddle,
       mouseButtonRight: controlsState.mouseButtonRight,
+      paletteTabExecutes: controlsState.paletteTabExecutes,
     }),
   );
+}
+
+export function saveKeybindings() {
+  localStorage.setItem("usdbee_keybindings", JSON.stringify(controlsState.keybindings));
+}
+
+export function resetKeybindings() {
+  // In place so a bound `keybindings` prop sees the reset without a reassign.
+  Object.assign(controlsState.keybindings, DEFAULT_KEYBINDINGS);
+  saveKeybindings();
+}
+
+export function resetControls() {
+  Object.assign(controlsState, CONTROL_DEFAULTS);
+  saveControlPreferences();
 }
 
 export function loadControlPreferences() {
@@ -49,6 +72,8 @@ export function loadControlPreferences() {
       if (parsed.mouseButtonLeft !== undefined) controlsState.mouseButtonLeft = parsed.mouseButtonLeft;
       if (parsed.mouseButtonMiddle !== undefined) controlsState.mouseButtonMiddle = parsed.mouseButtonMiddle;
       if (parsed.mouseButtonRight !== undefined) controlsState.mouseButtonRight = parsed.mouseButtonRight;
+      if (parsed.paletteTabExecutes !== undefined)
+        controlsState.paletteTabExecutes = parsed.paletteTabExecutes;
     } catch (e) {
       console.warn("Failed to load control preferences", e);
     }

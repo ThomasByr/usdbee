@@ -6,7 +6,6 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
   import { onMount, untrack } from "svelte";
-  import { formatKeyName } from "$lib/utils/format";
   import ErrorModal from "$lib/components/ErrorModal.svelte";
   import TabBar from "$lib/components/TabBar.svelte";
   import FilesTab from "$lib/components/tabs/FilesTab.svelte";
@@ -530,7 +529,6 @@
             usdCameras={viewer.usdCameras}
             triangleCount={viewer.triangleCount}
             {saveControlPreferences}
-            {formatKeyName}
             keysPressed={viewer.keysPressed}
             {updateOmniverseUrl}
           />

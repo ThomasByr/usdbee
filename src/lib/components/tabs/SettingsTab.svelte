@@ -5,7 +5,14 @@
   import { tabsState } from "$lib/state/tabsState.svelte";
   import { openContainingFolder } from "$lib/utils/reveal";
   import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
+  import {
+    controlsState,
+    resetControls,
+    resetKeybindings,
+    saveKeybindings,
+  } from "$lib/state/controlsState.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
+  import KeyRecorder from "$lib/components/KeyRecorder.svelte";
 
   let {
     showWireframe = $bindable(),
@@ -25,7 +32,6 @@
     usdCameras,
     triangleCount,
     saveControlPreferences,
-    formatKeyName,
     keysPressed,
     updateOmniverseUrl,
   } = $props<any>();
@@ -79,7 +85,12 @@
   </div>
 
   <div class="settings-group">
-    <h3>Keybindings & Control</h3>
+    <div style="display: flex; align-items: center; justify-content: space-between;">
+      <h3>Keybindings & Control</h3>
+      <button class="reset-btn" onclick={resetControls} title="Restore mouse and speed defaults">
+        Reset controls
+      </button>
+    </div>
     <label style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
       Movement Speed (x{moveSpeedFactor.toFixed(1)})
       <input
@@ -157,25 +168,28 @@
     </label>
 
     <div style="font-size: 11px; color: var(--text-dim); text-transform: uppercase; margin: 8px 0 4px 0;">
-      Keyboard
+      Command Palette
     </div>
-    {#each Object.entries(keybindings) as [action, key]}
+    <label style="margin-bottom: 8px;">
+      <input
+        type="checkbox"
+        bind:checked={controlsState.paletteTabExecutes}
+        onchange={saveControlPreferences}
+      /> Tab executes highlighted command
+    </label>
+
+    <div style="display: flex; align-items: center; justify-content: space-between; margin: 8px 0 4px 0;">
+      <span style="font-size: 11px; color: var(--text-dim); text-transform: uppercase;">Keyboard</span>
+      <button class="reset-btn" onclick={resetKeybindings} title="Restore default shortcuts">
+        Reset keyboard
+      </button>
+    </div>
+    {#each Object.keys(keybindings) as action}
       <div
         style="display: flex; align-items: center; justify-content: space-between; font-size: 13px; margin-bottom: 4px;"
       >
         <span style="text-transform: capitalize;">{action}</span>
-        <button
-          class="keybtn"
-          onclick={() => {
-            const newKey = prompt(`Press new key for ${action}:`);
-            if (newKey) {
-              keybindings[action as keyof typeof keybindings] = newKey.toLowerCase();
-              localStorage.setItem("usdbee_keybindings", JSON.stringify(keybindings));
-            }
-          }}
-        >
-          {formatKeyName(key)}
-        </button>
+        <KeyRecorder bind:binding={keybindings[action]} onchange={saveKeybindings} />
       </div>
     {/each}
   </div>
