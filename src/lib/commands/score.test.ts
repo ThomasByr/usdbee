@@ -18,8 +18,9 @@ const cmds: Command[] = [
 const names = (list: Command[]) => list.map((cmd) => cmd.name);
 
 describe("rankCommands", () => {
-  it("puts an exact name match first", () => {
-    expect(names(rankCommands(cmds, "play").nameMatches).slice(0, 1)).toEqual(["play"]);
+  it("ranks a short exact name above a longer name it prefixes", () => {
+    // "play" beats "play_scene" on length alone: both start at 0 with no gaps.
+    expect(names(rankCommands(cmds, "play").nameMatches)).toEqual(["play", "play_scene"]);
   });
 
   it("ranks a prefix above a scattered subsequence", () => {

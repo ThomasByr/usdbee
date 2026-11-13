@@ -5,8 +5,8 @@ import type { Command } from "./registry.mjs";
 
 // Weights keep the ordering the palette needs without a formula anyone has to
 // reverse-engineer: an earlier and tighter match dominates any length, and a
-// length difference always beats nothing. Exact match outranks everything.
-const EXACT_BONUS = 1_000_000;
+// length difference always beats nothing. An exact match starts at 0 with no
+// gaps, so it tops the list on the base formula alone.
 const START_WEIGHT = 1000;
 const GAP_WEIGHT = 100;
 
@@ -23,8 +23,7 @@ function matchScore(text: string, query: string): number | null {
     else gaps += at - from;
     from = at + 1;
   }
-  const score = -start * START_WEIGHT - gaps * GAP_WEIGHT - haystack.length;
-  return haystack === query ? score + EXACT_BONUS : score;
+  return -start * START_WEIGHT - gaps * GAP_WEIGHT - haystack.length;
 }
 
 function ranked(matches: { cmd: Command; score: number }[]): Command[] {
