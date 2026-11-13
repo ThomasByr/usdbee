@@ -6,7 +6,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { tabsState, tabDisplayName } from "./tabsState.svelte";
+import { tabsState, tabDisplayName, type TabCameraView } from "./tabsState.svelte";
 import { stageState } from "../stage/stageState.svelte";
 import { editState } from "./editState.svelte";
 import { layerTextState } from "./layerTextState.svelte";
@@ -132,6 +132,9 @@ beforeEach(async () => {
   tabsState.pendingCloseDirty = 0;
   tabsState.loadScene = vi.fn().mockResolvedValue(undefined);
   tabsState.resetScene = vi.fn();
+  tabsState.cameras.clear();
+  tabsState.readCamera = () => null;
+  tabsState.applyCamera = () => {};
   // The path-open flow is event-driven like the dialog flow; both stores'
   // listeners must be wired for openTab.
   await tabsState.init({ loadScene: tabsState.loadScene, resetScene: tabsState.resetScene });
@@ -441,6 +444,65 @@ describe("setActive", () => {
     await tabsState.setActive(tabsState.activeId);
 
     expect(tabsState.loadScene).not.toHaveBeenCalled();
+  });
+
+  it("captures the camera on leave and restores it on return", async () => {
+    const viewA: TabCameraView = { position: [1, 2, 3], target: [0, 0, 0], fov: 40 };
+    const viewB: TabCameraView = { position: [4, 5, 6], target: [1, 1, 1], fov: 50 };
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    const applyCamera = vi.fn();
+    tabsState.applyCamera = applyCamera;
+    tabsState.readCamera = vi.fn(() => viewB);
+
+    await tabsState.setActive(1); // leaves b, captures viewB for b
+    expect(applyCamera).toHaveBeenLastCalledWith(null);
+
+    tabsState.readCamera = vi.fn(() => viewA);
+    await tabsState.setActive(2); // leaves a, captures viewA for a
+    expect(applyCamera).toHaveBeenLastCalledWith(viewB);
+
+    await tabsState.setActive(1);
+    expect(applyCamera).toHaveBeenLastCalledWith(viewA);
+  });
+
+  it("keeps a stored view when the viewer cannot supply a camera", async () => {
+    const viewA: TabCameraView = { position: [1, 2, 3], target: [0, 0, 0], fov: 40 };
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    const applyCamera = vi.fn();
+    tabsState.applyCamera = applyCamera;
+    tabsState.readCamera = vi.fn(() => viewA);
+
+    await tabsState.setActive(1); // b stores viewA
+    tabsState.readCamera = vi.fn(() => null);
+    await tabsState.setActive(2);
+
+    expect(applyCamera).toHaveBeenLastCalledWith(viewA);
+  });
+
+  it("applies only the winning activation's camera", async () => {
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    await openTab("/scene/c.usda");
+    tabsState.readCamera = vi.fn(() => null);
+    const applyCamera = vi.fn();
+    tabsState.applyCamera = applyCamera;
+    let release!: () => void;
+    (tabsState.loadScene as ReturnType<typeof vi.fn>).mockClear();
+    (tabsState.loadScene as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+
+    const stale = tabsState.setActive(1);
+    await vi.waitFor(() => expect(tabsState.loadScene).toHaveBeenCalledTimes(1));
+    const winner = tabsState.setActive(2);
+    release();
+    await winner;
+    await stale;
+
+    expect(applyCamera).toHaveBeenCalledTimes(1);
+    expect(applyCamera).toHaveBeenLastCalledWith(null);
   });
 });
 

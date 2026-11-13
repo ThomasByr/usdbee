@@ -10,9 +10,10 @@ import type { StageInfo, StageSummary } from "../stage/types";
 
 // Stage tabs (Task 11): one tab per open backend stage. The ACTIVE tab owns
 // the viewport, the selection and the edit target/dirty/undo state; all of
-// it is refetched on switch (v1 keeps no cross-tab caches). Open-flow
-// metadata the frontend cannot re-query (StageInfo, the dependency scan)
-// is snapshotted on the tab record at open time.
+// it is refetched on switch, except the camera view, which is cached per tab
+// for the session. Open-flow metadata the frontend cannot re-query
+// (StageInfo, the dependency scan) is snapshotted on the tab record at open
+// time.
 
 let activationGeneration = 0;
 
@@ -27,6 +28,14 @@ export interface TabRecord extends StageSummary {
 export function tabDisplayName(tab: Pick<TabRecord, "root_identifier">): string {
   const parts = tab.root_identifier.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? tab.root_identifier;
+}
+
+// A tab's viewport view. Session only, plain numbers so this module keeps no
+// three.js dependency.
+export interface TabCameraView {
+  position: [number, number, number];
+  target: [number, number, number];
+  fov: number;
 }
 
 export const tabsState = $state({
@@ -44,6 +53,19 @@ export const tabsState = $state({
   // the empty-view reset.
   loadScene: (async () => {}) as () => Promise<void>,
   resetScene: (() => {}) as () => void,
+  // Per-tab viewport view: captured when a tab is left, applied after the
+  // rebuild when a tab is entered. The hooks are wired by the Viewport.
+  cameras: new Map<number, TabCameraView>(),
+  readCamera: (() => null) as () => TabCameraView | null,
+  applyCamera: ((_view: TabCameraView | null) => {}) as (view: TabCameraView | null) => void,
+
+  forgetCamera(id: number): void {
+    this.cameras.delete(id);
+  },
+
+  forgetActiveCamera(): void {
+    this.cameras.delete(this.activeId);
+  },
 
   find(id: number): TabRecord | undefined {
     return this.stages.find((tab) => tab.stage_id === id);
@@ -69,9 +91,16 @@ export const tabsState = $state({
 
   // Subscribe to backend events; the Viewport wires the scene hooks in
   // onMount and unlistens on destroy.
-  async init(hooks: { loadScene: () => Promise<void>; resetScene: () => void }): Promise<() => void> {
+  async init(hooks: {
+    loadScene: () => Promise<void>;
+    resetScene: () => void;
+    readCamera?: () => TabCameraView | null;
+    applyCamera?: (view: TabCameraView | null) => void;
+  }): Promise<() => void> {
     this.loadScene = hooks.loadScene;
     this.resetScene = hooks.resetScene;
+    if (hooks.readCamera) this.readCamera = hooks.readCamera;
+    if (hooks.applyCamera) this.applyCamera = hooks.applyCamera;
     const unlistens = await Promise.all([
       listen("usd-stage-changed", (event) => {
         // Any stage's edit can move its dirty count (the tab dot). The
@@ -155,6 +184,8 @@ export const tabsState = $state({
         0,
         10,
       );
+      const view = this.readCamera();
+      if (view) this.cameras.set(this.activeId, view);
     }
     const generation = ++activationGeneration;
     this.activeId = id;
@@ -164,6 +195,8 @@ export const tabsState = $state({
     if (generation !== activationGeneration || id !== this.activeId) return;
     void editState.refresh();
     await this.loadScene();
+    if (generation !== activationGeneration || id !== this.activeId) return;
+    this.applyCamera(this.cameras.get(id) ?? null);
   },
 
   // Palette tab commands: jump back to the last active tab, cycle through
