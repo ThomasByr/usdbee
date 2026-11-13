@@ -11,6 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocketServer } from "ws";
 import { z } from "zod";
+import { COMMANDS } from "../src/lib/commands/registry.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_PORT = 9330;
@@ -21,98 +22,31 @@ const LOG_PATH = "/tmp/usdbee-mcp-dev.log";
 
 const vec3 = z.array(z.number()).length(3);
 
+/**
+ * @param {import("../src/lib/commands/registry.mjs").Arg} arg
+ */
+function argSchema(arg) {
+  const base =
+    arg.type === "vec3" ? vec3 : arg.type === "string" ? z.string() : arg.int ? z.number().int() : z.number();
+  const described = arg.describe ? base.describe(arg.describe) : base;
+  return arg.optional ? described.optional() : described;
+}
+
+/**
+ * @param {import("../src/lib/commands/registry.mjs").Arg[]} args
+ */
+function inputSchema(args) {
+  return Object.fromEntries(args.map((arg) => [arg.key, argSchema(arg)]));
+}
+
 /** Mirrors the WS command contract; the bridge validates nothing, so these are the enforcement. */
 export const TOOLS = [
-  {
-    name: "status",
-    description: "What the app has open: stage_loaded, stage_id, playing, time (USD time code).",
-    args: {},
-  },
-  {
-    name: "load_scene",
-    description: "Open a USD scene through the app's own load path (errors surface as tool errors).",
-    args: { path: z.string().describe("path to a .usd/.usda/.usdc/.usdz file") },
-  },
-  {
-    name: "unload_scene",
-    description: "Close the active stage without the dirty-scene prompt.",
-    args: {},
-  },
-  {
-    name: "inspect_scene",
-    description: "Prim/geometry/animation counts plus the top of the tree (depth-capped, first ~200 nodes).",
-    args: {
-      max_depth: z.number().int().optional().describe("depth cap, default 3"),
-    },
-  },
-  {
-    name: "search_objects",
-    description: "Case-insensitive substring search over prim paths and names.",
-    args: {
-      query: z.string().describe("substring to look for"),
-      limit: z.number().int().optional().describe("max matches, default 50"),
-    },
-  },
-  {
-    name: "select_node",
-    description:
-      "Select a prim's render node like a hierarchy click: orange box, gizmo anchor, stage details.",
-    args: { path: z.string().describe("prim path, e.g. /CarbonFrameBike; empty string clears") },
-  },
-  {
-    name: "transform_object",
-    description:
-      "Author a prim's local transform through the gizmo path (undo/redo and caches apply). Only the channels given are written.",
-    args: {
-      path: z.string().describe("prim path, e.g. /World/Wheel"),
-      position: vec3.optional().describe("local translation [x,y,z]"),
-      rotation: vec3.optional().describe("local rotation [x,y,z] in degrees"),
-      scale: vec3.optional().describe("local scale [x,y,z]"),
-    },
-  },
-  { name: "play", description: "Start timeline playback.", args: {} },
-  { name: "pause", description: "Pause timeline playback.", args: {} },
-  {
-    name: "set_time",
-    description: "Move the playhead to an absolute USD time code (unsnapped).",
-    args: { time: z.number() },
-  },
-  {
-    name: "get_performance",
-    description: "Frame diagnostics of the render loop, verbatim snapshot.",
-    args: {},
-  },
-  {
-    name: "box_report",
-    description:
-      "Cached vs precise AABB of the selected subtree, plus its widest meshes (hidden ones flagged).",
-    args: {},
-  },
-  {
-    name: "reset_performance",
-    description: "Clear the frame diagnostics.",
-    args: {},
-  },
-  {
-    name: "set_camera",
-    description:
-      "Move the default viewport camera and pin the view: position and target are reapplied after every scene rebuild or load, so screenshots stay comparable. Omitted channels keep their current value.",
-    args: {
-      position: vec3.optional().describe("camera position [x,y,z], viewer/screen space"),
-      target: vec3.optional().describe("look-at point [x,y,z], viewer/screen space"),
-      fov: z.number().optional().describe("vertical field of view in degrees"),
-    },
-  },
-  {
-    name: "screenshot",
-    description: "Render the viewport and return it as a PNG image.",
-    args: {},
-  },
-  {
-    name: "close_app",
-    description: "Close the running app (window state is saved first).",
-    args: {},
-  },
+  ...COMMANDS.filter((command) => command.mcp !== false).map((command) => ({
+    name: command.name,
+    description: command.description,
+    args: inputSchema(command.args),
+  })),
+  // Only this server can start the app, so the palette has nothing to run.
   {
     name: "open_app",
     description: "Start the app in dev mode when nothing is running, and wait for its bridge to connect.",
