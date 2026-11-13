@@ -293,3 +293,28 @@ describe("shadow map updates", () => {
     expect(shadowDraws).toEqual([true, true, false]);
   });
 });
+
+describe("reset camera view", () => {
+  it("drops the bridge pin, so a rebuild cannot put it back", () => {
+    const kit = new RendererKit();
+    kit.camera = new THREE.PerspectiveCamera(50, 1);
+    kit.controls = {
+      target: new THREE.Vector3(),
+      reset: vi.fn(),
+      update: vi.fn(),
+      saveState: vi.fn(),
+    } as unknown as RendererKit["controls"];
+    kit.sceneSize = 10;
+    vi.stubGlobal("localStorage", { setItem: vi.fn() });
+    kit.pinnedCamera = {
+      position: new THREE.Vector3(5, 6, 7),
+      target: new THREE.Vector3(1, 2, 3),
+    };
+
+    kit.resetCameraView();
+
+    expect(kit.pinnedCamera).toBeNull();
+    expect(kit.controls.reset).toHaveBeenCalled();
+    expect(kit.fov).toBe(75);
+  });
+});

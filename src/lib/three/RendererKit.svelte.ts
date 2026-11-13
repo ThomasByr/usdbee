@@ -106,6 +106,9 @@ export class RendererKit {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = this.enableDamping;
     this.controls.dampingFactor = 0.05;
+    // Any user camera move ends a bridge pin, or the next rebuild snaps the
+    // view back to where the palette put it.
+    this.controls.addEventListener("start", () => (this.pinnedCamera = null));
 
     // Patch controls to handle invert settings reactively
     const rawControls = this.controls as any;
@@ -350,6 +353,9 @@ export class RendererKit {
   public resetCameraView() {
     if (!this.camera || !this.controls || !this.sceneSize) return;
 
+    // Reset View wins over a bridge pin: otherwise the next rebuild puts the
+    // pinned view back and reset() restores it.
+    this.pinnedCamera = null;
     this.controls.reset();
 
     this.fov = 75;

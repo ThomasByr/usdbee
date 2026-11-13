@@ -142,7 +142,8 @@ export function integrateScene(viewer: RendererKit, group: THREE.Group) {
     viewer.camera.position.copy(viewer.pinnedCamera.position);
     viewer.controls.target.copy(viewer.pinnedCamera.target);
     viewer.controls.update();
-    viewer.controls.saveState();
+    // Deliberately not saveState: the controls baseline must stay the
+    // automatic framing, or controls.reset() (Reset View) restores the pin.
   }
 
   if (viewer.gridHelper) {

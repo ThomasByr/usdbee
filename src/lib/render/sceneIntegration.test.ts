@@ -911,7 +911,8 @@ describe("integrateScene", () => {
     expect(kit.controls.target.toArray()).toEqual([1, 2, 3]);
     // Once for the framing, once for the pin it then overwrote.
     expect(kit.controls.update).toHaveBeenCalledTimes(2);
-    expect(kit.controls.saveState).toHaveBeenCalledTimes(2);
+    // The pin must not become the controls baseline: Reset View restores it.
+    expect(kit.controls.saveState).toHaveBeenCalledTimes(1);
   });
 
   it("requests a shadow redraw for the new geometry", () => {
