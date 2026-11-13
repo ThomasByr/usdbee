@@ -173,6 +173,15 @@ export const tabsState = $state({
     this.pendingCloseId = id;
   },
 
+  // Tab drag-release: the array order IS the tab order, so a move is one splice.
+  // toIndex is the target slot in the pre-removal indexing.
+  moveTab(id: number, toIndex: number): void {
+    const from = this.stages.findIndex((tab) => tab.stage_id === id);
+    if (from === -1 || toIndex === from || toIndex < 0) return;
+    const [tab] = this.stages.splice(from, 1);
+    this.stages.splice(Math.min(toIndex, this.stages.length), 0, tab);
+  },
+
   // The confirm modal's buttons.
   async closeConfirmed(id: number): Promise<void> {
     this.pendingCloseId = null;

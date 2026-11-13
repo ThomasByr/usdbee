@@ -525,6 +525,42 @@ describe("closeTab", () => {
   });
 });
 
+describe("moveTab", () => {
+  it("moves a tab right and keeps the active id", async () => {
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    await openTab("/scene/c.usda");
+    await tabsState.setActive(2);
+
+    tabsState.moveTab(1, 2);
+
+    expect(tabsState.stages.map((t) => t.stage_id)).toEqual([2, 3, 1]);
+    expect(tabsState.activeId).toBe(2);
+  });
+
+  it("moves a tab left", async () => {
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    await openTab("/scene/c.usda");
+
+    tabsState.moveTab(3, 0);
+
+    expect(tabsState.stages.map((t) => t.stage_id)).toEqual([3, 1, 2]);
+  });
+
+  it("ignores unknown ids and same-slot moves", async () => {
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    await openTab("/scene/c.usda");
+
+    tabsState.moveTab(999, 0);
+    expect(tabsState.stages.map((t) => t.stage_id)).toEqual([1, 2, 3]);
+
+    tabsState.moveTab(1, 0);
+    expect(tabsState.stages.map((t) => t.stage_id)).toEqual([1, 2, 3]);
+  });
+});
+
 describe("event subscriptions", () => {
   it("usd-stage-changed for an inactive stage refreshes the summaries only", async () => {
     await openTab("/scene/a.usda");
