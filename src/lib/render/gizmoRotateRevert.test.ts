@@ -540,6 +540,14 @@ describe("a refused commit authors nothing and restores the pre-drag pose", () =
     for (let i = 0; i < 16; i++) {
       expect(Math.abs(elements[i] - latch[i])).toBeLessThan(1e-6);
     }
+    // A refusal must not leave the gizmo locked out of the next drag.
+    expect(gizmoPolicy.kit!.controls.enabled).toBe(true);
+    failWriteName = null;
+    await drag((p) => {
+      p.rotation.z += Math.PI / 2;
+    });
+    await flush();
+    expect(writeLog.length).toBeGreaterThan(0);
   });
 });
 

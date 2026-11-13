@@ -571,7 +571,11 @@ fn a_refused_batch_authors_nothing() {
         ],
     )
     .expect_err("the second write is refused");
-    assert!(!error.is_empty());
+    assert!(
+        error.contains("radius"),
+        "the refusal names the attribute: {}",
+        error
+    );
 
     let details = details_via_owner(&state, "/World/Ball", None);
     assert_eq!(
@@ -588,4 +592,20 @@ fn a_refused_batch_authors_nothing() {
         !undo_state(&state).can_undo,
         "nothing joined the undo stack"
     );
+}
+
+// The batch serves the gizmo, and the frontend always sends at least one
+// write. An empty one would book a journal entry and a change event for
+// nothing (the ledger counts the layer dirty with no undo entry to clear it),
+// so the request refuses it instead.
+#[test]
+fn an_empty_batch_is_refused() {
+    let (state, _events) = owner_with_events();
+    open_via_owner(&state, "basic.usda");
+
+    let error =
+        usdbee_lib::stage::request_set_attribute_values(&state.sender(), "/World/Ball", &[])
+            .expect_err("an empty batch authors nothing to allow");
+    assert!(error.contains("no attribute writes"), "got: {}", error);
+    assert!(!undo_state(&state).can_undo);
 }

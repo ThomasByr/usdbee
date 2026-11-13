@@ -218,8 +218,8 @@ fn main() {
         tess_a
     );
 
-    // --- Commit B: rotate (author a new op = two writes = two events) ----
-    println!("\n-- commit B: rotate release (commit lock, two writes) --");
+    // --- Commit B: rotate (new op + pivot residual + order = 3 writes) ---
+    println!("\n-- commit B: rotate release (commit lock, three writes) --");
     let start = Instant::now();
     request_stage_details(&sender, &target_path, time).unwrap();
     let mut lock_b = step("lock: refreshSelectedDetails", start, "");
@@ -238,6 +238,22 @@ fn main() {
     )
     .expect("rotate write");
     lock_b += step("lock: write rotateXYZ op", start, "");
+    // The pivot residual an off-origin rotate leaves behind: a second write.
+    let start = Instant::now();
+    request_set_attribute_value(
+        &sender,
+        &target_path,
+        "xformOp:translate",
+        &ValuePayload {
+            r#type: "double3".into(),
+            data: serde_json::json!(moved),
+            truncated: None,
+            count: None,
+        },
+        None,
+    )
+    .expect("residual translate write");
+    lock_b += step("lock: write residual translate", start, "");
     let mut order_with_rotate = order.clone();
     if !order_with_rotate.contains(&"xformOp:rotateXYZ".to_string()) {
         order_with_rotate.push("xformOp:rotateXYZ".into());
@@ -265,9 +281,9 @@ fn main() {
     lock_b += step("lock: reselect details", start, "");
     println!("LOCK TOTAL {:.1} ms (gizmo stays disabled)", lock_b);
 
-    println!("-- commit B: event refreshes (two events) --");
+    println!("-- commit B: event refreshes (three events) --");
     let mut event_b = 0.0;
-    for event in 1..=2 {
+    for event in 1..=3 {
         let start = Instant::now();
         let _ = request_scene_manifest(&sender, time).unwrap();
         event_b += step(&format!("event {}: manifest", event), start, "");
@@ -285,7 +301,7 @@ fn main() {
     );
 
     // --- Commit C: the batched request (one transaction) ----------------
-    println!("\n-- commit C: rotate release, batched (one write, one event) --");
+    println!("\n-- commit C: rotate release, batched (one request, one event) --");
     let start = Instant::now();
     request_stage_details(&sender, &target_path, time).unwrap();
     let mut lock_c = step("lock: refreshSelectedDetails", start, "");
@@ -299,6 +315,16 @@ fn main() {
                 value: ValuePayload {
                     r#type: "float3".into(),
                     data: serde_json::json!([0.0, 0.0, 45.0]),
+                    truncated: None,
+                    count: None,
+                },
+                time: None,
+            },
+            AttributeWrite {
+                name: "xformOp:translate".into(),
+                value: ValuePayload {
+                    r#type: "double3".into(),
+                    data: serde_json::json!(moved),
                     truncated: None,
                     count: None,
                 },
@@ -343,7 +369,7 @@ fn main() {
     );
 
     println!(
-        "\nSUMMARY move: lock {:.0} ms + events {:.0} ms | rotate (3 writes): lock {:.0} ms + events {:.0} ms | rotate (batched): lock {:.0} ms + events {:.0} ms | re-tessellations {}",
+        "\nSUMMARY move: lock {:.0} ms + events {:.0} ms | rotate, 3 writes: lock {:.0} ms + events {:.0} ms | rotate, batched: lock {:.0} ms + events {:.0} ms | re-tessellations {}",
         lock_a,
         ev_manifest + ev_geometry + ev_tree,
         lock_b,

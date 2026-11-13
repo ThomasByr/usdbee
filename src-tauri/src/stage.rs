@@ -1890,50 +1890,52 @@ fn author_attribute_values(
     path: &str,
     writes: &[AttributeWrite],
 ) -> Result<(), String> {
+    // An empty batch would still record a journal entry and emit a change,
+    // leaving an undo step that can revert nothing: refuse it instead.
     if writes.is_empty() {
-        return Ok(());
+        return Err(format!("no attribute writes given for {}", path));
     }
     let prim = editable_prim(stage, path, false)?;
-    let declared = prim.attributes().map_err(stage_err)?;
     let mut prepared = Vec::with_capacity(writes.len());
     for write in writes {
         let value = value_payload_to_sdf(&write.value)?;
-        // The composed declaration outranks the payload spelling: an existing
-        // op keeps the type the stage gives it.
-        let declared_type = declared
-            .iter()
-            .find(|attribute| attribute.name() == write.name.as_str())
-            .map(|attribute| attribute.type_name())
-            .transpose()
-            .map_err(stage_err)?
-            .flatten();
-        let type_name = match declared_type {
-            Some(type_name) => type_name,
-            None => payload_type_name(&write.value)?,
-        };
+        // The type is the creation fallback only: `plan_property_spec` takes
+        // the composed declaration first (target spec, schema, strongest
+        // opinion), so an existing attribute keeps the type it has.
+        let type_name = payload_type_name(&write.value)?;
         let property_path = prim
             .path()
             .append_property(&write.name)
             .map_err(|e| format!("invalid attribute path {}.{}: {}", path, write.name, e))?;
         prepared.push((
+            write.name.clone(),
             property_path,
             value,
             write.time.map(TimeCode::new),
             type_name,
         ));
     }
+    // The write whose `build` failed, so the refusal names the attribute.
+    // Cleared once every write planned: a failure after the loop is the
+    // commit's own and names no single attribute.
+    let mut failed: Option<String> = None;
     // All or nothing: the crate drops the queued writes when the closure
     // fails, so a refused batch authors nothing.
     stage
         .edit(|edit| -> Result<(), StageAuthoringError> {
-            for (property_path, value, time, type_name) in prepared {
+            for (name, property_path, value, time, type_name) in prepared {
+                failed = Some(name);
                 edit.attribute_builder(property_path, type_name)
                     .set_at(value, time)
                     .build()?;
             }
+            failed = None;
             Ok(())
         })
-        .map_err(|e| format!("failed to author {}: {}", path, e))
+        .map_err(|e| match failed {
+            Some(name) => format!("failed to set {} on {}: {}", name, path, e),
+            None => format!("failed to author {}: {}", path, e),
+        })
 }
 
 /// Author a prim metadata field on the current edit target. Only the keys

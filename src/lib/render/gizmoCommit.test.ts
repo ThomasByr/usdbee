@@ -342,6 +342,10 @@ describe("stale stack guard", () => {
     ]);
     expect(path).toBe("/Scene/Prim");
     expect(stageId).toBe(1);
+    // Both op values author at the default time on this static stage, and
+    // the op is the one the mode targets.
+    expect(writes[0].time).toBeNull();
+    expect(writes[0].value.type).toBe("float3");
     // xformOpOrder is uniform: it never takes a time sample.
     expect(writes[2].time).toBeNull();
   });

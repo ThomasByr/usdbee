@@ -377,7 +377,7 @@ describe("stageState", () => {
       { name: "xformOpOrder", value: { type: "token_array", data: ["xformOp:translate"] }, time: null },
     ];
 
-    const error = await stageState.setAttributeValues(writes as never);
+    const error = await stageState.setAttributeValues(writes);
 
     expect(error).toBeNull();
     expect(mockedInvoke).toHaveBeenLastCalledWith("set_attribute_values", {
@@ -387,7 +387,7 @@ describe("stageState", () => {
     });
 
     stageState.deselectPrim();
-    expect(await stageState.setAttributeValues(writes as never)).toBe("no prim selected");
+    expect(await stageState.setAttributeValues(writes)).toBe("no prim selected");
   });
 
   it("setPrimMetadata authors an explicit path and surfaces backend errors", async () => {

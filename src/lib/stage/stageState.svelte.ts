@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { MaterialInfo, PrimDetails, PrimNode, StageInfo, ValuePayload } from "./types";
+import type {
+  AttributeWritePayload,
+  MaterialInfo,
+  PrimDetails,
+  PrimNode,
+  StageInfo,
+  ValuePayload,
+} from "./types";
 import { renderState } from "../render/renderState.svelte";
 
 let loadGeneration = 0;
@@ -288,7 +295,7 @@ export const stageState = $state({
   // (one undo entry; all-or-nothing). The gizmo commit needs this: its op
   // value, pivot residual and xformOpOrder author together.
   async setAttributeValues(
-    writes: { name: string; value: ValuePayload; time: number | null }[],
+    writes: AttributeWritePayload[],
     path: string | null = null,
     stageId: number | null = null,
   ): Promise<string | null> {

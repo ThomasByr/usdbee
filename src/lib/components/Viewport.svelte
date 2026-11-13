@@ -226,9 +226,10 @@
         const payload = event.payload as { stage_id?: number; paths?: string[] } | null;
         if (payload?.stage_id !== stageState.activeStageId) return;
         const paths = (payload?.paths ?? []) as string[];
-        // A gizmo commit authors several ops, each emitting its own event:
-        // refreshing mid-commit renders an intermediate pose (the release
-        // snap-back). The commit refreshes once, when its writes are done.
+        // A gizmo commit authors its ops in one transaction, so ONE event
+        // arrives per commit. The gate still matters: an ungated refresh
+        // mid-commit can rebuild the scene from under the dragged node. The
+        // commit refreshes once, when its write is done.
         if (gateCommitStageRefresh(paths)) return;
         void refreshSceneAfterEdit(viewer, paths);
       }),

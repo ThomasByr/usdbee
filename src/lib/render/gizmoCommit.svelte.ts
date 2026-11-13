@@ -154,9 +154,9 @@ export function gateCommitStageRefresh(paths: string[]): boolean {
 }
 
 // The one refresh a commit runs, over whatever its own write deferred (one
-// path, normally the prim it authored). Ordered so the seed leads.
-function drainDeferredStagePaths(seed: string[]): string[] {
-  const paths = [...new Set([...seed, ...deferredStagePaths])];
+// path, normally the prim it authored).
+function drainDeferredStagePaths(): string[] {
+  const paths = [...deferredStagePaths];
   deferredStagePaths.clear();
   return paths;
 }
@@ -396,7 +396,7 @@ async function handleGizmoCommit(commit: GizmoCommit) {
     // committed end state, and it must land before the controls come back
     // (a second drag never starts from the pre-commit pose). An empty
     // queue means no write landed, so there is nothing to refresh.
-    const deferred = drainDeferredStagePaths([]);
+    const deferred = drainDeferredStagePaths();
     if (deferred.length > 0) await refreshSceneAfterEdit(viewer, deferred);
     releasePreviewNode(viewer, keepPreviewPose);
     gizmoCommitInFlight = false;

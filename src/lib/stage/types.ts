@@ -111,6 +111,15 @@ export interface ValuePayload {
   count?: number;
 }
 
+// Rust stage.rs::AttributeWrite — one attribute value in a batched commit
+// (set_attribute_values). `time` is a USD time code (frames); null authors
+// the default value.
+export interface AttributeWritePayload {
+  name: string;
+  value: ValuePayload;
+  time: number | null;
+}
+
 // Rust materials.rs::UvTransform — the UsdTransform2d feeding a texture's
 // `st`, composed as `result = in * scale * rotate + translation` (rotation
 // counter-clockwise in degrees around the origin).
