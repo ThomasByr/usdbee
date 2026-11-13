@@ -134,7 +134,6 @@
 
   function moveFocus(step: number): void {
     if (!ctx) return;
-    dismissed = false;
     paletteState.setFocus(ctx.focus + step);
   }
 
@@ -240,10 +239,7 @@
                 value={ctx.values[arg.key] ?? ""}
                 spellcheck="false"
                 autocomplete="off"
-                onfocus={() => {
-                  dismissed = false;
-                  paletteState.setFocus(i);
-                }}
+                onfocus={() => paletteState.setFocus(i)}
                 oninput={(e) => {
                   dismissed = false;
                   paletteState.setValue(arg.key, e.currentTarget.value);

@@ -196,6 +196,14 @@
       // The palette owns the keyboard while it is open: the camera, gizmo and
       // file shortcuts must stay inert behind the overlay.
       if (paletteState.open) return;
+      // A bare-key palette binding must not fire while a text field has focus;
+      // Ctrl/Cmd combos stay live so mod+p opens the palette mid-typing.
+      if (
+        (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA") &&
+        !e.ctrlKey &&
+        !e.metaKey
+      )
+        return;
       if (matchesBinding(e, controlsState.keybindings.commandPalette)) {
         e.preventDefault();
         paletteState.openPalette();
