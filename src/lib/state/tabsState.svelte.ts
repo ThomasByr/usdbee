@@ -179,7 +179,7 @@ export const tabsState = $state({
   async setActive(id: number): Promise<void> {
     const tab = this.find(id);
     if (!tab || id === this.activeId) return;
-    if (this.activeId !== 0) {
+    if (this.activeId !== 0 && this.find(this.activeId)) {
       this.recentIds = [this.activeId, ...this.recentIds.filter((recent) => recent !== this.activeId)].slice(
         0,
         10,

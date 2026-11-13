@@ -566,6 +566,19 @@ describe("closeTab", () => {
     expect(tabsState.cameras.has(2)).toBe(false);
   });
 
+  it("does not resurrect the closed active tab's camera", async () => {
+    const view: TabCameraView = { position: [1, 2, 3], target: [0, 0, 0], fov: 40 };
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    tabsState.cameras.set(2, view);
+    tabsState.readCamera = vi.fn(() => view);
+
+    await tabsState.closeConfirmed(2);
+
+    expect(tabsState.cameras.has(2)).toBe(false);
+    expect(tabsState.activeId).toBe(1);
+  });
+
   it("counts the active stage's unapplied text draft as unsaved work", async () => {
     await openTab("/scene/a.usda");
     layerTextState.draftDirty = true;
