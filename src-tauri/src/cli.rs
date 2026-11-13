@@ -1,12 +1,13 @@
 use serde::Serialize;
 
-pub const USAGE: &str = "usage: usdbee [-h] [-p x,y,z | --camera-position x,y,z] [-t x,y,z | --camera-target x,y,z] [FILE...]";
+pub const USAGE: &str = "usage: usdbee [-h] [-p x,y,z | --camera-position x,y,z] [-t x,y,z | --camera-target x,y,z] [-f fov | --camera-fov fov] [FILE...]";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct LaunchOptions {
     pub files: Vec<String>,
     pub camera_position: Option<[f64; 3]>,
     pub camera_target: Option<[f64; 3]>,
+    pub camera_fov: Option<f64>,
 }
 
 /// The IPC payload: same shape as the parsed options, snake_case fields.
@@ -58,6 +59,17 @@ fn parse_triple(rest: &[String]) -> Result<([f64; 3], usize), String> {
     Ok((values, consumed))
 }
 
+// Degrees, like the toolbar slider: zero or below collapses the frustum and
+// 180 or above folds it inside out.
+fn parse_fov(token: &str) -> Result<f64, String> {
+    token
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v > 0.0 && *v < 180.0)
+        .ok_or_else(|| usage_error(&format!("bad camera fov: {token}")))
+}
+
 pub fn parse_launch_args(args: &[String]) -> Result<LaunchOptions, String> {
     let mut options = LaunchOptions::default();
     let mut index = 0;
@@ -68,6 +80,14 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchOptions, String> {
             "-h" | "--help" => continue,
             "-p" | "--camera-position" => &mut options.camera_position,
             "-t" | "--camera-target" => &mut options.camera_target,
+            "-f" | "--camera-fov" => {
+                let token = args
+                    .get(index)
+                    .ok_or_else(|| usage_error("missing camera fov"))?;
+                index += 1;
+                options.camera_fov = Some(parse_fov(token)?);
+                continue;
+            }
             _ if arg.starts_with('-') && arg != "-" => {
                 return Err(usage_error(&format!("unknown option: {arg}")))
             }
@@ -97,6 +117,7 @@ mod tests {
         assert!(options.files.is_empty());
         assert_eq!(options.camera_position, None);
         assert_eq!(options.camera_target, None);
+        assert_eq!(options.camera_fov, None);
     }
 
     #[test]
@@ -142,12 +163,42 @@ mod tests {
             "0",
             "0",
             "0",
+            "-f",
+            "50",
             "c.usd",
         ]))
         .unwrap();
         assert_eq!(options.files, args(&["a.usd", "b.usd", "c.usd"]));
         assert_eq!(options.camera_position, Some([1.0, 2.0, 3.0]));
         assert_eq!(options.camera_target, Some([0.0, 0.0, 0.0]));
+        assert_eq!(options.camera_fov, Some(50.0));
+    }
+
+    #[test]
+    fn parse_launch_camera_fov_in_both_spellings() {
+        let short = parse_launch_args(&args(&["-f", "40", "a.usd"])).unwrap();
+        assert_eq!(short.camera_fov, Some(40.0));
+        assert_eq!(short.files, args(&["a.usd"]));
+        let long = parse_launch_args(&args(&["--camera-fov", "35.5"])).unwrap();
+        assert_eq!(long.camera_fov, Some(35.5));
+    }
+
+    #[test]
+    fn parse_launch_camera_fov_bad_values_are_errors_with_usage() {
+        for bad in [
+            &["-f"][..],
+            &["-f", "wide"][..],
+            &["-f", "0"][..],
+            &["-f", "-5"][..],
+            &["--camera-fov", "180"][..],
+        ] {
+            let error = parse_launch_args(&args(bad)).expect_err("bad fov must fail");
+            assert!(
+                error.contains(USAGE),
+                "{:?} error must show usage: {error}",
+                bad
+            );
+        }
     }
 
     #[test]
@@ -181,6 +232,7 @@ mod tests {
             files: args(&["a.usd"]),
             camera_position: Some([1.0, 2.0, 3.0]),
             camera_target: Some([4.0, 5.0, 6.0]),
+            camera_fov: Some(40.0),
         };
         assert_eq!(
             serde_json::to_value(&payload).unwrap(),
@@ -188,6 +240,7 @@ mod tests {
                 "files": ["a.usd"],
                 "camera_position": [1.0, 2.0, 3.0],
                 "camera_target": [4.0, 5.0, 6.0],
+                "camera_fov": 40.0,
             })
         );
         assert_eq!(
@@ -196,6 +249,7 @@ mod tests {
                 "files": [],
                 "camera_position": null,
                 "camera_target": null,
+                "camera_fov": null,
             })
         );
     }

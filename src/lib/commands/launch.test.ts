@@ -29,8 +29,9 @@ function payload(
   files: string[],
   position: [number, number, number] | null,
   target: [number, number, number] | null,
+  fov: number | null = null,
 ) {
-  return { files, camera_position: position, camera_target: target };
+  return { files, camera_position: position, camera_target: target, camera_fov: fov };
 }
 
 beforeEach(() => {
@@ -81,6 +82,16 @@ describe("consumeLaunchOptions", () => {
     await consumeLaunchOptions();
 
     expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("passes fov even when it is the only camera option", async () => {
+    viewer.mockReturnValue(fakeViewer);
+    invocation.mockResolvedValue(payload([], null, null, 40));
+    const { consumeLaunchOptions } = await load();
+
+    await consumeLaunchOptions();
+
+    expect(dispatch).toHaveBeenCalledWith(fakeViewer, "set_camera", { fov: 40 });
   });
 
   it("is idempotent", async () => {

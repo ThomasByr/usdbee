@@ -915,6 +915,17 @@ describe("integrateScene", () => {
     expect(kit.controls.saveState).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the field of view across the reframe", () => {
+    // fov is a viewer setting, not a framing result: a CLI or bridge fov has
+    // to outlast the rebuild the way a pinned view does.
+    const kit = integrateKit();
+    kit.camera.fov = 40;
+
+    integrateScene(kit, namedGroup("/Scene/Shape").group);
+
+    expect(kit.camera.fov).toBe(40);
+  });
+
   it("requests a shadow redraw for the new geometry", () => {
     // Load, rebuild and stage switch all land here: the map holds the old
     // scene's casters until it is redrawn.
