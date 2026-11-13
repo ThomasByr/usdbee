@@ -220,7 +220,12 @@
       // resets to the empty view.
       tabsState.init({
         resetScene: () => resetLoadedScene(viewer),
-        loadScene: () => loadRustScene(viewer),
+        // A pin belongs to the tab that set it: a scene composed for a tab
+        // enter starts unpinned, then applyCamera restores that tab's view.
+        loadScene: () => {
+          viewer.pinnedCamera = null;
+          return loadRustScene(viewer);
+        },
         readCamera: () => {
           if (!viewer.camera || !viewer.controls) return null;
           return {
@@ -229,10 +234,8 @@
             fov: viewer.fov,
           };
         },
-        // A pin belongs to the tab that set it: entering another tab must not
-        // inherit it. A stored view then wins over the automatic framing.
+        // A stored view wins over the automatic framing.
         applyCamera: (view) => {
-          viewer.pinnedCamera = null;
           if (!view) return;
           viewer.camera.position.fromArray(view.position);
           viewer.controls.target.fromArray(view.target);
