@@ -196,7 +196,7 @@
   <div
     class="palette-overlay"
     role="presentation"
-    onclick={(e) => e.target === e.currentTarget && paletteState.closePalette()}
+    onmousedown={(e) => e.target === e.currentTarget && paletteState.closePalette()}
   >
     <div class="palette" bind:this={root} role="dialog" aria-modal="true" aria-label="Command palette">
       <input
@@ -341,7 +341,7 @@
   .palette-list,
   .palette-form {
     overflow-y: auto;
-    padding: 6px;
+    padding: 6px 0;
   }
 
   .row {
@@ -349,10 +349,9 @@
     flex-direction: column;
     gap: 2px;
     width: 100%;
-    padding: 6px 10px;
+    padding: 6px 16px;
     background: transparent;
     border: none;
-    border-radius: 4px;
     text-align: left;
     color: var(--text);
     cursor: pointer;
@@ -373,26 +372,25 @@
   }
 
   .group-label {
-    padding: 10px 10px 4px;
+    padding: 10px 16px 4px;
     color: var(--text-faint);
     font-size: 11px;
     text-transform: uppercase;
   }
 
   .empty {
-    padding: 10px;
+    padding: 10px 16px;
     color: var(--text-dim);
   }
 
   .form-title {
-    padding: 4px 10px 8px;
+    padding: 4px 16px 8px;
     font-weight: 600;
     color: var(--text-strong);
   }
 
   .palette-field {
-    padding: 6px 10px;
-    border-radius: 4px;
+    padding: 6px 16px;
   }
 
   .palette-field.focused {
@@ -458,7 +456,7 @@
   }
 
   .hint {
-    padding: 6px 10px;
+    padding: 6px 16px;
     color: var(--warning);
     font-size: 12px;
   }
