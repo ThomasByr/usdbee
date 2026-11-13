@@ -69,14 +69,18 @@
       to: from,
       moved: false,
     };
-    bar.setPointerCapture?.(e.pointerId);
   }
 
   function onPointerMove(e: PointerEvent): void {
     if (!drag) return;
     const dx = e.clientX - drag.startX;
-    if (!drag.moved && Math.abs(dx) < DRAG_THRESHOLD) return;
-    drag.moved = true;
+    // Capture only once this is a drag: capturing on pointerdown retargets the
+    // pointerup, and the click with it, so a plain click would stop activating.
+    if (!drag.moved) {
+      if (Math.abs(dx) < DRAG_THRESHOLD) return;
+      drag.moved = true;
+      bar?.setPointerCapture?.(e.pointerId);
+    }
     drag.dx = dx;
     drag.to = dragTargetIndex(drag.rects, e.clientX);
   }
