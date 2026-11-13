@@ -260,6 +260,7 @@ export const tabsState = $state({
     const index = this.stages.findIndex((tab) => tab.stage_id === id);
     if (index === -1) return;
     this.stages.splice(index, 1);
+    this.cameras.delete(id);
     if (id !== this.activeId) return;
     // Activate the removed tab's neighbor (the next one, else the
     // previous); no tabs left means the empty no-stage view.

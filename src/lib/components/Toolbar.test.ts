@@ -8,6 +8,7 @@ vi.mock("$lib/state/editState.svelte", () => ({
 
 import Toolbar from "./Toolbar.svelte";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
+import { tabsState } from "$lib/state/tabsState.svelte";
 
 const viewer = {
   fov: 75,
@@ -47,5 +48,22 @@ describe("Toolbar disabled chrome", () => {
     const bar = document.querySelector<HTMLDivElement>(".top-toolbar")!;
     expect(bar.hasAttribute("inert")).toBe(false);
     expect(bar.classList.contains("disabled")).toBe(false);
+  });
+
+  it("forgets the tab's saved camera when Reset View is clicked", async () => {
+    const forget = vi.spyOn(tabsState, "forgetActiveCamera");
+    const resetView = vi.fn();
+    Object.assign(viewer, { resetCameraView: resetView });
+    instance = mount(Toolbar, {
+      target: document.body,
+      props: { viewer, gizmoMode: "translate", gizmoMessage: null, attachable: false },
+    });
+    await tick();
+
+    document.querySelector<HTMLButtonElement>('button[title="Reset View"]')!.click();
+
+    expect(forget).toHaveBeenCalledTimes(1);
+    expect(resetView).toHaveBeenCalledTimes(1);
+    forget.mockRestore();
   });
 });

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { editState } from "$lib/state/editState.svelte";
+  import { tabsState } from "$lib/state/tabsState.svelte";
   import type { RendererKit } from "$lib/three/RendererKit.svelte";
   import type { GizmoMode } from "$lib/render/xformOps";
 
@@ -41,7 +42,14 @@
     <span>Redo</span>
   </button>
   <div class="gizmo-sep"></div>
-  <button class="tool-btn" onclick={() => viewer.resetCameraView()} title="Reset View">
+  <button
+    class="tool-btn"
+    onclick={() => {
+      tabsState.forgetActiveCamera();
+      viewer.resetCameraView();
+    }}
+    title="Reset View"
+  >
     <svg
       width="14"
       height="14"

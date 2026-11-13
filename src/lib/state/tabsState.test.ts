@@ -481,6 +481,21 @@ describe("setActive", () => {
     expect(applyCamera).toHaveBeenLastCalledWith(viewA);
   });
 
+  it("forgets the active tab's camera, so the next visit frames instead of restoring", async () => {
+    const viewA: TabCameraView = { position: [1, 2, 3], target: [0, 0, 0], fov: 40 };
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    const applyCamera = vi.fn();
+    tabsState.applyCamera = applyCamera;
+    tabsState.readCamera = vi.fn(() => viewA);
+
+    await tabsState.setActive(1); // b stores viewA
+    tabsState.forgetCamera(2);
+    await tabsState.setActive(2);
+
+    expect(applyCamera).toHaveBeenLastCalledWith(null);
+  });
+
   it("applies only the winning activation's camera", async () => {
     await openTab("/scene/a.usda");
     await openTab("/scene/b.usda");
@@ -539,6 +554,16 @@ describe("closeTab", () => {
     expect(tabsState.activeId).toBe(1);
     expect(mockedInvoke).not.toHaveBeenCalledWith("get_stage_tree", expect.anything());
     expect(tabsState.loadScene).toHaveBeenCalled();
+  });
+
+  it("drops the closed tab's camera", async () => {
+    await openTab("/scene/a.usda");
+    await openTab("/scene/b.usda");
+    tabsState.cameras.set(2, { position: [1, 2, 3], target: [0, 0, 0], fov: 40 });
+
+    await tabsState.closeConfirmed(2);
+
+    expect(tabsState.cameras.has(2)).toBe(false);
   });
 
   it("counts the active stage's unapplied text draft as unsaved work", async () => {
