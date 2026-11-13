@@ -7,7 +7,6 @@ import { COMMANDS } from "../commands/registry.mjs";
 import { dispatchCommand } from "../commands/dispatch";
 import { rankCommands } from "../commands/score";
 import { bridgeViewer } from "../commands/viewerRef";
-import { controlsState } from "./controlsState.svelte";
 import { tabsState } from "./tabsState.svelte";
 
 export interface PaletteContext {
@@ -122,15 +121,6 @@ export const paletteState = $state({
   },
 
   async submit(): Promise<void> {
-    await this.execute();
-  },
-
-  // Tab runs the highlighted command from the list; inside the argument form
-  // the component keeps Tab for the suggestion list.
-  async submitWithTab(): Promise<void> {
-    const executes =
-      (controlsState as unknown as { paletteTabExecutes?: boolean }).paletteTabExecutes ?? true;
-    if (!executes) return;
     await this.execute();
   },
 

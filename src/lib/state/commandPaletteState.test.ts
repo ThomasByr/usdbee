@@ -29,10 +29,6 @@ function command(name: string): Command {
   return found;
 }
 
-function tabExecutes(on: boolean): void {
-  (controlsState as unknown as { paletteTabExecutes?: boolean }).paletteTabExecutes = on;
-}
-
 beforeEach(() => {
   mockedDispatch.mockReset().mockResolvedValue({ ok: true });
   run.mockReset().mockResolvedValue({});
@@ -315,29 +311,5 @@ describe("tab commands", () => {
 
     expect(run).not.toHaveBeenCalled();
     expect(paletteState.open).toBe(false);
-  });
-});
-
-describe("submitWithTab", () => {
-  it("executes like Enter", async () => {
-    paletteState.openPalette();
-    paletteState.startContext(command("pause"));
-
-    await paletteState.submitWithTab();
-
-    expect(run).toHaveBeenCalledWith("pause", {});
-    expect(paletteState.open).toBe(false);
-  });
-
-  it("is a no-op when Tab does not execute", async () => {
-    tabExecutes(false);
-    paletteState.openPalette();
-    paletteState.startContext(command("pause"));
-
-    await paletteState.submitWithTab();
-
-    expect(run).not.toHaveBeenCalled();
-    expect(paletteState.open).toBe(true);
-    expect(paletteState.context).not.toBeNull();
   });
 });
