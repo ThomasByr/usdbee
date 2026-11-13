@@ -11,6 +11,7 @@
   import { stageState } from "$lib/stage/stageState.svelte";
   import type { RenderNode } from "$lib/stage/types";
   import {
+    dirKey,
     filterDirEntries,
     filterPrimPaths,
     pngBase64,
@@ -18,9 +19,6 @@
     stepSuggestion,
     type Suggestion,
   } from "$lib/utils/palette";
-
-  // Home listings and manifests are large; typing waits for a pause.
-  const DEBOUNCE_MS = 150;
 
   let root = $state<HTMLDivElement>();
   let queryInput = $state<HTMLInputElement>();
@@ -32,6 +30,10 @@
   let manifestCache: { stageId: number; paths: string[] } | null = null;
   // Last-wins token: a slow suggestion response for old text is dropped.
   let generation = 0;
+  // The last directory listing, unproxied on purpose, plus the directory whose
+  // listing is on the wire. One listing only: the backend caps it at 500 rows.
+  let listing: { dir: string; entries: { name: string; is_dir: boolean }[] } | null = null;
+  let pendingDir: string | null = null;
 
   const matches = $derived(paletteState.matches());
   const ctx = $derived(paletteState.context);
@@ -51,17 +53,30 @@
     return out;
   }
 
-  async function loadFilePaths(prefix: string, gen: number): Promise<void> {
+  // The text the focused field holds right now, so a response that lands after
+  // more typing is filtered with the current text, not the text it asked for.
+  function typed(): string {
+    return focusedArg ? (ctx?.values[focusedArg.key] ?? "") : "";
+  }
+
+  async function loadFilePaths(prefix: string, dir: string): Promise<void> {
+    pendingDir = dir;
     try {
       const answer = await invoke<{ entries: { name: string; is_dir: boolean }[] }>("suggest_dir_entries", {
         prefix,
       });
-      if (gen !== generation) return;
-      suggestions = filterDirEntries(prefix, answer.entries ?? []);
+      const now = typed();
+      // Typing may have left this directory meanwhile: the rows must not
+      // repaint and the cache must not hold a listing the field no longer shows.
+      if (dirKey(now) !== dir) return;
+      listing = { dir, entries: answer.entries ?? [] };
+      suggestions = filterDirEntries(now, listing.entries);
+      suggestionIndex = 0;
     } catch {
-      if (gen === generation) suggestions = [];
+      if (dirKey(typed()) === dir) suggestions = [];
+    } finally {
+      if (pendingDir === dir) pendingDir = null;
     }
-    suggestionIndex = 0;
   }
 
   async function loadPrimPaths(prefix: string, gen: number): Promise<void> {
@@ -84,6 +99,8 @@
     const arg = focusedArg;
     if (!paletteState.open || dismissed || !arg?.autocomplete) {
       suggestions = [];
+      // A closed palette must not serve a listing it read in an earlier session.
+      if (!paletteState.open) listing = null;
       return;
     }
     const prefix = ctx?.values[arg.key] ?? "";
@@ -91,8 +108,14 @@
       void loadPrimPaths(prefix, gen);
       return;
     }
-    const timer = setTimeout(() => void loadFilePaths(prefix, gen), DEBOUNCE_MS);
-    return () => clearTimeout(timer);
+    // No timer: filter the listing in hand, or ask for this directory once.
+    const dir = dirKey(prefix);
+    if (listing?.dir === dir) {
+      suggestions = filterDirEntries(prefix, listing.entries);
+      suggestionIndex = 0;
+      return;
+    }
+    if (pendingDir !== dir) void loadFilePaths(prefix, dir);
   });
 
   // Focus follows the form: the query input, or the field the keyboard drives.

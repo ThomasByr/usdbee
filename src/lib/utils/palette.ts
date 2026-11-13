@@ -27,6 +27,14 @@ function join(parent: string, name: string, isDir: boolean): string {
   return `${base}${name}${isDir ? "/" : ""}`;
 }
 
+/** The directory a typed prefix belongs to, in one stable spelling: `~/mod`
+ * and `~/` both key `~/`, so a listing cached for one serves the other. */
+export function dirKey(prefix: string): string {
+  const { parent } = splitPrefix(prefix);
+  if (parent === "" || parent.endsWith("/")) return parent;
+  return `${parent}/`;
+}
+
 /** Directory rows for the focused `file_path` field, filtered by the typed seed. */
 export function filterDirEntries(prefix: string, entries: { name: string; is_dir: boolean }[]): Suggestion[] {
   const { parent, seed } = splitPrefix(prefix);
