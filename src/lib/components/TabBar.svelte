@@ -73,7 +73,7 @@
     // The release happened off-window and its pointerup never arrived: drop the
     // gesture instead of resuming it on the next hover.
     if (e.buttons === 0) {
-      cancelDrag();
+      if (e.pointerId === drag.pointerId) cancelDrag();
       return;
     }
     const dx = e.clientX - drag.startX;
@@ -92,7 +92,7 @@
   // Pointer up/cancel live on the window: a lost capture (alt-tab, a webview
   // without pointer capture) must still end the gesture.
   function onPointerUp(e: PointerEvent): void {
-    if (!drag) return;
+    if (!drag || e.pointerId !== drag.pointerId) return;
     const { id, to, moved, pointerId } = drag;
     // Clear before the splice so the transforms drop in the same flush as the
     // reorder: the chip lands in its new slot without a jump.

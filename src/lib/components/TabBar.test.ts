@@ -180,6 +180,24 @@ describe("TabBar chrome", () => {
     expect(chips[0].style.transform).toBe("");
   });
 
+  it("cancels the drag on pointercancel without reordering", async () => {
+    tabsState.stages.push(tabRecord, { ...tabRecord, stage_id: 2 });
+    instance = mount(TabBar, { target: document.body });
+    await tick();
+
+    const chips = document.querySelectorAll<HTMLElement>(".stage-tab");
+    stubRects(chips);
+    pointer(chips[0], "pointerdown", { clientX: 10 });
+    pointer(chips[0], "pointermove", { clientX: 150 });
+    await tick();
+
+    pointer(document.body, "pointercancel", { clientX: 150, buttons: 0 });
+    await tick();
+
+    expect(document.querySelector<HTMLElement>(".stage-tab-bar")!.classList.contains("dragging")).toBe(false);
+    expect(tabsState.stages.map((tab) => tab.stage_id)).toEqual([1, 2]);
+  });
+
   it("drops a drag whose button was released off-window", async () => {
     tabsState.stages.push(tabRecord, { ...tabRecord, stage_id: 2 });
     instance = mount(TabBar, { target: document.body });
