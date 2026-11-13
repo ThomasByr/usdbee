@@ -221,6 +221,26 @@
       tabsState.init({
         resetScene: () => resetLoadedScene(viewer),
         loadScene: () => loadRustScene(viewer),
+        readCamera: () => {
+          if (!viewer.camera || !viewer.controls) return null;
+          return {
+            position: viewer.camera.position.toArray() as [number, number, number],
+            target: viewer.controls.target.toArray() as [number, number, number],
+            fov: viewer.fov,
+          };
+        },
+        // A pin belongs to the tab that set it: entering another tab must not
+        // inherit it. A stored view then wins over the automatic framing.
+        applyCamera: (view) => {
+          viewer.pinnedCamera = null;
+          if (!view) return;
+          viewer.camera.position.fromArray(view.position);
+          viewer.controls.target.fromArray(view.target);
+          viewer.fov = view.fov;
+          viewer.camera.fov = view.fov;
+          viewer.camera.updateProjectionMatrix();
+          viewer.controls.update();
+        },
       }),
       listen("usd-stage-changed", (event) => {
         const payload = event.payload as { stage_id?: number; paths?: string[] } | null;
