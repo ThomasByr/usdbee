@@ -358,9 +358,9 @@ describe("unload_scene", () => {
     await expect(call(viewer(), "unload_scene")).rejects.toThrow(/still open/);
   });
 
-  it("fails readably without a stage", async () => {
+  it("is a no-op without a stage", async () => {
     stage.activeStageId = 0;
-    await expect(call(viewer(), "unload_scene")).rejects.toThrow("no stage loaded");
+    expect(await call(viewer(), "unload_scene")).toEqual({ ok: true });
     expect(tabs.closeConfirmed).not.toHaveBeenCalled();
   });
 });

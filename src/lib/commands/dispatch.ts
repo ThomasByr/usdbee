@@ -40,7 +40,7 @@ export interface BridgeViewer {
 // A palette click runs without a mounted viewport or an open stage, where the
 // dev bridge always had both: these sets turn that into a readable error.
 const NEEDS_VIEWER = new Set(["play", "pause", "screenshot", "select_node", "set_camera", "box_report"]);
-const NEEDS_STAGE = new Set(["inspect_scene", "search_objects", "transform_object", "unload_scene"]);
+const NEEDS_STAGE = new Set(["inspect_scene", "search_objects", "transform_object"]);
 
 export function numberArg(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;

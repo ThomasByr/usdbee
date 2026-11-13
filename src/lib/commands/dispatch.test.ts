@@ -95,7 +95,7 @@ describe("without a viewport", () => {
 });
 
 describe("without a stage", () => {
-  it.each(["inspect_scene", "search_objects", "transform_object", "unload_scene"])(
+  it.each(["inspect_scene", "search_objects", "transform_object"])(
     "rejects %s with the stage message",
     async (cmd) => {
       stage.activeStageId = 0;
@@ -117,6 +117,18 @@ describe("without a stage", () => {
 });
 
 describe("unload_scene", () => {
+  it("is a no-op without a stage when unguarded", async () => {
+    stage.activeStageId = 0;
+    expect(await dispatchCommand(viewer(), "unload_scene", {})).toEqual({ ok: true });
+    expect(tabs.closeConfirmed).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op without a stage when guarded", async () => {
+    stage.activeStageId = 0;
+    expect(await dispatchCommand(viewer(), "unload_scene", {}, { guarded: true })).toEqual({ ok: true });
+    expect(tabs.closeTab).not.toHaveBeenCalled();
+  });
+
   it("closes the tab through the dirty guard when guarded", async () => {
     expect(await dispatchCommand(viewer(), "unload_scene", {}, { guarded: true })).toEqual({ ok: true });
     expect(tabs.closeTab).toHaveBeenCalledWith(1);
