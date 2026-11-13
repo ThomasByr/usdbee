@@ -180,6 +180,27 @@ fn extract_archive_inner<R: std::io::Read + std::io::Seek>(
         .ok_or_else(|| "Empty USDZ archive".into())
 }
 
+/// Expands a leading `~` (`~` or `~/...`) against `home`; anything else is
+/// returned verbatim. Takes the home so tests stay deterministic.
+fn expand_home_with(input: &str, home: &Path) -> std::path::PathBuf {
+    if input == "~" {
+        return home.to_path_buf();
+    }
+    match input.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None => std::path::PathBuf::from(input),
+    }
+}
+
+/// Filesystem-side `~` expansion. No home to expand against means the input
+/// is used as given.
+fn expand_home(input: &str) -> std::path::PathBuf {
+    match std::env::home_dir() {
+        Some(home) => expand_home_with(input, &home),
+        None => std::path::PathBuf::from(input),
+    }
+}
+
 async fn unpack_usdz(path: &str) -> Result<(String, std::path::PathBuf), String> {
     let p_str = path.to_string();
     let res = tauri::async_runtime::spawn_blocking(
@@ -245,7 +266,9 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
     )
     .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
 
-    let file_path = Path::new(&path).to_path_buf();
+    // `~` is expanded for the filesystem only: `path` stays as typed for the
+    // events, the scene's root_file and the tab record.
+    let file_path = expand_home(&path);
     if !file_path.exists() {
         return Err("File does not exist".into());
     }
@@ -270,7 +293,7 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
         )
         .unwrap_or_else(|e| eprintln!("Failed to emit usd-load-progress: {}", e));
 
-        let (new_path, out_d) = unpack_usdz(&path).await?;
+        let (new_path, out_d) = unpack_usdz(&file_path.to_string_lossy()).await?;
         path = new_path;
         extracted_dir = Some(out_d);
     }
@@ -292,7 +315,7 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
         .clone();
 
     let (scan, stage_info) = match tauri::async_runtime::spawn_blocking({
-        let p_str = path.clone();
+        let p_str = expand_home(&path).to_string_lossy().into_owned();
         let stage_app = app.clone();
         // The open's cleanup-owned extraction dir: the owner thread
         // records it and deletes it on close_stage (the session layer file
@@ -545,18 +568,11 @@ fn suggest_dir_entries_inner(
     home: &Path,
     list_dir: impl Fn(&Path) -> std::io::Result<Vec<(String, bool)>>,
 ) -> SuggestEntries {
-    let dir = if prefix == "~" {
-        home.to_path_buf()
+    let expanded = expand_home_with(prefix, home);
+    let dir = if prefix.is_empty() || prefix == "~" || prefix.ends_with(['/', '\\']) {
+        expanded
     } else {
-        let expanded = match prefix.strip_prefix("~/") {
-            Some(rest) => home.join(rest),
-            None => std::path::PathBuf::from(prefix),
-        };
-        if prefix.is_empty() || prefix.ends_with(['/', '\\']) {
-            expanded
-        } else {
-            expanded.parent().map(Path::to_path_buf).unwrap_or_default()
-        }
+        expanded.parent().map(Path::to_path_buf).unwrap_or_default()
     };
 
     let mut entries: Vec<DirEntry> = list_dir(&dir)
@@ -858,6 +874,45 @@ mod tests {
             Ok(Vec::new())
         });
         (seen, result)
+    }
+
+    #[test]
+    fn expand_home_resolves_bare_tilde_and_tilde_paths() {
+        let home = Path::new("/home/beekeeper");
+
+        assert_eq!(expand_home_with("~", home), home);
+        assert_eq!(
+            expand_home_with("~/Code/bike.usd", home),
+            home.join("Code/bike.usd")
+        );
+    }
+
+    #[test]
+    fn expand_home_leaves_other_paths_alone() {
+        let home = Path::new("/home/beekeeper");
+
+        assert_eq!(expand_home_with("~foo", home), Path::new("~foo"));
+        assert_eq!(
+            expand_home_with("rel/bike.usd", home),
+            Path::new("rel/bike.usd")
+        );
+        assert_eq!(
+            expand_home_with("/abs/bike.usd", home),
+            Path::new("/abs/bike.usd")
+        );
+    }
+
+    // process_usd_file_inner needs an AppHandle, so this pins the resolver its
+    // exists check runs on: a `~/` path resolves onto the home it is given.
+    #[test]
+    fn expand_home_finds_files_under_the_home() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join("Code")).unwrap();
+        std::fs::write(home.path().join("Code/bike.usd"), b"#usda 1.0").unwrap();
+
+        let resolved = expand_home_with("~/Code/bike.usd", home.path());
+
+        assert!(resolved.exists(), "~/Code/bike.usd must resolve onto home");
     }
 
     #[test]

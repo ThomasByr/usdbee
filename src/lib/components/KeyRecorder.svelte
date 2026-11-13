@@ -18,6 +18,14 @@
     return e.ctrlKey || e.metaKey ? `mod+${key}` : key;
   }
 
+  // A binding string cannot carry alt/shift next to another key, so such a
+  // chord is dropped and recording continues rather than recording the plain
+  // key (Alt+G would otherwise fire on G).
+  function unbindable(e: KeyboardEvent): boolean {
+    if (MODIFIERS.includes(e.key.toLowerCase())) return false;
+    return e.altKey || e.shiftKey;
+  }
+
   $effect(() => {
     if (!recording) return;
 
@@ -28,6 +36,7 @@
         recording = false;
         return;
       }
+      if (unbindable(e)) return;
       binding = toBinding(e);
       recording = false;
       onchange(binding);

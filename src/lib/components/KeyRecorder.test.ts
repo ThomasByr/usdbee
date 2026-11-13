@@ -72,6 +72,31 @@ describe("KeyRecorder", () => {
     expect(wire.binding).toBe("shift");
   });
 
+  it("keeps recording when a chord cannot be expressed as a binding", async () => {
+    const { onchange, wire } = mountRecorder("z");
+    await tick();
+    await startRecording();
+
+    press({ key: "G", altKey: true });
+    await tick();
+
+    expect(wire.binding).toBe("z");
+    expect(onchange).not.toHaveBeenCalled();
+    expect(document.querySelector(".keybtn")!.textContent!.trim()).toBe("Press keys…");
+  });
+
+  it("keeps recording for ctrl+shift combos too", async () => {
+    const { wire } = mountRecorder("z");
+    await tick();
+    await startRecording();
+
+    press({ key: "P", ctrlKey: true, shiftKey: true });
+    await tick();
+
+    expect(wire.binding).toBe("z");
+    expect(document.querySelector(".keybtn")!.textContent!.trim()).toBe("Press keys…");
+  });
+
   it("cancels on Escape without changing the binding", async () => {
     const { onchange, wire } = mountRecorder("z");
     await tick();
