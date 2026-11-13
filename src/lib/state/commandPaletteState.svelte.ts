@@ -31,6 +31,10 @@ const READ_ONLY = new Set([
   "screenshot",
 ]);
 
+// Commands that own a long-running load: the palette closes as soon as the
+// args parse, so it does not sit on top of the load's own progress UI.
+const EAGER_CLOSE = new Set(["load_scene"]);
+
 // The palette-only commands drive the tab store instead of the dispatcher.
 const TAB_CALLS: Record<string, () => unknown> = {
   recent_tab: () => tabsState.activateRecent(),
@@ -83,10 +87,10 @@ export const paletteState = $state({
   },
 
   // Context mode is a form: every arg is visible, focus is the field the
-  // keyboard drives. A path arg starts at `~` so typing continues from home.
+  // keyboard drives. A path arg starts at `~/` so the home listing shows up.
   startContext(cmd: Command): void {
     const values: Record<string, string> = {};
-    for (const arg of cmd.args) values[arg.key] = arg.autocomplete === "file_path" ? "~" : "";
+    for (const arg of cmd.args) values[arg.key] = arg.autocomplete === "file_path" ? "~/" : "";
     this.context = { cmd, values, focus: 0 };
     this.fieldHint = null;
     this.result = null;
@@ -111,12 +115,16 @@ export const paletteState = $state({
   },
 
   // Backspace on an empty field leaves the form; the query survives so the
-  // command list comes back as the user left it.
+  // command list comes back as the user left it. With no form open, an empty
+  // query clears the result panel and returns to the command list.
   backspaceOnEmpty(): void {
     const ctx = this.context;
-    if (!ctx) return;
+    if (!ctx) {
+      this.result = null;
+      return;
+    }
     const arg = ctx.cmd.args[ctx.focus];
-    if (!arg || ctx.values[arg.key]) return;
+    if (arg && (ctx.values[arg.key] ?? "").trim()) return;
     this.exitContext();
   },
 
@@ -132,6 +140,13 @@ export const paletteState = $state({
     if (args === null) return;
 
     const name = ctx.cmd.name;
+    if (EAGER_CLOSE.has(name)) {
+      // The load orchestrator already shows load failures, so the dispatch is
+      // fire-and-forget: only its own viewport errors would go unreported.
+      this.closePalette();
+      void paletteHooks.command(name, args).catch(() => {});
+      return;
+    }
     try {
       const payload = TAB_CALLS[name] ? await TAB_CALLS[name]() : await paletteHooks.command(name, args);
       if (READ_ONLY.has(name)) {

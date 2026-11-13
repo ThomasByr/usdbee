@@ -89,9 +89,9 @@ describe("matches", () => {
 });
 
 describe("context form", () => {
-  it("seeds only file_path args with ~", () => {
+  it("seeds only file_path args with ~/", () => {
     paletteState.startContext(command("load_scene"));
-    expect(paletteState.context?.values).toEqual({ path: "~" });
+    expect(paletteState.context?.values).toEqual({ path: "~/" });
     expect(paletteState.context?.focus).toBe(0);
 
     paletteState.startContext(command("select_node"));
@@ -132,6 +132,35 @@ describe("context form", () => {
     paletteState.backspaceOnEmpty();
 
     expect(paletteState.context?.values.position).toBe("1");
+  });
+
+  it("backspace treats a whitespace-only field as empty", () => {
+    paletteState.query = "cam";
+    paletteState.startContext(command("set_camera"));
+    paletteState.setValue("fov", "  ");
+
+    paletteState.backspaceOnEmpty();
+
+    expect(paletteState.context).toBeNull();
+    expect(paletteState.query).toBe("cam");
+  });
+
+  it("backspace exits a context whose focused index has no arg", () => {
+    paletteState.startContext(command("pause"));
+
+    paletteState.backspaceOnEmpty();
+
+    expect(paletteState.context).toBeNull();
+  });
+
+  it("backspace on the empty query clears a result back to the selector", () => {
+    paletteState.openPalette();
+    paletteState.result = { ok: true, payload: { stage_loaded: true } };
+
+    paletteState.backspaceOnEmpty();
+
+    expect(paletteState.result).toBeNull();
+    expect(paletteState.open).toBe(true);
   });
 });
 
@@ -249,6 +278,38 @@ describe("execution results", () => {
 
     expect(paletteState.open).toBe(true);
     expect(paletteState.result).toEqual({ ok: true, payload: { stage_loaded: true } });
+  });
+
+  it("closes the palette before a load finishes, without awaiting it", async () => {
+    run.mockReturnValue(new Promise(() => {}));
+    paletteState.openPalette();
+    paletteState.startContext(command("load_scene"));
+
+    void paletteState.execute();
+
+    expect(paletteState.open).toBe(false);
+    expect(paletteState.context).toBeNull();
+    expect(paletteState.result).toBeNull();
+    expect(run).toHaveBeenCalledWith("load_scene", { path: "~/" });
+  });
+
+  it("waits for a non-eager command before closing", async () => {
+    let release: (value: unknown) => void = () => {};
+    run.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    paletteState.openPalette();
+    paletteState.startContext(command("reset_performance"));
+
+    const pending = paletteState.execute();
+    expect(paletteState.open).toBe(true);
+
+    release(undefined);
+    await pending;
+
+    expect(paletteState.open).toBe(false);
   });
 
   it("closes the palette on a successful action command", async () => {

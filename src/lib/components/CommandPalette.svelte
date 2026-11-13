@@ -179,7 +179,7 @@
         return;
       case "Backspace": {
         const target = e.target as HTMLInputElement | null;
-        if (target?.value) return;
+        if (target?.value.trim()) return;
         paletteState.backspaceOnEmpty();
         return;
       }

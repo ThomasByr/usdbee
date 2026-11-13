@@ -21,6 +21,7 @@ describe("splitPrefix", () => {
   it("lists a directory with no seed when the path ends in a separator", () => {
     expect(splitPrefix("~/Code/")).toEqual({ parent: "~/Code/", seed: "" });
     expect(splitPrefix("/")).toEqual({ parent: "/", seed: "" });
+    expect(splitPrefix("~/")).toEqual({ parent: "~/", seed: "" });
   });
 
   it("treats home as a directory, not a seed", () => {
@@ -52,6 +53,15 @@ describe("filterDirEntries", () => {
     ]);
     expect(filterDirEntries("/", [{ name: "usr", is_dir: true }])).toEqual([
       { value: "/usr/", is_dir: true },
+    ]);
+  });
+
+  it("accepts a directory from the seeded home prefix", () => {
+    expect(filterDirEntries("~/", entries)).toEqual([
+      { value: "~/Code/", is_dir: true },
+      { value: "~/cover.png", is_dir: false },
+      { value: "~/bike.usd", is_dir: false },
+      { value: "~/couch.usda", is_dir: false },
     ]);
   });
 
