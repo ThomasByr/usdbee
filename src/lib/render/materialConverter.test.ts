@@ -1,6 +1,9 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as THREE from "three";
 import {
+  UDIM_HEADER,
+  UDIM_MAP_FRAGMENT,
+  UDIM_TILE_BASE,
   clearUdimAtlases,
   convertMaterial,
   udimTileIndex,
@@ -743,13 +746,14 @@ describe("convertMaterial", () => {
   });
 });
 
-// Spec R4's formula as written: tile = 1000 + floor(u*10) + floor(v*10)*10.
-// The brief's examples (0.1,0.1) -> 1001 and (1.5,0.2) -> 1015 do not follow
-// from it ((0.1,0.1) -> 1011, (1.5,0.2) -> 1035); the formula is pinned here.
+// The UDIM convention: one full uv unit per tile, `tile = 1001 + floor(u) +
+// floor(v) * 10`, so 1001 covers u,v in [0,1) and 1002 sits above it.
 describe("udimTileIndex", () => {
-  it("pins the spec R4 formula", () => {
-    expect(udimTileIndex(0.1, 0.1, [1011])).toBe(1011);
-    expect(udimTileIndex(1.5, 0.2, [1035])).toBe(1035);
+  it("pins the UDIM convention", () => {
+    expect(udimTileIndex(0.1, 0.1, [1001, 1011])).toBe(1001);
+    expect(udimTileIndex(1.5, 0.2, [1002, 1012])).toBe(1002);
+    expect(udimTileIndex(0.5, 3.5, [1001, 1031])).toBe(1031);
+    expect(udimTileIndex(9.9, 9.9, [1001, 1100])).toBe(1100);
   });
 
   it("answers 1001 without a tile set", () => {
@@ -758,7 +762,7 @@ describe("udimTileIndex", () => {
 
   it("falls back to 1001 when the cell's tile is missing", () => {
     // cell (5,0) -> 1005, absent, so even the nearer 1002 loses to 1001
-    expect(udimTileIndex(0.55, 0.05, [1001, 1002])).toBe(1001);
+    expect(udimTileIndex(5.5, 0.5, [1001, 1002])).toBe(1001);
   });
 
   it("reads the nearest loaded tile for a uv outside the grid", () => {
@@ -768,13 +772,28 @@ describe("udimTileIndex", () => {
   });
 
   it("clamps to the nearest tile when 1001 is not loaded", () => {
-    // cell (5,0) with no 1001: 1003 (distance 2) beats 1002 (distance 3)
-    expect(udimTileIndex(0.55, 0.05, [1002, 1003])).toBe(1003);
+    // cell (5,0) with no 1001: 1003 (distance 3) beats 1002 (distance 4)
+    expect(udimTileIndex(5.5, 0.5, [1002, 1003])).toBe(1003);
   });
 
   it("never answers NaN", () => {
     expect(udimTileIndex(Number.NaN, 0.1, [1002, 1003])).toBe(1002);
     expect(udimTileIndex(Number.NaN, Number.NaN, [])).toBe(1001);
+  });
+
+  // The GLSL copy has to answer what the pure function answers, so both are
+  // built from the same constants and pinned by text here.
+  it("keeps the GLSL tile selection in step with the TS one", () => {
+    expect(UDIM_HEADER).toContain("vec2 cell = floor( uv );");
+    expect(UDIM_HEADER).toContain(`float exact = ${UDIM_TILE_BASE}.0 + cell.x + cell.y * 10.0;`);
+    expect(UDIM_HEADER).toContain(`float tileTile = ${UDIM_TILE_BASE}.0 + tile.x + tile.y * 10.0;`);
+    expect(UDIM_HEADER).toContain("max( abs( tile.x - cell.x ), abs( tile.y - cell.y ) )");
+    expect(UDIM_HEADER).toContain("? 0.5 : 1e9");
+    // The intra-tile coordinate is the fraction of the same cell, not of a tenth.
+    expect(UDIM_MAP_FRAGMENT).toContain("fract( udimUv )");
+    expect(UDIM_MAP_FRAGMENT).not.toContain("* 10.0");
+    // Same constants, same answer on the TS side.
+    expect(udimTileIndex(2.25, 3.75, [UDIM_TILE_BASE + 2 + 3 * 10])).toBe(1033);
   });
 });
 
@@ -875,10 +894,13 @@ describe("udim atlas", () => {
     );
     await flush();
 
-    // The SRT rides three's own mapTransform through this stand-in map.
-    expect(material.map!.repeat.x).toBe(3);
-
     const shader = patched(material);
+
+    // The SRT rides the usdbeeUdimTransform uniform (the stand-in is shared, so
+    // its own matrix cannot carry a per-material transform).
+    expect(material.map!.repeat.x).toBe(1);
+    const transform = shader.uniforms.usdbeeUdimTransform.value as THREE.Matrix3;
+    expect(new THREE.Vector3(1, 0, 1).applyMatrix3(transform).x).toBe(3);
 
     expect(shader.fragmentShader).not.toContain("#include <map_fragment>");
     expect(shader.fragmentShader).toContain("usdbeeUdimAtlas");
@@ -886,7 +908,7 @@ describe("udim atlas", () => {
     expect(shader.uniforms.usdbeeUdimCount.value).toBe(2);
     expect(shader.uniforms.usdbeeUdimHas1001.value).toBe(1);
     expect(shader.uniforms.usdbeeUdimFallback.value).toBe(0);
-    expect([...(shader.uniforms.usdbeeUdimCells.value as Float32Array).slice(0, 4)]).toEqual([1, 0, 2, 0]);
+    expect([...(shader.uniforms.usdbeeUdimCells.value as Float32Array).slice(0, 4)]).toEqual([0, 0, 1, 0]);
     expect([...(shader.uniforms.usdbeeUdimLayers.value as Int32Array).slice(0, 2)]).toEqual([0, 1]);
   });
 
@@ -906,7 +928,7 @@ describe("udim atlas", () => {
     expect(shader.fragmentShader).not.toContain("#include <map_fragment>");
     expect(shader.fragmentShader).toContain("#include <common>");
     expect(shader.fragmentShader).toContain("uniform sampler2DArray usdbeeUdimAtlas;");
-    expect(shader.fragmentShader).toContain("usdbeeUdimLayer( vMapUv )");
+    expect(shader.fragmentShader).toContain("usdbeeUdimLayer( udimUv )");
   });
 
   it("shares one atlas between materials of the same tile set", async () => {
@@ -924,6 +946,90 @@ describe("udim atlas", () => {
 
     expect(seen).toHaveLength(2); // one decode per tile, not per material
     expect(atlasOf(second)).toBe(atlasOf(first));
+  });
+
+  it("shares one stand-in map across atlas materials", async () => {
+    const load = tileLoader({
+      "tex.1001.png": () => pixelTile(255, 0, 0),
+      "tex.1002.png": () => pixelTile(0, 255, 0),
+    });
+    const build = () =>
+      convertMaterial({ name: "Udim", surface: surface({ textures: [udimTexture(twoTiles)] }) }, null, load);
+    const first = build();
+    await flush();
+    const second = build();
+    await flush();
+
+    // Nothing samples the stand-in (the chunk is replaced), so one for every
+    // material is enough.
+    expect(second.map).toBe(first.map);
+  });
+
+  it("keys the atlas by the resolved colour space", async () => {
+    const load = tileLoader({
+      "tex.1001.png": () => pixelTile(255, 0, 0),
+      "tex.1002.png": () => pixelTile(0, 255, 0),
+    });
+    const build = (color_space?: string) =>
+      convertMaterial(
+        {
+          name: "Udim",
+          surface: surface({
+            textures: [
+              textureInput({ file_path: "/cache/tex.<UDIM>.png", udim_tiles: twoTiles, color_space }),
+            ],
+          }),
+        },
+        null,
+        load,
+      );
+    const srgb = build();
+    await flush();
+    const raw = build("raw");
+    await flush();
+
+    expect(atlasOf(srgb).colorSpace).toBe(THREE.SRGBColorSpace);
+    expect(atlasOf(raw).colorSpace).toBe(THREE.NoColorSpace);
+    expect(atlasOf(raw)).not.toBe(atlasOf(srgb));
+  });
+
+  it("warns once when a tile set overflows the atlas uniforms", async () => {
+    const tiles = Array.from({ length: 17 }, (_, index) => ({
+      tile: 1001 + index,
+      file_path: `/cache/tex.${1001 + index}.png`,
+    }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const material = convertMaterial(
+        { name: "Udim", surface: surface({ textures: [udimTexture(tiles)] }) },
+        null,
+        tileLoader(
+          Object.fromEntries(
+            tiles.map((tile) => [tile.file_path.split("/").pop()!, () => pixelTile(255, 0, 0)]),
+          ),
+        ),
+      );
+      await flush();
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![0]).toContain("/cache/tex.<UDIM>.png");
+      expect(warn.mock.calls[0]![0]).toContain("16");
+      expect(atlasOf(material).image.depth).toBe(17);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("leaves a material without udim tiles alone", async () => {
+    const material = convertMaterial(
+      { name: "Plain", surface: surface({ textures: [textureInput()] }) },
+      null,
+      named,
+    );
+    await flush();
+
+    expect(material.map).not.toBeNull();
+    expect(material.onBeforeCompile).toBe(THREE.Material.prototype.onBeforeCompile);
   });
 
   it("keeps rendering the constants until the atlas resolves", async () => {

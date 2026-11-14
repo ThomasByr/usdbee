@@ -244,28 +244,29 @@ function applyDisplacement(
 const UDIM_MAX_TILES = 16;
 const UDIM_GRID = 10;
 
-// Spec R4 as written: `tile = 1000 + floor(u*10) + floor(v*10)*10`. The plan's
-// examples do not follow from it ((0.1,0.1) -> 1011, (1.5,0.2) -> 1035); the
-// formula is the pinned statement. Fallbacks, in order: the cell's own tile, else
-// 1001 (Hydra's missing-tile answer) while the cell is inside the grid, else the
-// nearest loaded cell (a uv outside the grid has no tile of its own). Ties, a
-// non-finite uv and an empty set all end on 1001 or the lowest loaded tile, so
-// the answer is never NaN. The GLSL copy in UDIM_HEADER must change with this.
+// The UDIM convention: one full uv unit per tile, so `tile = 1001 + floor(u) +
+// floor(v) * 10` and 1001 spans u,v in [0,1). Fallbacks, in order: the cell's own
+// tile, else 1001 (Hydra's missing-tile answer) while the cell is inside the
+// grid, else the nearest loaded cell (a uv outside the grid has no tile of its
+// own). Ties, a non-finite uv and an empty set all end on 1001 or the lowest
+// loaded tile, so the answer is never NaN. UDIM_HEADER mirrors this.
+export const UDIM_TILE_BASE = 1001;
+
 export function udimTileIndex(u: number, v: number, tiles: number[]): number {
-  if (tiles.length === 0) return 1001;
-  const column = Math.floor(u * UDIM_GRID);
-  const row = Math.floor(v * UDIM_GRID);
+  if (tiles.length === 0) return UDIM_TILE_BASE;
+  const column = Math.floor(u);
+  const row = Math.floor(v);
   const inside = column >= 0 && column < UDIM_GRID && row >= 0 && row < UDIM_GRID;
-  const exact = 1000 + column + row * UDIM_GRID;
-  const hasDefault = tiles.includes(1001);
-  let best = hasDefault ? 1001 : Math.min(...tiles);
+  const exact = UDIM_TILE_BASE + column + row * UDIM_GRID;
+  const hasDefault = tiles.includes(UDIM_TILE_BASE);
+  let best = hasDefault ? UDIM_TILE_BASE : Math.min(...tiles);
   // 1001 stands for every missing cell, so no non-exact tile may beat it.
   let bestDistance = inside && hasDefault ? 0.5 : Infinity;
   for (const tile of tiles) {
     if (inside && tile === exact) return tile;
     const distance = Math.max(
-      Math.abs(((tile - 1000) % UDIM_GRID) - column),
-      Math.abs(Math.floor((tile - 1000) / UDIM_GRID) - row),
+      Math.abs(((tile - UDIM_TILE_BASE) % UDIM_GRID) - column),
+      Math.abs(Math.floor((tile - UDIM_TILE_BASE) / UDIM_GRID) - row),
     );
     if (distance < bestDistance) {
       best = tile;
@@ -278,11 +279,11 @@ export function udimTileIndex(u: number, v: number, tiles: number[]): number {
 // GLSL mirror of udimTileIndex plus the layer lookup: `usdbeeUdimCells` holds
 // each layer's (column, row) and `usdbeeUdimHas1001` tells the loop whether a
 // non-exact tile may beat the 1001 fallback (0.5 stands for "only an exact
-// match wins"). `vMapUv` is already SRT-transformed by three's mapTransform, so
-// the cell comes straight from the transformed uv — the same values the
-// single-texture path samples, only in atlas coordinates.
-const UDIM_HEADER = /* glsl */ `
+// match wins"). `udimUv` is the SRT-transformed uv, so the cell comes straight
+// from it — the same values the single-texture path samples, in atlas space.
+export const UDIM_HEADER = /* glsl */ `
 uniform sampler2DArray usdbeeUdimAtlas;
+uniform mat3 usdbeeUdimTransform;
 uniform int usdbeeUdimCount;
 uniform int usdbeeUdimHas1001;
 uniform int usdbeeUdimFallback;
@@ -290,15 +291,16 @@ uniform vec2 usdbeeUdimCells[ ${UDIM_MAX_TILES} ];
 uniform int usdbeeUdimLayers[ ${UDIM_MAX_TILES} ];
 
 int usdbeeUdimLayer( vec2 uv ) {
-	vec2 cell = floor( uv * ${UDIM_GRID}.0 );
-	float exact = 1000.0 + cell.x + cell.y * ${UDIM_GRID}.0;
+	vec2 cell = floor( uv );
+	float exact = ${UDIM_TILE_BASE}.0 + cell.x + cell.y * ${UDIM_GRID}.0;
 	bool inGrid = cell.x >= 0.0 && cell.x < ${UDIM_GRID}.0 && cell.y >= 0.0 && cell.y < ${UDIM_GRID}.0;
 	int layer = usdbeeUdimFallback;
 	float bestDistance = ( inGrid && usdbeeUdimHas1001 == 1 ) ? 0.5 : 1e9;
 	for ( int i = 0; i < ${UDIM_MAX_TILES}; i ++ ) {
 		if ( i >= usdbeeUdimCount ) break;
 		vec2 tile = usdbeeUdimCells[ i ];
-		float tileDistance = ( inGrid && 1000.0 + tile.x + tile.y * ${UDIM_GRID}.0 == exact ) ? 0.0 : max( abs( tile.x - cell.x ), abs( tile.y - cell.y ) );
+		float tileTile = ${UDIM_TILE_BASE}.0 + tile.x + tile.y * ${UDIM_GRID}.0;
+		float tileDistance = ( inGrid && tileTile == exact ) ? 0.0 : max( abs( tile.x - cell.x ), abs( tile.y - cell.y ) );
 		if ( tileDistance < bestDistance ) {
 			bestDistance = tileDistance;
 			layer = usdbeeUdimLayers[ i ];
@@ -309,13 +311,14 @@ int usdbeeUdimLayer( vec2 uv ) {
 `;
 
 // The only fragment chunk replaced by the atlas branch. `sampler2DArray` takes a
-// vec3, so the layer rides the third coordinate, and the intra-tile uv is the
-// fractional part of the same transformed uv the cell came from.
-const UDIM_MAP_FRAGMENT = /* glsl */ `
+// vec3, so the layer rides the third coordinate and the intra-tile uv is the
+// fractional part of the transformed uv — one tile per full uv unit.
+export const UDIM_MAP_FRAGMENT = /* glsl */ `
 #ifdef USE_MAP
+	vec2 udimUv = ( usdbeeUdimTransform * vec3( vMapUv, 1.0 ) ).xy;
 	vec4 sampledDiffuseColor = texture(
 		usdbeeUdimAtlas,
-		vec3( fract( vMapUv * ${UDIM_GRID}.0 ), float( usdbeeUdimLayer( vMapUv ) ) )
+		vec3( fract( udimUv ), float( usdbeeUdimLayer( udimUv ) ) )
 	);
 	diffuseColor *= sampledDiffuseColor;
 #endif
@@ -343,8 +346,13 @@ interface BuiltAtlas {
 // lives in that material's own uniforms, so sharing costs nothing.
 const atlases = new Map<string, BuiltAtlas>();
 
-function atlasKey(tiles: UdimTile[]): string {
-  return tiles.map((tile) => `${tile.tile}:${tile.file_path}`).join("|");
+// The atlas bakes one colour space from its first tile, so the space resolved
+// for this material's authored input is part of the identity: two materials on
+// one tile set with different authored spaces need different atlases. A KTX2
+// tile's own stamped space rides its path, which is already in the key.
+function atlasKey(input: TextureInput, tiles: UdimTile[]): string {
+  const space = colorSpace(input.color_space, "map", input.file_path, THREE.NoColorSpace);
+  return [space, ...tiles.map((tile) => `${tile.tile}:${tile.file_path}`)].join("|");
 }
 
 // Called where the texture cache is cleared (a new scene load): the materials
@@ -366,7 +374,7 @@ function attachAtlas(
   fallbackColor: string | null,
 ): void {
   const tiles = [...(input.udim_tiles ?? [])].sort((a, b) => a.tile - b.tile);
-  const key = atlasKey(tiles);
+  const key = atlasKey(input, tiles);
   const cached = atlases.get(key);
   if (cached) {
     applyAtlas(material, info, surface, input, cached, fallbackColor);
@@ -382,6 +390,11 @@ function attachAtlas(
       if (sources.length === 0) return; // every tile failed: the constant stands
       const built = buildAtlas(sources, input);
       if (!built) return;
+      if (built.layers.length > UDIM_MAX_TILES) {
+        console.warn(
+          `usdbee: udim set ${input.file_path} has ${built.layers.length} tiles, the atlas reads ${UDIM_MAX_TILES}`,
+        );
+      }
       // A tile that failed is not cached as missing: the next material would
       // inherit the hole, and a retry is the fail-soft answer.
       if (built.layers.length === tiles.length) atlases.set(key, built);
@@ -512,9 +525,24 @@ function copyTilePixels(
 }
 
 // The atlas is sampled by the patched chunk, so the material's map slot gets a
-// 1x1 stand-in: it exists only to compile `vMapUv` in, and its own repeat/offset/
-// rotation carry the SRT that transforms that varying — three's mapTransform
-// math, i.e. exactly what the single-texture path gets from applyUvTransform.
+// 1x1 stand-in: it exists only to compile `vMapUv` in. One instance serves every
+// atlas material because nothing reads its pixels, and its own matrix stays
+// identity — three copies `material.map.matrix` into `mapTransform`, so a shared
+// stand-in could not carry a per-material SRT. That SRT rides the
+// `usdbeeUdimTransform` uniform instead, built by the same applyUvTransform.
+const UDIM_STAND_IN = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+UDIM_STAND_IN.colorSpace = THREE.NoColorSpace;
+UDIM_STAND_IN.needsUpdate = true;
+
+function udimTransform(transform: UvTransform | null | undefined): THREE.Matrix3 {
+  // A bare Texture has no image, so it is never uploaded; it only runs three's
+  // own SRT math and is collected.
+  const scratch = new THREE.Texture();
+  applyUvTransform(scratch, transform);
+  scratch.updateMatrix();
+  return scratch.matrix.clone();
+}
+
 function applyAtlas(
   material: THREE.MeshPhysicalMaterial,
   info: MaterialInfo,
@@ -523,13 +551,8 @@ function applyAtlas(
   built: BuiltAtlas,
   fallbackColor: string | null,
 ): void {
-  const standIn = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
-  standIn.colorSpace = THREE.NoColorSpace;
-  standIn.needsUpdate = true;
-  applyUvTransform(standIn, input.uv_transform);
-
   neutralizeSlot(material, "map");
-  material.map = standIn;
+  material.map = UDIM_STAND_IN;
   applyValueScale(material, "map", input);
   applyFallbackColor(material, info, surface, true, fallbackColor);
 
@@ -537,13 +560,14 @@ function applyAtlas(
   const cells = new Float32Array(UDIM_MAX_TILES * 2);
   const layers = new Int32Array(UDIM_MAX_TILES);
   indexed.forEach((entry, i) => {
-    cells[i * 2] = (entry.tile - 1000) % UDIM_GRID;
-    cells[i * 2 + 1] = Math.floor((entry.tile - 1000) / UDIM_GRID);
+    cells[i * 2] = (entry.tile - UDIM_TILE_BASE) % UDIM_GRID;
+    cells[i * 2 + 1] = Math.floor((entry.tile - UDIM_TILE_BASE) / UDIM_GRID);
     layers[i] = entry.layer;
   });
-  const fallback = indexed.find((entry) => entry.tile === 1001);
+  const fallback = indexed.find((entry) => entry.tile === UDIM_TILE_BASE);
   const uniforms: Record<string, THREE.IUniform> = {
     usdbeeUdimAtlas: { value: built.atlas },
+    usdbeeUdimTransform: { value: udimTransform(input.uv_transform) },
     usdbeeUdimCount: { value: indexed.length },
     usdbeeUdimHas1001: { value: fallback ? 1 : 0 },
     usdbeeUdimFallback: { value: fallback?.layer ?? indexed[0]!.layer },
