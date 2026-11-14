@@ -50,6 +50,7 @@ export function loadCachedTexture(
     },
     () => {
       // A broken image is never served from the cache.
+      entry.pending = null;
       cache.delete(filePath);
       for (const waiter of entry.waiters) waiter();
       entry.waiters.length = 0;

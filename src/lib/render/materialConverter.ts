@@ -218,6 +218,11 @@ function wrapMode(token: string | null | undefined): THREE.Wrapping {
 // sRGB default, color slot or not.
 function colorSpace(token: string | null | undefined, slot: TextureSlot, filePath: string): THREE.ColorSpace {
   if (token === "raw") return THREE.NoColorSpace;
+  // shortcut: an authored "sRGB" on a half-float EXR still uploads linear —
+  // three's verifyColorSpace refuses sRGB for HalfFloatType (only RGBA8 gets an
+  // sRGB internal format), so the token stays on the texture but the GPU
+  // samples linear; upgrade when an EXR authored sRGB must display sRGB, or a
+  // non-half-float EXR path appears
   if (token === "sRGB") return THREE.SRGBColorSpace;
   if (isExrPath(filePath)) return THREE.NoColorSpace;
   return COLOR_SLOTS.includes(slot) ? THREE.SRGBColorSpace : THREE.NoColorSpace; // unauthored "auto"
