@@ -6,8 +6,10 @@
 //! `faceVertexIndices` and `faceVertexCounts` (holes and bridging are out
 //! of scope; subdivision meshes render their base hull). `BasisCurves` and
 //! `NurbsCurves` prims tessellate to open 6-sided tubes (no end caps) with
-//! constant widths; `Points` prims tessellate to a point cloud (indices
-//! empty); `Sphere` prims tessellate analytically at a fixed 24×12 density.
+//! constant widths; a NURBS curve is sampled with de Boor first so the tube
+//! follows its curvature, while a BasisCurve keeps its control polygon;
+//! `Points` prims tessellate to a point cloud (indices empty); `Sphere` prims
+//! tessellate analytically at a fixed 24×12 density.
 //! Authored `normals`, `primvars:st` and `primvars:displayColor` are read
 //! at the queried time code; for meshes unauthored normals are generated
 //! as per-vertex area-weighted face-normal averages.
@@ -16,7 +18,8 @@ use openusd::gf::{Vec2f, Vec3f};
 use openusd::sdf;
 use openusd::usd::{Prim, SchemaBase, TimeCode};
 use openusd_schemas::geom::{
-    AttributeMetadata, Curves, CurvesSchema, Interpolation, Mesh, Points, Primvar,
+    AttributeMetadata, Curves, CurvesSchema, Interpolation, Mesh, NurbsCurves, NurbsCurvesSchema,
+    Points, Primvar,
 };
 use openusd_schemas::geom::{MeshSchema, PointBasedSchema};
 use openusd_schemas::SchemaError;
@@ -114,8 +117,8 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
     let time_code = time.map(TimeCode::new);
     match type_name.as_deref() {
         Some("Mesh") => mesh_data(prim, time_code, &path),
-        Some("BasisCurves") => curves_data(prim, time_code, &path),
-        Some("NurbsCurves") => curves_data(prim, time_code, &path),
+        Some("BasisCurves") => curves_data(prim, time_code, &path, false),
+        Some("NurbsCurves") => curves_data(prim, time_code, &path, true),
         Some("Points") => points_data(prim, time_code, &path),
         Some("Sphere") => sphere_data(prim, time_code, &path),
         _ => Ok(None),
@@ -353,11 +356,32 @@ const CURVE_SIDES: usize = 6;
 /// brief: a constant width of 0.1 -> a 0.05 ring radius.
 const DEFAULT_CURVE_WIDTH: f32 = 0.1;
 
+/// One curves prim read: the polylines the tube builder consumes (a NURBS
+/// curve's points are already evaluated) and its constant tube radius.
+struct CurveData {
+    curves: Vec<Vec<Vec3f>>,
+    radius: f32,
+}
+
 fn curves_data(
     prim: &Prim,
     time_code: Option<TimeCode>,
     path: &str,
+    is_nurbs: bool,
 ) -> Result<Option<MeshData>, String> {
+    let CurveData { curves, radius } = curves_read(prim, time_code, path, is_nurbs)?;
+    Ok(Some(curve_tubes(&curves, radius)))
+}
+
+/// Read stage: the points each curve tessellates, before any tube is built.
+/// A NURBS prim is sampled with de Boor here; every failure path keeps the
+/// authored control points so the prim still renders (fail-soft).
+fn curves_read(
+    prim: &Prim,
+    time_code: Option<TimeCode>,
+    path: &str,
+    is_nurbs: bool,
+) -> Result<CurveData, String> {
     let curves = Curves::from_prim_unchecked(prim.clone());
     let points: Vec<Vec3f> = expect_value(curves.points_at(time_code), "points", path)?;
     let counts: Vec<i32> = expect_value(
@@ -380,14 +404,271 @@ fn curves_data(
         .unwrap_or(DEFAULT_CURVE_WIDTH)
         / 2.0;
 
+    let slices = split_curve_points(&points, &counts);
+    let curves = if is_nurbs {
+        evaluated_curves(prim, time_code, &slices, path)
+            .unwrap_or_else(|| control_polygons(&slices))
+    } else {
+        control_polygons(&slices)
+    };
+    Ok(CurveData { curves, radius })
+}
+
+/// One slice of the flattened `points` array per curve, clamped to the array
+/// like the tube builder always did (an overlong count yields a short curve).
+fn split_curve_points<'a>(points: &'a [Vec3f], counts: &[i32]) -> Vec<&'a [Vec3f]> {
+    let mut slices = Vec::with_capacity(counts.len());
+    let mut cursor = 0usize;
+    for &count in counts {
+        let count = count.max(0) as usize;
+        slices.push(points.get(cursor..cursor + count).unwrap_or(&[]));
+        cursor += count;
+    }
+    slices
+}
+
+fn control_polygons(slices: &[&[Vec3f]]) -> Vec<Vec<Vec3f>> {
+    slices.iter().map(|slice| slice.to_vec()).collect()
+}
+
+/// Samples per knot span, and the most evaluated points one curve may
+/// contribute. shortcut: the chord error is bounded by the sample count
+/// rather than measured against a tolerance; raise NURBS_SAMPLES_PER_SPAN
+/// if a fixture needs a smoother arc.
+const NURBS_SAMPLES_PER_SPAN: usize = 8;
+const NURBS_SAMPLE_CAP: usize = 4096;
+
+/// Read the prim's NURBS attributes and evaluate each curve. `None` means the
+/// attributes could not be read at all, so every curve keeps its control
+/// polygon; a curve whose own order/knots/weights disagree does the same
+/// alone (Round 1 behaviour, never a failed prim).
+fn evaluated_curves(
+    prim: &Prim,
+    time_code: Option<TimeCode>,
+    slices: &[&[Vec3f]],
+    path: &str,
+) -> Option<Vec<Vec<Vec3f>>> {
+    let nurbs = NurbsCurves::from_prim_unchecked(prim.clone());
+    let order = logged(nurbs.order_at(time_code), path, "order")?;
+    let knots = logged(nurbs.knots_at(time_code), path, "knots")?;
+    // Unauthored (or unreadable) pointWeights mean a non-rational curve.
+    let weights = nurbs.point_weights_at(time_code).unwrap_or(None);
+    let ranges = nurbs.ranges_at(time_code).unwrap_or(None);
+
+    let mut curves = Vec::with_capacity(slices.len());
+    let mut knot_cursor = 0usize;
+    let mut point_cursor = 0usize;
+    for (index, slice) in slices.iter().enumerate() {
+        let order = order.get(index).copied().unwrap_or(0);
+        let knot_count = slice.len().saturating_add(order.max(0) as usize);
+        let curve_knots = knots
+            .get(knot_cursor..knot_cursor.saturating_add(knot_count))
+            .unwrap_or(&[]);
+        knot_cursor = knot_cursor.saturating_add(knot_count);
+        let curve_weights = weights
+            .as_ref()
+            .and_then(|values| values.get(point_cursor..point_cursor.saturating_add(slice.len())))
+            .unwrap_or(&[]);
+        point_cursor = point_cursor.saturating_add(slice.len());
+        let range = ranges
+            .as_ref()
+            .and_then(|values| values.get(index))
+            .map(|range| (range.x, range.y));
+        curves.push(
+            evaluate_nurbs(slice, order, curve_knots, curve_weights, range).unwrap_or_else(|| {
+                eprintln!(
+                    "nurbs {}: curve {} has inconsistent order/knots/weights, \
+                     using the control polygon",
+                    path, index
+                );
+                slice.to_vec()
+            }),
+        );
+    }
+    Some(curves)
+}
+
+/// A required NURBS attribute, logged when it is missing or unreadable — the
+/// caller then falls back to the control polygon instead of failing the prim.
+fn logged<T>(value: openusd::Result<Option<T>>, path: &str, attribute: &str) -> Option<T> {
+    match value {
+        Ok(Some(value)) => Some(value),
+        Ok(None) => {
+            eprintln!(
+                "nurbs {}: no authored {}, using the control polygon",
+                path, attribute
+            );
+            None
+        }
+        Err(e) => {
+            eprintln!(
+                "nurbs {}: reading {} failed: {}, using the control polygon",
+                path, attribute, e
+            );
+            None
+        }
+    }
+}
+
+/// de Boor evaluation of one (optionally rational) NURBS curve, sampled once
+/// per knot span. `None` when the curve's order, knots or weights disagree
+/// with its point count — the caller then keeps the control polygon.
+fn evaluate_nurbs(
+    points: &[Vec3f],
+    order: i32,
+    knots: &[f64],
+    weights: &[f64],
+    range: Option<(f64, f64)>,
+) -> Option<Vec<Vec3f>> {
+    let n = points.len();
+    // Order is degree + 1, so order 1 (a piecewise constant) is not a curve.
+    if order < 2 || !points.iter().all(|point| is_finite_vec3(*point)) {
+        return None;
+    }
+    let degree = order as usize - 1;
+    if n <= degree || knots.len() != n + degree + 1 {
+        return None;
+    }
+    if knots.iter().any(|knot| !knot.is_finite()) {
+        return None;
+    }
+    if knots.windows(2).any(|pair| pair[1] < pair[0]) {
+        return None;
+    }
+    // Rational curves need positive finite weights: a non-positive one has
+    // no projective meaning, so the control polygon is the safe answer.
+    let rational = !weights.is_empty();
+    if rational
+        && (weights.len() != n
+            || weights
+                .iter()
+                .any(|weight| !weight.is_finite() || *weight <= 0.0))
+    {
+        return None;
+    }
+    let weights = if rational {
+        weights.to_vec()
+    } else {
+        vec![1.0; n]
+    };
+
+    let (lo, hi) = knot_domain(knots, degree, n, range)?;
+    let spans = knot_spans(knots, degree, n, lo, hi);
+    if spans.is_empty() {
+        return None;
+    }
+    let per_span = ((NURBS_SAMPLE_CAP - 1) / spans.len()).clamp(1, NURBS_SAMPLES_PER_SPAN);
+    let mut samples = Vec::with_capacity(spans.len() * per_span + 1);
+    for &(start, end) in &spans {
+        for step in 0..per_span {
+            samples.push(start + (end - start) * step as f64 / per_span as f64);
+        }
+    }
+    samples.push(hi);
+
+    samples
+        .into_iter()
+        .map(|u| de_boor(knots, degree, n, points, &weights, u))
+        .collect()
+}
+
+/// The parameter domain the curve is defined over: its knot bounds, narrowed
+/// to the authored `ranges` entry when there is one.
+fn knot_domain(
+    knots: &[f64],
+    degree: usize,
+    n: usize,
+    range: Option<(f64, f64)>,
+) -> Option<(f64, f64)> {
+    let start = *knots.get(degree)?;
+    let end = *knots.get(n)?;
+    let (lo, hi) = match range {
+        Some((min, max)) => (start.max(min), end.min(max)),
+        None => (start, end),
+    };
+    (lo < hi && hi.is_finite()).then_some((lo, hi))
+}
+
+/// The curve's non-empty knot spans, clipped to `[lo, hi]`.
+fn knot_spans(knots: &[f64], degree: usize, n: usize, lo: f64, hi: f64) -> Vec<(f64, f64)> {
+    let Some(valid) = knots.get(degree..=n) else {
+        return Vec::new();
+    };
+    valid
+        .windows(2)
+        .filter_map(|pair| {
+            let (start, end) = (pair[0].max(lo), pair[1].min(hi));
+            (start < end).then_some((start, end))
+        })
+        .collect()
+}
+
+/// One de Boor step: the `degree + 1` control points in the span holding `u`,
+/// combined in homogeneous coordinates so rational curves divide out their
+/// weights at the end (weights of 1 make the division an exact identity).
+fn de_boor(
+    knots: &[f64],
+    degree: usize,
+    n: usize,
+    points: &[Vec3f],
+    weights: &[f64],
+    u: f64,
+) -> Option<Vec3f> {
+    // The active span is the last one whose left knot does not pass `u`; at
+    // the domain end that is the final span, where the standard algorithm
+    // still resolves (its last interpolation is alpha = 1).
+    let span = (degree..n)
+        .rev()
+        .find(|&k| knots[k] <= u && knots[k] < knots[k + 1])?;
+    let mut spread: Vec<[f64; 4]> = (0..=degree)
+        .map(|j| {
+            let index = span + j - degree;
+            let weight = weights[index];
+            let point = points[index];
+            [
+                point.x as f64 * weight,
+                point.y as f64 * weight,
+                point.z as f64 * weight,
+                weight,
+            ]
+        })
+        .collect();
+    for r in 1..=degree {
+        for j in (r..=degree).rev() {
+            let index = span + j - degree;
+            let denominator = knots[index + degree + 1 - r] - knots[index];
+            if denominator <= 0.0 {
+                return None;
+            }
+            let alpha = (u - knots[index]) / denominator;
+            let (previous, current) = (spread[j - 1], spread[j]);
+            spread[j] = [
+                previous[0] * (1.0 - alpha) + current[0] * alpha,
+                previous[1] * (1.0 - alpha) + current[1] * alpha,
+                previous[2] * (1.0 - alpha) + current[2] * alpha,
+                previous[3] * (1.0 - alpha) + current[3] * alpha,
+            ];
+        }
+    }
+    let value = spread[degree];
+    if value[3] == 0.0 {
+        return None;
+    }
+    Some(Vec3f {
+        x: (value[0] / value[3]) as f32,
+        y: (value[1] / value[3]) as f32,
+        z: (value[2] / value[3]) as f32,
+    })
+}
+
+/// Tube stage: open 6-sided tubes (no end caps) through one polyline per
+/// curve, with parallel-transported frames along each curve.
+fn curve_tubes(curves: &[Vec<Vec3f>], radius: f32) -> MeshData {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut cursor = 0usize;
-    for &count in counts.iter() {
-        let count = count.max(0) as usize;
-        let curve = points.get(cursor..cursor + count).unwrap_or(&[]);
-        cursor += count;
+    for curve in curves.iter() {
+        let curve = curve.as_slice();
         // A segment contributes only when both endpoints are finite and
         // distinct; a curve with fewer than two usable points contributes
         // nothing (degenerate-face discipline), and the prim never fails.
@@ -478,13 +759,13 @@ fn curves_data(
     // shortcut: curve primvars (uvs, displayColor) do not scatter onto tube
     // rings yet — the bound material color applies; revisit when curves
     // need per-vertex colors.
-    Ok(Some(MeshData {
+    MeshData {
         positions,
         normals,
         uvs: None,
         colors: None,
         indices,
-    }))
+    }
 }
 
 fn points_data(

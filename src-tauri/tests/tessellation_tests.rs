@@ -600,22 +600,117 @@ fn points_prim_tessellates_to_positions_only() {
     );
 }
 
+/// The evaluated points a tube passes through: the six ring vertices of one
+/// ring average back to their center (a regular hexagon is centered on it),
+/// so the tube output exposes the curve the tessellator sampled.
+fn ring_centers(mesh: &MeshData) -> Vec<[f32; 3]> {
+    mesh.positions
+        .chunks_exact(6)
+        .map(|ring| {
+            let mut center = [0.0f32; 3];
+            for vertex in ring {
+                for (axis, value) in vertex.iter().enumerate() {
+                    center[axis] += value / 6.0;
+                }
+            }
+            center
+        })
+        .collect()
+}
+
+/// Shortest distance from `point` to the polyline through `points`.
+fn distance_to_polyline(point: [f32; 3], points: &[[f32; 3]]) -> f32 {
+    points
+        .windows(2)
+        .map(|pair| {
+            let (a, b) = (pair[0], pair[1]);
+            let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let ap = [point[0] - a[0], point[1] - a[1], point[2] - a[2]];
+            let length_sq = ab.iter().map(|value| value * value).sum::<f32>();
+            let t = if length_sq > 0.0 {
+                ((ab[0] * ap[0] + ab[1] * ap[1] + ab[2] * ap[2]) / length_sq).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let delta = [ap[0] - ab[0] * t, ap[1] - ab[1] * t, ap[2] - ab[2] * t];
+            delta.iter().map(|value| value * value).sum::<f32>().sqrt()
+        })
+        .fold(f32::INFINITY, f32::min)
+}
+
+/// Writes `contents` into `dir` and opens it as a stage.
+fn open_scene(dir: &tempfile::TempDir, name: &str, contents: &str) -> openusd::usd::Stage {
+    let path = dir.path().join(name);
+    std::fs::write(&path, contents).expect("test stage should be written");
+    open_stage(&path).expect("stage should open").0
+}
+
 #[test]
-fn nurbs_curve_tessellates_like_the_same_points_authored_as_basis() {
+fn nurbs_curve_bows_off_the_chords_its_basis_counterpart_follows() {
     let (stage, _info) = tessellate_stage("nurbs_curves.usda");
 
     let nurbs = tessellate(&stage, "/Scene/C_nurbs").expect("nurbs curve must tessellate");
     let basis = tessellate(&stage, "/Scene/C_basis").expect("basis curve must tessellate");
+    let control = [
+        [1.0f32, 0.0, 0.0],
+        [0.7, 0.7, 0.0],
+        [0.0, 1.0, 0.0],
+        [-0.7, 0.7, 0.0],
+    ];
 
-    // Chords, not curvature: the nurbs prim reads the same control points
-    // through the same tube builder, so its output is the basis output.
-    assert!(
-        !basis.positions.is_empty(),
-        "the basis golden must not be empty"
+    // The basis curve stays a chord polygon (Round 1 byte identity): 3
+    // segments, 12 vertices and 36 indices per segment.
+    assert_eq!(basis.positions.len(), 36);
+    assert_eq!(basis.indices.len(), 108);
+    // Chords duplicate each shared endpoint: A, B, B, C, C, D.
+    let chords = [
+        control[0], control[1], control[1], control[2], control[2], control[3],
+    ];
+    for (center, point) in ring_centers(&basis).iter().zip(chords) {
+        for axis in 0..3 {
+            assert!(
+                (center[axis] - point[axis]).abs() < 1e-6,
+                "basis ring {center:?} left its control point {point:?}"
+            );
+        }
+    }
+
+    // The NURBS curve evaluates its curvature instead of its chords.
+    assert_ne!(
+        nurbs.positions, basis.positions,
+        "de Boor must not emit the control polygon"
     );
-    assert_eq!(nurbs.positions, basis.positions);
-    assert_eq!(nurbs.indices, basis.indices);
-    assert_eq!(nurbs.normals, basis.normals);
+    let centers = ring_centers(&nurbs);
+    assert!(
+        centers.len() > ring_centers(&basis).len(),
+        "the arc is sampled more finely than its chords"
+    );
+    // A clamped curve interpolates the first and last control point.
+    for (center, point) in [
+        (centers[0], control[0]),
+        (*centers.last().expect("samples"), control[3]),
+    ] {
+        for axis in 0..3 {
+            assert!(
+                (center[axis] - point[axis]).abs() < 1e-5,
+                "curve endpoint {center:?} does not interpolate {point:?}"
+            );
+        }
+    }
+    // Non-uniform weights make the interior bow away from the chords.
+    let off = centers
+        .iter()
+        .map(|center| distance_to_polyline(*center, &control))
+        .fold(0.0f32, f32::max);
+    assert!(
+        off > 0.05,
+        "the weighted arc must leave the control polygon, max offset {off}"
+    );
+    assert_eq!(
+        nurbs.normals.as_ref().map(|values| values.len()),
+        Some(nurbs.positions.len()),
+        "every tube ring vertex keeps its radial normal"
+    );
 
     // The manifest counts both curves as geometry: a nurbs-only asset must
     // not open to an empty viewport.
@@ -624,6 +719,163 @@ fn nurbs_curve_tessellates_like_the_same_points_authored_as_basis() {
     assert!(nurbs_node.has_geometry, "nurbs curve renders geometry");
     let geometry_count = count_geometry(&manifest);
     assert_eq!(geometry_count, 2, "both curves count as geometry");
+}
+
+#[test]
+fn rational_quadratic_nurbs_samples_stay_on_the_unit_circle() {
+    // Known answer: weights (1, sqrt(2)/2, 1) with clamped knots
+    // [0,0,0,1,1,1] make a quadratic NURBS that is EXACTLY the first
+    // quadrant of the unit circle.
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let stage = open_scene(
+        &dir,
+        "quarter_circle.usda",
+        concat!(
+            "#usda 1.0\n\n",
+            "def Xform \"Scene\"\n{\n",
+            "    def NurbsCurves \"Arc\"\n{\n",
+            "        int[] curveVertexCounts = [3]\n",
+            "        point3f[] points = [(1, 0, 0), (1, 1, 0), (0, 1, 0)]\n",
+            "        int[] order = [3]\n",
+            "        double[] knots = [0, 0, 0, 1, 1, 1]\n",
+            "        double[] pointWeights = [1, 0.7071067811865476, 1]\n",
+            "        double2[] ranges = [(0, 1)]\n",
+            "        float[] widths = [0.02]\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+
+    let mesh = tessellate(&stage, "/Scene/Arc").expect("nurbs arc should tessellate");
+    let centers = ring_centers(&mesh);
+
+    // One knot span at 8 samples: 9 evaluated points, so 8 tube segments
+    // whose 16 rings duplicate each sample as a segment end and start.
+    assert_eq!(centers.len(), 16);
+    for (center, point) in [
+        (centers[0], [1.0f32, 0.0, 0.0]),
+        (centers[15], [0.0, 1.0, 0.0]),
+    ] {
+        for axis in 0..3 {
+            assert!(
+                (center[axis] - point[axis]).abs() < 1e-5,
+                "arc endpoint {center:?} does not interpolate {point:?}"
+            );
+        }
+    }
+    for center in &centers {
+        let length = (center[0] * center[0] + center[1] * center[1] + center[2] * center[2]).sqrt();
+        assert!(
+            (length - 1.0).abs() < 1e-4,
+            "sample {center:?} is off the unit circle (|p| = {length})"
+        );
+    }
+    // The chords (1,0)->(1,1)->(0,1) sit far off the arc.
+    let chords = [[1.0f32, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]];
+    let off = centers
+        .iter()
+        .map(|center| distance_to_polyline(*center, &chords))
+        .fold(0.0f32, f32::max);
+    assert!(off > 0.1, "the arc must leave the chords, max offset {off}");
+}
+
+#[test]
+fn clamped_cubic_nurbs_samples_interpolate_ends_and_leave_the_chords() {
+    // Clamped uniform cubic: 6 control points, order 4, three knot spans.
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let stage = open_scene(
+        &dir,
+        "cubic.usda",
+        concat!(
+            "#usda 1.0\n\n",
+            "def Xform \"Scene\"\n{\n",
+            "    def NurbsCurves \"Cubic\"\n{\n",
+            "        int[] curveVertexCounts = [6]\n",
+            "        point3f[] points = [(0, 0, 0), (1, 1, 0), (2, 1.5, 0), (3, 0.5, 0), (4, 1, 0), (5, 0, 0)]\n",
+            "        int[] order = [4]\n",
+            "        double[] knots = [0, 0, 0, 0, 1, 2, 3, 3, 3, 3]\n",
+            "        float[] widths = [0.04]\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+    let control = [
+        [0.0f32, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [2.0, 1.5, 0.0],
+        [3.0, 0.5, 0.0],
+        [4.0, 1.0, 0.0],
+        [5.0, 0.0, 0.0],
+    ];
+
+    let mesh = tessellate(&stage, "/Scene/Cubic").expect("cubic should tessellate");
+    let centers = ring_centers(&mesh);
+
+    // 8 samples per span over 3 spans, plus the domain end: 25 evaluated
+    // points, i.e. 24 tube segments and 48 rings. The sample count grows with
+    // the span count and exceeds the 5 control chords.
+    assert_eq!(centers.len(), 2 * 3 * 8);
+    assert!(centers.len() > control.len());
+    for (center, point) in [
+        (centers[0], control[0]),
+        (*centers.last().expect("samples"), control[5]),
+    ] {
+        for axis in 0..3 {
+            assert!(
+                (center[axis] - point[axis]).abs() < 1e-5,
+                "curve endpoint {center:?} does not interpolate {point:?}"
+            );
+        }
+    }
+    // Interior samples must sit off the control polygon.
+    let interior = &centers[1..centers.len() - 1];
+    let off = interior
+        .iter()
+        .map(|center| distance_to_polyline(*center, &control))
+        .fold(0.0f32, f32::max);
+    assert!(
+        off > 0.1,
+        "interior samples stay on the chords, max offset {off}"
+    );
+}
+
+#[test]
+fn nurbs_curve_with_inconsistent_knots_falls_back_to_its_control_polygon() {
+    // Order 3 over 3 points needs 3 + 3 knots; this prim authors 5. The prim
+    // must still render (fail-soft) and keep the Round 1 chord behaviour.
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let stage = open_scene(
+        &dir,
+        "broken_knots.usda",
+        concat!(
+            "#usda 1.0\n\n",
+            "def Xform \"Scene\"\n{\n",
+            "    def NurbsCurves \"Broken\"\n{\n",
+            "        int[] curveVertexCounts = [3]\n",
+            "        point3f[] points = [(0, 0, 0), (1, 1, 0), (2, 0, 0)]\n",
+            "        int[] order = [3]\n",
+            "        double[] knots = [0, 0, 0, 1, 1]\n",
+            "        float[] widths = [0.04]\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+
+    let mesh = tessellate(&stage, "/Scene/Broken").expect("a broken nurbs prim must not fail");
+    let control = [[0.0f32, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]];
+
+    // Two chords, one ring pair each: the control points, duplicated.
+    assert_eq!(mesh.positions.len(), 2 * 12);
+    assert_eq!(mesh.indices.len(), 2 * 36);
+    let chords = [control[0], control[1], control[1], control[2]];
+    for (center, point) in ring_centers(&mesh).iter().zip(chords) {
+        for axis in 0..3 {
+            assert!(
+                (center[axis] - point[axis]).abs() < 1e-6,
+                "fallback ring {center:?} left its control point {point:?}"
+            );
+        }
+    }
 }
 
 fn count_geometry(nodes: &[RenderNode]) -> usize {
