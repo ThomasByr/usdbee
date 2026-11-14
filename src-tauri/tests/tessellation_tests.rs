@@ -779,26 +779,31 @@ fn rational_quadratic_nurbs_samples_stay_on_the_unit_circle() {
     assert!(off > 0.1, "the arc must leave the chords, max offset {off}");
 }
 
-#[test]
-fn clamped_cubic_nurbs_samples_interpolate_ends_and_leave_the_chords() {
-    // Clamped uniform cubic: 6 control points, order 4, three knot spans.
-    let dir = tempfile::tempdir().expect("temp dir should be created");
-    let stage = open_scene(
-        &dir,
-        "cubic.usda",
+/// The 6-point clamped uniform cubic: order 4, three knot spans over [0, 3].
+/// `ranges` is pasted as an authored attribute line (empty for no range).
+fn clamped_cubic_scene(ranges: &str) -> String {
+    format!(
         concat!(
             "#usda 1.0\n\n",
-            "def Xform \"Scene\"\n{\n",
-            "    def NurbsCurves \"Cubic\"\n{\n",
+            "def Xform \"Scene\"\n{{\n",
+            "    def NurbsCurves \"Cubic\"\n{{\n",
             "        int[] curveVertexCounts = [6]\n",
             "        point3f[] points = [(0, 0, 0), (1, 1, 0), (2, 1.5, 0), (3, 0.5, 0), (4, 1, 0), (5, 0, 0)]\n",
             "        int[] order = [4]\n",
             "        double[] knots = [0, 0, 0, 0, 1, 2, 3, 3, 3, 3]\n",
+            "        {}\n",
             "        float[] widths = [0.04]\n",
-            "    }\n",
-            "}\n",
+            "    }}\n",
+            "}}\n",
         ),
-    );
+        ranges
+    )
+}
+
+#[test]
+fn clamped_cubic_nurbs_samples_interpolate_ends_and_leave_the_chords() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let stage = open_scene(&dir, "cubic.usda", &clamped_cubic_scene(""));
     let control = [
         [0.0f32, 0.0, 0.0],
         [1.0, 1.0, 0.0],
@@ -876,6 +881,167 @@ fn nurbs_curve_with_inconsistent_knots_falls_back_to_its_control_polygon() {
             );
         }
     }
+}
+
+#[test]
+fn nurbs_range_clips_the_evaluated_knot_domain() {
+    // The range (0.5, 1.5) keeps the middle of the cubic's three spans, so the
+    // evaluated domain is clipped on both sides: two spans instead of three,
+    // and neither end of the result is a control point.
+    let control = [
+        [0.0f32, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [2.0, 1.5, 0.0],
+        [3.0, 0.5, 0.0],
+        [4.0, 1.0, 0.0],
+        [5.0, 0.0, 0.0],
+    ];
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let trimmed = open_scene(
+        &dir,
+        "cubic_trimmed.usda",
+        &clamped_cubic_scene("double2[] ranges = [(0.5, 1.5)]"),
+    );
+    let full = open_scene(&dir, "cubic_full.usda", &clamped_cubic_scene(""));
+
+    let clipped = ring_centers(
+        &tessellate(&trimmed, "/Scene/Cubic").expect("trimmed cubic should tessellate"),
+    );
+    let untrimmed =
+        ring_centers(&tessellate(&full, "/Scene/Cubic").expect("full cubic should tessellate"));
+
+    // Two clipped spans at 8 samples: 17 evaluated points, 32 rings (the
+    // untrimmed curve keeps its three spans and 48 rings).
+    assert_eq!(untrimmed.len(), 48);
+    assert_eq!(
+        clipped.len(),
+        32,
+        "the range must clip the sampled spans, got {}",
+        clipped.len()
+    );
+    // u = 0.5 and u = 1.5 are interior parameters: the samples no longer
+    // interpolate the outer control points.
+    for (center, point) in [(clipped[0], control[0]), (clipped[31], control[5])] {
+        let delta = [
+            center[0] - point[0],
+            center[1] - point[1],
+            center[2] - point[2],
+        ];
+        let distance = delta.iter().map(|value| value * value).sum::<f32>().sqrt();
+        assert!(
+            distance > 0.1,
+            "a trimmed curve must not start or end on a control point, got {center:?} vs {point:?}"
+        );
+    }
+}
+
+#[test]
+fn nurbs_without_order_or_knots_keeps_the_control_polygon() {
+    // A NurbsCurves prim that authors only points and counts cannot be
+    // evaluated: it must render its chords, not fail the prim.
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let stage = open_scene(
+        &dir,
+        "no_knots.usda",
+        concat!(
+            "#usda 1.0\n\n",
+            "def Xform \"Scene\"\n{\n",
+            "    def NurbsCurves \"Plain\"\n{\n",
+            "        int[] curveVertexCounts = [3]\n",
+            "        point3f[] points = [(0, 0, 0), (1, 1, 0), (2, 0, 0)]\n",
+            "        float[] widths = [0.04]\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+
+    let mesh = tessellate(&stage, "/Scene/Plain").expect("a nurbs prim without order must render");
+    let control = [[0.0f32, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]];
+
+    assert_eq!(mesh.positions.len(), 2 * 12);
+    assert_eq!(mesh.indices.len(), 2 * 36);
+    let chords = [control[0], control[1], control[1], control[2]];
+    for (center, point) in ring_centers(&mesh).iter().zip(chords) {
+        for axis in 0..3 {
+            assert!(
+                (center[axis] - point[axis]).abs() < 1e-6,
+                "fallback ring {center:?} left its control point {point:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nurbs_with_mismatched_point_weights_keeps_the_control_polygon() {
+    // Two weights for three points cannot be mapped onto the curve, so the
+    // weights have no meaning: the prim keeps its chords.
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let stage = open_scene(
+        &dir,
+        "short_weights.usda",
+        concat!(
+            "#usda 1.0\n\n",
+            "def Xform \"Scene\"\n{\n",
+            "    def NurbsCurves \"Weighted\"\n{\n",
+            "        int[] curveVertexCounts = [3]\n",
+            "        point3f[] points = [(0, 0, 0), (1, 1, 0), (2, 0, 0)]\n",
+            "        int[] order = [3]\n",
+            "        double[] knots = [0, 0, 0, 1, 1, 1]\n",
+            "        double[] pointWeights = [1, 1]\n",
+            "        float[] widths = [0.04]\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+
+    let mesh = tessellate(&stage, "/Scene/Weighted").expect("a misweighted nurbs prim must render");
+    let control = [[0.0f32, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]];
+
+    assert_eq!(mesh.positions.len(), 2 * 12);
+    assert_eq!(mesh.indices.len(), 2 * 36);
+    let chords = [control[0], control[1], control[1], control[2]];
+    for (center, point) in ring_centers(&mesh).iter().zip(chords) {
+        for axis in 0..3 {
+            assert!(
+                (center[axis] - point[axis]).abs() < 1e-6,
+                "fallback ring {center:?} left its control point {point:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn missing_order_entry_affects_only_its_own_curve() {
+    // Two quadratic curves share the order array, which authors one entry.
+    // The second curve must default to a coherent order so it still reads its
+    // own knots instead of desyncing the shared knot cursor.
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let stage = open_scene(
+        &dir,
+        "one_order.usda",
+        concat!(
+            "#usda 1.0\n\n",
+            "def Xform \"Scene\"\n{\n",
+            "    def NurbsCurves \"Pair\"\n{\n",
+            "        int[] curveVertexCounts = [3, 3]\n",
+            "        point3f[] points = [(0, 0, 0), (1, 1, 0), (2, 0, 0), (3, 0, 0), (4, 1, 0), (5, 0, 0)]\n",
+            "        int[] order = [3]\n",
+            "        double[] knots = [0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1]\n",
+            "        float[] widths = [0.04]\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+
+    let mesh = tessellate(&stage, "/Scene/Pair").expect("the prim must tessellate");
+
+    // Both curves evaluate to 9 samples (8 segments, 16 rings each) because
+    // the defaulted order keeps the knot cursor aligned.
+    assert_eq!(
+        ring_centers(&mesh).len(),
+        32,
+        "the second curve must not fall back to its chord"
+    );
 }
 
 fn count_geometry(nodes: &[RenderNode]) -> usize {

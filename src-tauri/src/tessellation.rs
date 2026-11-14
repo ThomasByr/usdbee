@@ -454,12 +454,33 @@ fn evaluated_curves(
     // Unauthored (or unreadable) pointWeights mean a non-rational curve.
     let weights = nurbs.point_weights_at(time_code).unwrap_or(None);
     let ranges = nurbs.ranges_at(time_code).unwrap_or(None);
+    // Per-curve weights are sliced out of the flat array, so a total count
+    // that misses the point count would shift every slice onto the wrong
+    // points: the prim keeps its control polygons instead.
+    let total_points = slices.iter().map(|slice| slice.len()).sum::<usize>();
+    if let Some(values) = weights.as_ref() {
+        if !values.is_empty() && values.len() != total_points {
+            eprintln!(
+                "nurbs {}: {} pointWeights for {} points, using the control polygon",
+                path,
+                values.len(),
+                total_points
+            );
+            return None;
+        }
+    }
 
     let mut curves = Vec::with_capacity(slices.len());
     let mut knot_cursor = 0usize;
     let mut point_cursor = 0usize;
     for (index, slice) in slices.iter().enumerate() {
-        let order = order.get(index).copied().unwrap_or(0);
+        // A missing order entry must not desync the knot cursor the later
+        // curves read through: default to the prim's largest order, so only
+        // the curve without an order falls back.
+        let order = order
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| order.iter().copied().max().unwrap_or(1));
         let knot_count = slice.len().saturating_add(order.max(0) as usize);
         let curve_knots = knots
             .get(knot_cursor..knot_cursor.saturating_add(knot_count))
