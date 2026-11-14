@@ -12,6 +12,7 @@ import type {
   UvTransform,
   ValuePayload,
 } from "../stage/types";
+import { isExrPath } from "./textureLoaders";
 
 export type MaterialTextureLoader = (file_path: string, onError: () => void) => THREE.Texture | null;
 
@@ -97,7 +98,7 @@ function applyTextures(
     if (loaded) {
       loaded.wrapS = wrapMode(texture.wrap_s);
       loaded.wrapT = wrapMode(texture.wrap_t);
-      loaded.colorSpace = colorSpace(texture.color_space, slot);
+      loaded.colorSpace = colorSpace(texture.color_space, slot, texture.file_path);
       // USD occlusion samples the same st UVs, i.e. the base uv set.
       if (slot === "aoMap") loaded.channel = 0;
       applyUvTransform(loaded, texture.uv_transform);
@@ -212,10 +213,13 @@ function wrapMode(token: string | null | undefined): THREE.Wrapping {
 
 // Authored sourceColorSpace always wins; unauthored "auto" picks by slot:
 // COLOR_SLOTS above is the whole default table — color slots carry
-// sRGB-encoded files, data slots carry linear data.
-function colorSpace(token: string | null | undefined, slot: TextureSlot): THREE.ColorSpace {
+// sRGB-encoded files, data slots carry linear data. EXR is the exception: the
+// file holds scene-linear floats in every channel, so it never takes the
+// sRGB default, color slot or not.
+function colorSpace(token: string | null | undefined, slot: TextureSlot, filePath: string): THREE.ColorSpace {
   if (token === "raw") return THREE.NoColorSpace;
   if (token === "sRGB") return THREE.SRGBColorSpace;
+  if (isExrPath(filePath)) return THREE.NoColorSpace;
   return COLOR_SLOTS.includes(slot) ? THREE.SRGBColorSpace : THREE.NoColorSpace; // unauthored "auto"
 }
 

@@ -23,6 +23,7 @@ import {
   takePose,
 } from "./posePrefetch";
 import { loadCachedTexture, clearTextureCache } from "./textureCache";
+import { pickTextureLoader } from "./textureLoaders";
 import * as frameDiag from "../perf/frameDiag";
 import { requestShadowUpdate } from "../three/shadowMapUpdate";
 import {
@@ -97,9 +98,6 @@ let currentFallbacks: FallbackDependencies = {};
 // away, so one matrix serves every instance of a step (no GC churn).
 const scratchInstance = new THREE.Matrix4();
 
-// One shared loader; convertMaterial clears failed maps through onError.
-const textureLoader = new THREE.TextureLoader();
-
 // The open stage's authored time-sample times (unioned, ascending) —
 // empty when nothing is time-sampled. Playback/scrubbing snaps to these
 // so repeated visits hit the Rust MeshCache.
@@ -160,12 +158,13 @@ const fetchers: SceneFetchers = {
       }),
     ),
   // F6: one decode per file — loadCachedTexture loads through the shared
-  // loader on the first reference and clones for every later one.
+  // loader on the first reference and clones for every later one. The loader
+  // is picked by extension (EXR is a data texture, not an image).
   loadTexture: (filePath: string, onError: () => void) =>
     loadCachedTexture(filePath, onError, (onLoad, onImageError) => {
       const url = convertFileSrc(filePath);
       try {
-        return textureLoader.load(url, onLoad, undefined, onImageError);
+        return pickTextureLoader(filePath).load(url, onLoad, undefined, onImageError);
       } catch {
         return null;
       }

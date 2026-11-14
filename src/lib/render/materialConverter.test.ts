@@ -502,6 +502,64 @@ describe("convertMaterial", () => {
     expect(mapped.displacementScale).toBe(1);
   });
 
+  it("samples an unauthored exr color slot as linear data", () => {
+    // EXR stores scene-linear floats in every channel: sRGB decoding would
+    // wash the map out, so the color-slot default must not apply.
+    const material = convertMaterial(
+      {
+        name: "Env",
+        surface: surface({ textures: [textureInput({ file_path: "/cache/env/studio.exr" })] }),
+      },
+      null,
+      loader,
+    );
+
+    expect(material.map!.colorSpace).toBe(THREE.NoColorSpace);
+  });
+
+  it("lets an authored colorSpace win over the exr linear rule", () => {
+    const material = convertMaterial(
+      {
+        name: "Env",
+        surface: surface({
+          textures: [textureInput({ file_path: "/cache/env/studio.exr", color_space: "sRGB" })],
+        }),
+      },
+      null,
+      loader,
+    );
+
+    expect(material.map!.colorSpace).toBe(THREE.SRGBColorSpace);
+  });
+
+  it("keeps the sRGB default for an unauthored non-exr color slot", () => {
+    const material = convertMaterial(
+      {
+        name: "Env",
+        surface: surface({ textures: [textureInput({ file_path: "/cache/env/studio.png" })] }),
+      },
+      null,
+      loader,
+    );
+
+    expect(material.map!.colorSpace).toBe(THREE.SRGBColorSpace);
+  });
+
+  it("keeps data slots linear for an unauthored exr", () => {
+    const convert = (over: Partial<TextureInput> = {}) =>
+      convertMaterial(
+        {
+          name: "Env",
+          surface: surface({ textures: [textureInput({ file_path: "/cache/env/studio.exr", ...over })] }),
+        },
+        null,
+        loader,
+      );
+
+    expect(convert({ input: "normal" }).normalMap!.colorSpace).toBe(THREE.NoColorSpace);
+    expect(convert({ input: "roughness" }).roughnessMap!.colorSpace).toBe(THREE.NoColorSpace);
+  });
+
   it("picks the per-slot colorSpace default for unauthored sourceColorSpace", () => {
     const convert = (over: Partial<TextureInput> = {}) =>
       convertMaterial({ name: "Auto", surface: surface({ textures: [textureInput(over)] }) }, null, loader);

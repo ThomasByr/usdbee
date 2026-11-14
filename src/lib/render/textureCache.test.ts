@@ -63,6 +63,46 @@ describe("loadCachedTexture", () => {
     expect(load).toHaveBeenCalledTimes(2);
   });
 
+  it("re-copies the async decoder's pixel format onto clones taken before decode", () => {
+    // DataTextureLoader derivatives (EXR) decode asynchronously: they assign
+    // format/type and the sampler fields only after load() returns, while
+    // Texture.copy() snapshots them. A clone taken in that window would
+    // upload half-float data as unsigned bytes, a silently broken texture.
+    let decode: () => void = () => {};
+    const load = vi.fn((onLoad: () => void) => {
+      const texture = new THREE.DataTexture();
+      decode = () => {
+        texture.type = THREE.HalfFloatType;
+        texture.format = THREE.RedFormat;
+        texture.magFilter = THREE.LinearFilter;
+        texture.minFilter = THREE.LinearFilter;
+        texture.needsUpdate = true;
+        onLoad();
+      };
+      return texture;
+    });
+
+    const first = loadCachedTexture("/cache/env/studio.exr", () => {}, load)!;
+    const second = loadCachedTexture("/cache/env/studio.exr", () => {}, load)!;
+    // The converter owns these; the decode landing must not reset them.
+    first.colorSpace = THREE.SRGBColorSpace;
+    first.wrapS = THREE.RepeatWrapping;
+    first.repeat.set(4, 4);
+
+    expect(first.type).toBe(THREE.UnsignedByteType); // the clone-time snapshot
+    decode();
+
+    for (const texture of [first, second]) {
+      expect(texture.type).toBe(THREE.HalfFloatType);
+      expect(texture.format).toBe(THREE.RedFormat);
+      expect(texture.magFilter).toBe(THREE.LinearFilter);
+      expect(texture.minFilter).toBe(THREE.LinearFilter);
+    }
+    expect(first.colorSpace).toBe(THREE.SRGBColorSpace);
+    expect(first.wrapS).toBe(THREE.RepeatWrapping);
+    expect(first.repeat.x).toBe(4);
+  });
+
   it("drops every entry on clear so the next scene decodes again", () => {
     const load = vi.fn(() => new THREE.Texture());
     loadCachedTexture("/Textures/texgen_7.png", () => {}, load);
