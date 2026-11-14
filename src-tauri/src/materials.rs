@@ -458,8 +458,8 @@ fn texture_file(input: &Input) -> Result<Option<String>, String> {
 /// The authored placeholder for a UDIM tile number.
 const UDIM_TOKEN: &str = "<UDIM>";
 
-/// The 4-digit tile numbers a UDIM set spans.
-const UDIM_TILES: std::ops::RangeInclusive<u32> = 1001..=1099;
+/// The 4-digit tile numbers a UDIM set spans: the 10x10 grid, 1001 to 1100.
+const UDIM_TILES: std::ops::RangeInclusive<u32> = 1001..=1100;
 
 /// A tile number: a whole 4-digit segment in range. Anything else (a plain
 /// name, a longer or shorter run, a non-numeric segment) is no tile.
@@ -508,6 +508,11 @@ fn udim_tiles(input: &Input, file_path: &str) -> Option<Vec<UdimTile>> {
             let middle = name.to_str()?.strip_prefix(prefix)?.strip_suffix(suffix)?;
             let tile = tile_number(middle)?;
             let path = entry.path();
+            // metadata follows a symlink, so a linked tile still counts while a
+            // directory named like a tile (or a dangling or looping link) does not
+            if !std::fs::metadata(&path).ok()?.is_file() {
+                return None;
+            }
             let file_path = std::fs::canonicalize(&path).unwrap_or(path);
             Some(UdimTile {
                 tile,
@@ -726,8 +731,13 @@ mod tests {
             udim_pattern("tex.<UDIM>.1001.png"),
             Some(("tex.", ".1001.png"))
         );
+        assert_eq!(
+            udim_pattern("tex.1100.png"),
+            Some(("tex.", ".png")),
+            "1100 closes the 10x10 grid"
+        );
+        assert_eq!(udim_pattern("tex.1101.png"), None, "out of tile range");
         assert_eq!(udim_pattern("checker.png"), None);
-        assert_eq!(udim_pattern("tex.1100.png"), None, "out of tile range");
         assert_eq!(udim_pattern("tex.10011.png"), None, "not a 4-digit run");
         assert_eq!(tile_number("1001"), Some(1001));
         assert_eq!(tile_number("1001.png"), None);

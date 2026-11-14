@@ -954,6 +954,79 @@ fn plain_texture_answers_no_udim_tiles() {
     );
 }
 
+// A UDIM stage in a scratch directory, so a test controls every entry beside
+// the pattern: a real tile file, a directory that only looks like one, a tile
+// at the edge of the grid.
+const SCRATCH_UDIM_STAGE: &str = r#"#usda 1.0
+
+def Xform "World" {
+    def Mesh "Plane" {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </World/Looks/Udim>
+    }
+    def Scope "Looks" {
+        def Material "Udim" {
+            token outputs:surface.connect = </World/Looks/Udim/PreviewSurface.outputs:surface>
+            def Shader "Albedo" {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./tex.<UDIM>.png@
+                float3 outputs:rgb
+            }
+            def Shader "PreviewSurface" {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/Looks/Udim/Albedo.outputs:rgb>
+                token outputs:surface
+            }
+        }
+    }
+}
+"#;
+
+fn scratch_udim_stage(root: &Path) {
+    std::fs::write(root.join("udim.usda"), SCRATCH_UDIM_STAGE).expect("scratch stage");
+    std::fs::copy(fixture("checker.png"), root.join("tex.1001.png")).expect("tile file");
+}
+
+fn scratch_tiles(state: &common::TestOwner, root: &Path) -> Option<Vec<u32>> {
+    state.open(&root.join("udim.usda"));
+    only_texture(state, "/World/Plane")
+        .udim_tiles
+        .map(|tiles| tiles.iter().map(|tile| tile.tile).collect())
+}
+
+#[test]
+fn directory_named_like_a_tile_is_not_a_udim_tile() {
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let root = scratch.path();
+    scratch_udim_stage(root);
+    std::fs::create_dir(root.join("tex.1002.png")).expect("tile directory");
+
+    let state = spawn_stage_owner();
+    assert_eq!(
+        scratch_tiles(&state, root),
+        Some(vec![1001]),
+        "a directory named like a tile has no pixels to decode"
+    );
+}
+
+#[test]
+fn tile_1100_is_the_last_tile_of_the_grid() {
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let root = scratch.path();
+    scratch_udim_stage(root);
+    std::fs::copy(fixture("checker.png"), root.join("tex.1100.png")).expect("last tile");
+    std::fs::copy(fixture("checker.png"), root.join("tex.1101.png")).expect("past the grid");
+
+    let state = spawn_stage_owner();
+    assert_eq!(
+        scratch_tiles(&state, root),
+        Some(vec![1001, 1100]),
+        "1100 closes the 10x10 grid; 1101 is past it"
+    );
+}
+
 #[test]
 fn udim_pattern_without_siblings_answers_none() {
     let state = spawn_stage_owner();
