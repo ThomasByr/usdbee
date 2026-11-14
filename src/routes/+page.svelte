@@ -505,6 +505,8 @@
             bind:backgroundColor={viewer.backgroundColor}
             bind:lightAzimuth
             bind:lightElevation
+            bind:lightingSource={viewerSettings.lightingSource}
+            bind:sceneLightScale={viewerSettings.sceneLightScale}
           />
         {/if}
         {#if activeTab === "layers"}

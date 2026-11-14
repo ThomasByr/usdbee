@@ -15,6 +15,8 @@
     backgroundColor = $bindable(),
     lightAzimuth = $bindable(),
     lightElevation = $bindable(),
+    lightingSource = $bindable(),
+    sceneLightScale = $bindable(),
   } = $props<any>();
 </script>
 
@@ -31,6 +33,33 @@
         <option value={15}>15 FPS</option>
       </select>
     </label>
+  </div>
+
+  <div class="settings-group">
+    <h3>Lighting Source</h3>
+    <label style="display:flex; flex-direction:column; align-items:flex-start; gap:4px; width:100%;">
+      Source
+      <select bind:value={lightingSource} onchange={saveGraphicsPreferences} class="dropdown">
+        <option value="auto">Auto (stage lights when present)</option>
+        <option value="scene">Stage Lights Only</option>
+        <option value="studio">Studio Rig Only</option>
+      </select>
+    </label>
+    <label style="display:flex; flex-direction:column; align-items:flex-start; gap:4px; width:100%;">
+      Scene Light Scale: {sceneLightScale.toFixed(2)}
+      <input
+        type="range"
+        class="slider"
+        min="0"
+        max="10"
+        step="0.05"
+        bind:value={sceneLightScale}
+        onchange={saveGraphicsPreferences}
+      />
+    </label>
+    <p style="margin:0; font-size:11px; color:var(--text-muted);">
+      The sun position and the ambient/directional sliders below apply to the studio rig only.
+    </p>
   </div>
 
   <div class="settings-group">

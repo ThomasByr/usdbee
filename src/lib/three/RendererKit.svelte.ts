@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { RectAreaLightUniformsLib } from "three/addons/lights/RectAreaLightUniformsLib.js";
 // @ts-ignore
 import Stats from "three/addons/libs/stats.module.js";
 import { viewerSettings } from "$lib/state/viewerSettings.svelte";
@@ -9,6 +10,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as frameDiag from "$lib/perf/frameDiag";
 import { initOnDemandShadows, renderWithShadowUpdate } from "$lib/three/shadowMapUpdate";
 import { nextFrameTime, shouldRenderFrame } from "$lib/three/fpsLimiter";
+import type { LightInfo } from "$lib/stage/types";
 
 export class RendererKit {
   canvas: HTMLCanvasElement | null = null;
@@ -25,6 +27,13 @@ export class RendererKit {
 
   dirLight = $state.raw<THREE.DirectionalLight | null>(null);
   ambientLight = $state.raw<THREE.AmbientLight | null>(null);
+  // F4: the stage's light prims as last fetched (reactive: the light builder
+  // re-runs when a load replaces them) and the three lights built from them.
+  // The rest is bookkeeping for the rebuild and its dispose.
+  stageLights = $state.raw<LightInfo[]>([]);
+  sceneLights: THREE.Light[] = [];
+  sceneEnv: THREE.Texture | null = null;
+  baseEnvironment: THREE.Texture | null = null;
   stats: any = null;
 
   loadedGroup = $state.raw<THREE.Group | null>(null);
@@ -102,6 +111,11 @@ export class RendererKit {
 
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+    // A stage dome light replaces the environment for as long as the scene
+    // lights are on; the studio one comes back when they are cleared.
+    this.baseEnvironment = this.scene.environment;
+    // One global init for the LTC tables the rect area light shader samples.
+    RectAreaLightUniformsLib.init();
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = this.enableDamping;

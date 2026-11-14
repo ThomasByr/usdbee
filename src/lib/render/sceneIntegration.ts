@@ -4,6 +4,7 @@ import { stageState } from "$lib/stage/stageState.svelte";
 import {
   renderState,
   advanceStageTime,
+  getStageLights,
   prefetchPoses,
   snapToTimeCodes,
   snapToPlayableTime,
@@ -22,6 +23,8 @@ import * as frameDiag from "$lib/perf/frameDiag";
 import { requestShadowUpdate } from "$lib/three/shadowMapUpdate";
 import { viewerSettings } from "$lib/state/viewerSettings.svelte";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
+import type { LightInfo } from "$lib/stage/types";
+import { convertFileSrc } from "@tauri-apps/api/core";
 
 // Renderer-side step functions shared with the page shell: the scene
 // pipeline (reset / integrate / load / edit-refresh) and the reactive
@@ -71,6 +74,8 @@ export function resetLoadedScene(viewer: RendererKit) {
   viewer.hasAnimation = false;
   viewer.animationDuration = 0;
   viewer.animationProgress = 0;
+  // The closed stage's light prims go with it: the next load fetches its own.
+  viewer.stageLights = [];
 }
 
 // Camera fit / grid / light framing for the rust scene (no skinned
@@ -170,6 +175,17 @@ export function integrateScene(viewer: RendererKit, group: THREE.Group) {
   }
 
   viewer.scene!.add(group);
+
+  // F4: one light fetch per load, whatever the lighting source: "auto" needs
+  // the list to decide, so fetching per mode would only duplicate this site.
+  // The builder reacts to the write through the viewport's effect.
+  const stageId = stageState.activeStageId;
+  if (stageId) {
+    void getStageLights(stageId).then((lights) => {
+      // A late answer for a stage that is already gone must not relight it.
+      if (stageState.activeStageId === stageId) viewer.stageLights = lights;
+    });
+  }
 }
 
 export async function loadRustScene(viewer: RendererKit) {
@@ -459,4 +475,179 @@ export function syncLightRig(viewer: RendererKit, lightAzimuth: number, lightEle
     viewer.dirLight.target.position.copy(viewer.sceneCenter);
     viewer.dirLight.target.updateMatrixWorld();
   }
+}
+
+// ---- F4: stage lights ---------------------------------------------------
+
+export interface SceneLightSettings {
+  sceneLightScale: number;
+  shadowsEnabled: boolean;
+}
+
+// Spec R1: "auto" lights the stage from its own light prims as soon as it has
+// one, "scene" never falls back to the rig, "studio" always keeps it.
+export function sceneLightsActive(source: string, lights: LightInfo[]): boolean {
+  if (source === "studio") return false;
+  return source === "scene" || lights.length > 0;
+}
+
+// USD exposure is stops; three has no light units at all, so one global scale
+// lets the eye calibrate per asset instead of us guessing a constant.
+// shortcut: `normalize` (radiance per unit area) folds into that same scale
+// rather than being integrated per kind; upgrade if a normalized light reads
+// wrong next to an unnormalized one.
+function lightIntensity(info: LightInfo, scale: number): number {
+  return info.intensity * 2 ** info.exposure * scale;
+}
+
+// shortcut: the payload carries no light transform, so every positional light
+// sits on one anchor scaled by the scene and aims at the origin (integrateScene
+// re-centers the geometry there). Upgrade when LightInfo ships a world
+// transform.
+function lightAnchor(viewer: RendererKit): THREE.Vector3 {
+  return new THREE.Vector3(0.6, 0.9, 0.6).multiplyScalar(viewer.sceneSize);
+}
+
+function buildSceneLight(
+  viewer: RendererKit,
+  info: LightInfo,
+  settings: SceneLightSettings,
+): THREE.Light | null {
+  const intensity = lightIntensity(info, settings.sceneLightScale);
+  const color = new THREE.Color(info.color[0] ?? 1, info.color[1] ?? 1, info.color[2] ?? 1);
+
+  if (info.kind === "dome") {
+    // An untextured dome is one flat fill: its color at its intensity.
+    if (!info.texture_file) return new THREE.AmbientLight(color, intensity);
+    // A textured dome lights the scene as an equirect environment. shortcut:
+    // USD's dome color is not baked into the texture; upgrade if a fixture
+    // authors a tinted dome.
+    const texture = new THREE.TextureLoader().load(convertFileSrc(info.texture_file));
+    texture.mapping = THREE.EquirectangularReflectionMapping;
+    viewer.sceneEnv = texture;
+    if (viewer.scene) {
+      viewer.scene.environment = texture;
+      viewer.scene.environmentIntensity = intensity;
+    }
+    return null;
+  }
+
+  const anchor = lightAnchor(viewer);
+  let light: THREE.Light;
+
+  switch (info.kind) {
+    case "distant": {
+      const distant = new THREE.DirectionalLight(color, intensity);
+      // USD's `angle` on a distant light is its elevation: the default 90 aims
+      // it straight down.
+      const elevation = THREE.MathUtils.degToRad(info.angle ?? 90);
+      distant.position.set(0, Math.sin(elevation), Math.cos(elevation));
+      distant.position.multiplyScalar(viewer.sceneSize * 2);
+      distant.target.position.set(0, 0, 0);
+      distant.target.updateMatrixWorld();
+      light = distant;
+      break;
+    }
+    case "rect": {
+      const rect = new THREE.RectAreaLight(color, intensity, info.width ?? 1, info.height ?? 1);
+      rect.position.copy(anchor);
+      rect.lookAt(0, 0, 0);
+      light = rect;
+      break;
+    }
+    default: {
+      // Sphere, disk and cylinder: a point at the source. USD's radius sizes the
+      // emitting surface, which three has no per-light knob for, so it becomes a
+      // generous falloff cutoff (shortcut: radius 0 keeps the light unbounded).
+      const radius = info.radius ?? 0;
+      const distance = radius > 0 ? radius * 20 : 0;
+      if (info.shaping) {
+        const spot = new THREE.SpotLight(
+          color,
+          intensity,
+          distance,
+          // three's SpotLight.angle is the half-angle and must stay under a
+          // right angle, or the cone edge falls apart.
+          Math.min(THREE.MathUtils.degToRad(info.shaping.cone_angle), Math.PI / 2 - 1e-3),
+          info.shaping.cone_softness,
+        );
+        spot.position.copy(anchor);
+        spot.target.position.set(0, 0, 0);
+        spot.target.updateMatrixWorld();
+        light = spot;
+      } else {
+        // shortcut: three has no axis light, so a cylinder's length and its
+        // flat ends are not modeled — it lights as a point.
+        const point = new THREE.PointLight(color, intensity, distance);
+        point.position.copy(anchor);
+        light = point;
+      }
+    }
+  }
+
+  // three throws shadows from directional, spot and point lights only: a rect
+  // area light has no shadow support, so its casts_shadow cannot be honoured.
+  if (settings.shadowsEnabled && info.casts_shadow && !(light as THREE.RectAreaLight).isRectAreaLight) {
+    light.castShadow = true;
+    const reach = viewer.sceneSize * 1.2;
+    if ((light as THREE.DirectionalLight).isDirectionalLight) {
+      // The default ortho bounds cover 5 units: the stage's own extent decides.
+      const shadow = (light as THREE.DirectionalLight).shadow;
+      shadow.camera.left = -reach;
+      shadow.camera.right = reach;
+      shadow.camera.top = reach;
+      shadow.camera.bottom = -reach;
+      shadow.camera.far = viewer.sceneSize * 4;
+      shadow.camera.updateProjectionMatrix();
+    } else if ((light as THREE.PointLight).isPointLight) {
+      (light as THREE.PointLight).shadow.camera.far = viewer.sceneSize * 4;
+    }
+  }
+
+  return light;
+}
+
+// Spec R3: scene lights replace the rig entirely. Rebuilds per load and per
+// settings change, so the previous build is disposed first.
+export function syncSceneLights(viewer: RendererKit, lights: LightInfo[], settings: SceneLightSettings) {
+  clearSceneLights(viewer);
+  // The studio key and fill would double the stage's own light.
+  if (viewer.ambientLight) viewer.ambientLight.visible = false;
+  if (viewer.dirLight) viewer.dirLight.visible = false;
+
+  for (const info of lights) {
+    // `enabled` is the prim's computed visibility: an invisible light is off.
+    if (!info.enabled) continue;
+    const light = buildSceneLight(viewer, info, settings);
+    if (!light) continue;
+    viewer.sceneLights.push(light);
+    viewer.scene?.add(light);
+  }
+
+  // The frozen shadow map still holds the rig's shadows.
+  requestShadowUpdate();
+}
+
+// Back to the studio rig: drop the stage lights, put the environment back.
+export function clearSceneLights(viewer: RendererKit) {
+  if (viewer.sceneLights.length === 0 && !viewer.sceneEnv) return;
+
+  for (const light of viewer.sceneLights) {
+    viewer.scene?.remove(light);
+    light.dispose();
+  }
+  viewer.sceneLights.length = 0;
+
+  if (viewer.sceneEnv) {
+    viewer.sceneEnv.dispose();
+    viewer.sceneEnv = null;
+    if (viewer.scene) {
+      viewer.scene.environment = viewer.baseEnvironment;
+      viewer.scene.environmentIntensity = 1;
+    }
+  }
+
+  if (viewer.ambientLight) viewer.ambientLight.visible = true;
+  if (viewer.dirLight) viewer.dirLight.visible = true;
+  requestShadowUpdate();
 }

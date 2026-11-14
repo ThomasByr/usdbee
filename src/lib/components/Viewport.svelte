@@ -11,13 +11,16 @@
     toPlayheadOffset,
   } from "$lib/render/renderState.svelte";
   import {
+    clearSceneLights,
     integrateScene,
     loadRustScene,
     installPlaybackDriver,
     refreshSceneAfterEdit,
     resetLoadedScene,
+    sceneLightsActive,
     syncGraphicsSettings,
     syncLightRig,
+    syncSceneLights,
   } from "$lib/render/sceneIntegration";
   import {
     disposeGizmo,
@@ -29,6 +32,7 @@
   import type { GizmoMode } from "$lib/render/xformOps";
   import type { RendererKit } from "$lib/three/RendererKit.svelte";
   import { controlsState } from "$lib/state/controlsState.svelte";
+  import { viewerSettings } from "$lib/state/viewerSettings.svelte";
   import { consumeLaunchOptions } from "$lib/commands/launch";
   import { setBridgeViewer } from "$lib/commands/viewerRef";
   import { formatTimeline, formatTimelineEnd, playbackState } from "$lib/state/playbackState.svelte";
@@ -112,8 +116,16 @@
     syncGraphicsSettings(viewer);
   });
 
+  // F4: the lighting source picks between the studio rig and the stage's own
+  // lights. Every read here is tracked, so a settings change (or a new light
+  // fetch) re-lights the viewport without reopening the stage.
   $effect(() => {
-    syncLightRig(viewer, lightAzimuth, lightElevation);
+    if (sceneLightsActive(viewerSettings.lightingSource, viewer.stageLights)) {
+      syncSceneLights(viewer, viewer.stageLights, viewerSettings);
+    } else {
+      clearSceneLights(viewer);
+      syncLightRig(viewer, lightAzimuth, lightElevation);
+    }
   });
 
   $effect(() => {

@@ -11,7 +11,7 @@
 // rebuilt.
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import * as THREE from "three";
-import type { MaterialInfo, RenderNode } from "../stage/types";
+import type { MaterialInfo, LightInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
 import { decodeGeometryBatch, decodeMaterialBatch } from "./geometryDecoder";
 import { decodeAnimatedPose } from "./poseDecoder";
@@ -103,6 +103,18 @@ const scratchInstance = new THREE.Matrix4();
 // so repeated visits hit the Rust MeshCache.
 export function getTimeCodes(stageId: number): Promise<number[]> {
   return invoke<number[]>("get_time_codes", { stageId });
+}
+
+// F4: the stage's light prims, one entry per light prim (the list is small and
+// its attributes are read at load time). A failed read leaves the caller on the
+// studio rig rather than failing the load.
+export async function getStageLights(stageId: number): Promise<LightInfo[]> {
+  try {
+    return (await invoke<LightInfo[]>("get_stage_lights", { stageId })) ?? [];
+  } catch (e) {
+    console.warn("usdbee: stage lights unavailable; keeping the studio rig:", e);
+    return [];
+  }
 }
 
 // One pose response (stage.rs::frame_pose): the compact binary frame of a

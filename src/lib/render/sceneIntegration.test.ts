@@ -12,13 +12,17 @@ vi.mock("@tauri-apps/api/core", () => ({
 import * as THREE from "three";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  clearSceneLights,
   installPlaybackDriver,
   integrateScene,
   loadRustScene,
   resetLoadedScene,
+  sceneLightsActive,
   syncGraphicsSettings,
   syncLightRig,
+  syncSceneLights,
 } from "./sceneIntegration";
+import type { LightInfo } from "../stage/types";
 import { loadCachedTexture } from "./textureCache";
 import { renderState, prefetchPoses } from "./renderState.svelte";
 import { invalidatePoseBuffer, isPrefetchDead, poseCoverage, takePose } from "./posePrefetch";
@@ -1019,6 +1023,249 @@ describe("syncGraphicsSettings shadow triggers", () => {
 
     syncGraphicsSettings(kit);
 
+    expect(consumeShadowUpdate()).toBe(false);
+  });
+});
+
+// Kit the scene-light builder can drive: the integrateKit fake plus the
+// light fields the builder reads (the studio rig it replaces, the bookkeeping
+// it owns).
+function lightKit(): RendererKit {
+  return Object.assign(integrateKit(), {
+    sceneSize: 10,
+    sceneCenter: new THREE.Vector3(),
+    ambientLight: new THREE.AmbientLight(),
+    dirLight: new THREE.DirectionalLight(),
+    sceneLights: [] as THREE.Light[],
+    sceneEnv: null,
+    baseEnvironment: null,
+    stageLights: [],
+  }) as unknown as RendererKit;
+}
+
+const LIGHT_SETTINGS = { sceneLightScale: 1, shadowsEnabled: true };
+
+function stageLight(overrides: Partial<LightInfo>): LightInfo {
+  return {
+    path: "/Scene/L",
+    kind: "sphere",
+    intensity: 1,
+    exposure: 0,
+    color: [1, 1, 1],
+    enabled: true,
+    normalize: false,
+    casts_shadow: false,
+    ...overrides,
+  } as LightInfo;
+}
+
+describe("sceneLightsActive", () => {
+  it("keeps the studio rig until a stage light exists (auto)", () => {
+    expect(sceneLightsActive("auto", [])).toBe(false);
+    expect(sceneLightsActive("auto", [stageLight({})])).toBe(true);
+  });
+
+  it("honours the explicit modes", () => {
+    // "scene" on a stage with no light authors no light: it renders dark.
+    expect(sceneLightsActive("scene", [])).toBe(true);
+    expect(sceneLightsActive("studio", [stageLight({})])).toBe(false);
+  });
+});
+
+describe("syncSceneLights", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("maps a distant light to a directional light pointing down from its angle", () => {
+    const kit = lightKit();
+
+    syncSceneLights(kit, [stageLight({ kind: "distant", angle: 90 })], LIGHT_SETTINGS);
+
+    const [light] = kit.sceneLights;
+    expect(light).toBeInstanceOf(THREE.DirectionalLight);
+    // USD's default angle is an elevation of 90 degrees: straight down, so the
+    // light sits on the +Y axis above the origin the scene is centered on.
+    expect(light!.position.y).toBeGreaterThan(0);
+    expect(light!.position.x).toBeCloseTo(0, 6);
+    expect(light!.position.z).toBeCloseTo(0, 6);
+  });
+
+  it("scales intensity by the exposure stops and the scene light scale", () => {
+    const kit = lightKit();
+    // f64 widened from f32, as the backend serializes it.
+    syncSceneLights(kit, [stageLight({ intensity: 0.8999999761581421, exposure: 2 })], {
+      sceneLightScale: 0.5,
+      shadowsEnabled: true,
+    });
+
+    expect(kit.sceneLights[0]!.intensity).toBeCloseTo(0.9 * 4 * 0.5, 5);
+  });
+
+  it("carries the authored color", () => {
+    const kit = lightKit();
+
+    syncSceneLights(kit, [stageLight({ color: [0.8999999761581421, 0.2, 0.1] })], LIGHT_SETTINGS);
+
+    expect(kit.sceneLights[0]!.color.r).toBeCloseTo(0.9, 5);
+    expect(kit.sceneLights[0]!.color.g).toBeCloseTo(0.2, 5);
+  });
+
+  it("maps a sphere or disk light to a point light", () => {
+    for (const kind of ["sphere", "disk"] as const) {
+      const kit = lightKit();
+
+      syncSceneLights(kit, [stageLight({ kind, radius: 0.5 })], LIGHT_SETTINGS);
+
+      expect(kit.sceneLights[0]).toBeInstanceOf(THREE.PointLight);
+    }
+  });
+
+  it("maps a shaped sphere or disk light to a spot light", () => {
+    const kit = lightKit();
+
+    syncSceneLights(kit, [stageLight({ shaping: { cone_angle: 45, cone_softness: 0.5 } })], LIGHT_SETTINGS);
+
+    const light = kit.sceneLights[0] as THREE.SpotLight;
+    expect(light).toBeInstanceOf(THREE.SpotLight);
+    expect(light.angle).toBeCloseTo(Math.PI / 4, 10);
+    expect(light.penumbra).toBeCloseTo(0.5, 10);
+  });
+
+  it("maps a rect light to a rect area light with its authored size", () => {
+    const kit = lightKit();
+
+    syncSceneLights(
+      kit,
+      [stageLight({ kind: "rect", width: 4, height: 2, casts_shadow: true })],
+      LIGHT_SETTINGS,
+    );
+
+    const light = kit.sceneLights[0] as THREE.RectAreaLight;
+    expect(light).toBeInstanceOf(THREE.RectAreaLight);
+    expect(light.width).toBeCloseTo(4, 5);
+    expect(light.height).toBeCloseTo(2, 5);
+    // three has no rect-area shadow: casts_shadow cannot be honoured.
+    expect(light.castShadow).toBe(false);
+  });
+
+  it("maps a cylinder light to a point light", () => {
+    const kit = lightKit();
+
+    syncSceneLights(kit, [stageLight({ kind: "cylinder", length: 2, radius: 0.5 })], LIGHT_SETTINGS);
+
+    expect(kit.sceneLights[0]).toBeInstanceOf(THREE.PointLight);
+  });
+
+  it("maps a plain dome light to one ambient light with the dome color", () => {
+    const kit = lightKit();
+
+    syncSceneLights(kit, [stageLight({ kind: "dome", color: [0.5, 0.6, 0.7] })], LIGHT_SETTINGS);
+
+    const [light] = kit.sceneLights;
+    expect(light).toBeInstanceOf(THREE.AmbientLight);
+    expect(light!.color.g).toBeCloseTo(0.6, 5);
+  });
+
+  it("maps a textured dome light to the scene environment, not a light", () => {
+    // No DOM in this environment: the stub keeps the image loader from
+    // throwing. The texture is assigned before its pixels arrive.
+    vi.stubGlobal("document", {
+      createElementNS: () => ({
+        addEventListener() {},
+        removeEventListener() {},
+        setAttribute() {},
+        style: {},
+      }),
+    });
+    const kit = lightKit();
+
+    syncSceneLights(kit, [stageLight({ kind: "dome", texture_file: "/tex/checker.png" })], LIGHT_SETTINGS);
+
+    expect(kit.sceneLights).toHaveLength(0);
+    expect((kit.scene.environment as THREE.Texture).mapping).toBe(THREE.EquirectangularReflectionMapping);
+  });
+
+  it("skips a light the stage marks invisible", () => {
+    const kit = lightKit();
+
+    syncSceneLights(kit, [stageLight({ enabled: false })], LIGHT_SETTINGS);
+
+    expect(kit.sceneLights).toHaveLength(0);
+  });
+
+  it("casts shadows only for a shadow-capable type the light asks for", () => {
+    const shadowCapable = [
+      stageLight({ path: "/d", kind: "distant", casts_shadow: true }),
+      stageLight({ path: "/p", casts_shadow: true }),
+      stageLight({
+        path: "/s",
+        casts_shadow: true,
+        shaping: { cone_angle: 30, cone_softness: 0 },
+      }),
+    ];
+    const kit = lightKit();
+
+    syncSceneLights(kit, shadowCapable, LIGHT_SETTINGS);
+
+    expect(kit.sceneLights.map((l) => l.castShadow)).toEqual([true, true, true]);
+  });
+
+  it("casts no shadow when the light does not ask for one", () => {
+    const kit = lightKit();
+
+    syncSceneLights(kit, [stageLight({ casts_shadow: false })], LIGHT_SETTINGS);
+
+    expect(kit.sceneLights[0]!.castShadow).toBe(false);
+  });
+
+  it("casts no shadow when the shadows setting is off", () => {
+    const kit = lightKit();
+
+    syncSceneLights(kit, [stageLight({ casts_shadow: true })], {
+      sceneLightScale: 1,
+      shadowsEnabled: false,
+    });
+
+    expect(kit.sceneLights[0]!.castShadow).toBe(false);
+  });
+
+  it("replaces the studio rig and rebuilds in place", () => {
+    const kit = lightKit();
+    consumeShadowUpdate();
+
+    syncSceneLights(kit, [stageLight({})], LIGHT_SETTINGS);
+
+    expect(kit.ambientLight!.visible).toBe(false);
+    expect(kit.dirLight!.visible).toBe(false);
+    expect(consumeShadowUpdate()).toBe(true);
+
+    // Second run (a settings change): the old light goes, no duplicate stays.
+    syncSceneLights(kit, [stageLight({ intensity: 2 })], LIGHT_SETTINGS);
+
+    expect(kit.sceneLights).toHaveLength(1);
+    expect(kit.scene.children).toHaveLength(1);
+  });
+
+  it("restores the studio rig when the scene lights are cleared", () => {
+    const kit = lightKit();
+    syncSceneLights(kit, [stageLight({})], LIGHT_SETTINGS);
+
+    clearSceneLights(kit);
+
+    expect(kit.sceneLights).toHaveLength(0);
+    expect(kit.scene.children).toHaveLength(0);
+    expect(kit.ambientLight!.visible).toBe(true);
+    expect(kit.dirLight!.visible).toBe(true);
+  });
+
+  it("leaves the rig untouched when there is nothing to clear", () => {
+    // Auto with no lights: byte-identical to the studio rig.
+    const kit = lightKit();
+    consumeShadowUpdate();
+
+    clearSceneLights(kit);
+
+    expect(kit.ambientLight!.visible).toBe(true);
+    expect(kit.dirLight!.visible).toBe(true);
     expect(consumeShadowUpdate()).toBe(false);
   });
 });

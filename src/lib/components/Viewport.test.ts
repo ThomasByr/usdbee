@@ -70,6 +70,9 @@ vi.mock("$lib/render/sceneIntegration", () => ({
   resetLoadedScene: vi.fn(),
   syncGraphicsSettings: vi.fn(),
   syncLightRig: vi.fn(),
+  syncSceneLights: vi.fn(),
+  clearSceneLights: vi.fn(),
+  sceneLightsActive: vi.fn(() => false),
 }));
 vi.mock("$lib/render/gizmoCommit.svelte", () => ({
   disposeGizmo: vi.fn(),
