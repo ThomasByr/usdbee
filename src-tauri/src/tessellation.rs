@@ -98,7 +98,7 @@ fn context(path: &str, error: impl std::fmt::Display) -> String {
 }
 
 /// Tessellate one composed prim. `Ok(None)` for anything that is not
-/// renderable geometry (Mesh, BasisCurves, Points, Sphere); `Err` names the prim
+/// renderable geometry (Mesh, BasisCurves, NurbsCurves, Points, Sphere); `Err` names the prim
 /// path when the geometry itself cannot be tessellated. `time: Some(t)`
 /// reads time-sampled attributes at `t`; `None` reads the default-time
 /// values.
@@ -115,6 +115,7 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
     match type_name.as_deref() {
         Some("Mesh") => mesh_data(prim, time_code, &path),
         Some("BasisCurves") => curves_data(prim, time_code, &path),
+        Some("NurbsCurves") => curves_data(prim, time_code, &path),
         Some("Points") => points_data(prim, time_code, &path),
         Some("Sphere") => sphere_data(prim, time_code, &path),
         _ => Ok(None),

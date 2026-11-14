@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use usdbee_lib::stage::open_stage;
+use usdbee_lib::stage::{open_stage, serialize_render_manifest, RenderNode};
 use usdbee_lib::tessellation::{tessellate_prim, MeshData};
 
 use openusd::sdf;
@@ -25,6 +25,13 @@ fn tessellate_stage(name: &str) -> (openusd::usd::Stage, usdbee_lib::stage::Stag
 fn tessellate(stage: &openusd::usd::Stage, path: &str) -> Option<MeshData> {
     tessellate_prim(&prim(stage, path).expect("test prim should resolve"), None)
         .expect("tessellation should not fail for the tested prim")
+}
+
+fn find_node<'a>(nodes: &'a [RenderNode], path: &str) -> Option<&'a RenderNode> {
+    nodes
+        .iter()
+        .find(|n| n.path == path)
+        .or_else(|| nodes.iter().find_map(|n| find_node(&n.children, path)))
 }
 
 #[test]
@@ -591,4 +598,37 @@ fn points_prim_tessellates_to_positions_only() {
             [1.0, 1.0, 0.0]
         ])
     );
+}
+
+#[test]
+fn nurbs_curve_tessellates_like_the_same_points_authored_as_basis() {
+    let (stage, _info) = tessellate_stage("nurbs_curves.usda");
+
+    let nurbs = tessellate(&stage, "/Scene/C_nurbs").expect("nurbs curve must tessellate");
+    let basis = tessellate(&stage, "/Scene/C_basis").expect("basis curve must tessellate");
+
+    // Chords, not curvature: the nurbs prim reads the same control points
+    // through the same tube builder, so its output is the basis output.
+    assert!(
+        !basis.positions.is_empty(),
+        "the basis golden must not be empty"
+    );
+    assert_eq!(nurbs.positions, basis.positions);
+    assert_eq!(nurbs.indices, basis.indices);
+    assert_eq!(nurbs.normals, basis.normals);
+
+    // The manifest counts both curves as geometry: a nurbs-only asset must
+    // not open to an empty viewport.
+    let manifest = serialize_render_manifest(&stage, None).expect("manifest should serialize");
+    let nurbs_node = find_node(&manifest, "/Scene/C_nurbs").expect("nurbs prim stays in the tree");
+    assert!(nurbs_node.has_geometry, "nurbs curve renders geometry");
+    let geometry_count = count_geometry(&manifest);
+    assert_eq!(geometry_count, 2, "both curves count as geometry");
+}
+
+fn count_geometry(nodes: &[RenderNode]) -> usize {
+    nodes
+        .iter()
+        .map(|n| usize::from(n.has_geometry) + count_geometry(&n.children))
+        .sum()
 }

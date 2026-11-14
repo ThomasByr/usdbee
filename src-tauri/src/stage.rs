@@ -3353,7 +3353,10 @@ fn direct_material(stage: &Stage, prim: &openusd::usd::Prim) -> Option<String> {
 /// Exact type names the manifest treats as renderable geometry (Task 5:
 /// curves tessellate to tubes, points tessellate to point clouds).
 fn renders_geometry(type_name: &str) -> bool {
-    matches!(type_name, "Mesh" | "BasisCurves" | "Points" | "Sphere")
+    matches!(
+        type_name,
+        "Mesh" | "BasisCurves" | "NurbsCurves" | "Points" | "Sphere"
+    )
 }
 
 /// One attribute pass over a prim for every animated signal at once:
