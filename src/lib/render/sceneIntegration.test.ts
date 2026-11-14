@@ -1038,12 +1038,45 @@ function lightKit(): RendererKit {
     dirLight: new THREE.DirectionalLight(),
     sceneLights: [] as THREE.Light[],
     sceneEnv: null,
+    sceneEnvPath: null,
     baseEnvironment: null,
     stageLights: [],
   }) as unknown as RendererKit;
 }
 
-const LIGHT_SETTINGS = { sceneLightScale: 1, shadowsEnabled: true };
+const LIGHT_SETTINGS = { sceneLightScale: 1, shadowsEnabled: true, shadowMapSize: 2048 };
+
+// Row-major 4x4 in the USD row-vector convention (translation in the last row),
+// the shape values.rs::world_transform produces. `rotationX` is degrees about X.
+function transform(position: [number, number, number], rotationX = 0): number[] {
+  const c = Math.cos(THREE.MathUtils.degToRad(rotationX));
+  const s = Math.sin(THREE.MathUtils.degToRad(rotationX));
+  return [1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, position[0], position[1], position[2], 1];
+}
+
+// three's ImageLoader attaches `load`/`error` listeners and assigns `src`. With
+// `fail` the stub fires the error path, which a missing dome file takes.
+function stubImageDocument(fail = false) {
+  vi.stubGlobal("document", {
+    createElementNS: () => {
+      let onError: (() => void) | null = null;
+      const image: any = {
+        addEventListener: (name: string, fn: () => void) => {
+          if (name === "error") onError = fn;
+        },
+        removeEventListener() {},
+        setAttribute() {},
+        style: {},
+      };
+      Object.defineProperty(image, "src", {
+        set: () => {
+          if (fail) queueMicrotask(() => onError?.());
+        },
+      });
+      return image;
+    },
+  });
+}
 
 function stageLight(overrides: Partial<LightInfo>): LightInfo {
   return {
@@ -1075,26 +1108,145 @@ describe("sceneLightsActive", () => {
 describe("syncSceneLights", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("maps a distant light to a directional light pointing down from its angle", () => {
+  it("aims the fallback direction by the authored angle, per axis", () => {
     const kit = lightKit();
 
-    syncSceneLights(kit, [stageLight({ kind: "distant", angle: 90 })], LIGHT_SETTINGS);
+    // 30 degrees, not the 90 an earlier test used: at 90 both horizontal axes
+    // are zero, and at 45 the two are equal, so either would still pass with y
+    // and z swapped.
+    syncSceneLights(kit, [stageLight({ kind: "distant", angle: 30 })], LIGHT_SETTINGS);
 
     const [light] = kit.sceneLights;
+    const distance = 2 * kit.sceneSize;
     expect(light).toBeInstanceOf(THREE.DirectionalLight);
-    // USD's default angle is an elevation of 90 degrees: straight down, so the
-    // light sits on the +Y axis above the origin the scene is centered on.
-    expect(light!.position.y).toBeGreaterThan(0);
     expect(light!.position.x).toBeCloseTo(0, 6);
-    expect(light!.position.z).toBeCloseTo(0, 6);
+    expect(light!.position.y).toBeCloseTo(0.5 * distance, 6);
+    expect(light!.position.z).toBeCloseTo(Math.cos(Math.PI / 6) * distance, 6);
+  });
+
+  it("aims a distant light along its transform's forward axis", () => {
+    const kit = lightKit();
+
+    // rotateX(-60): the local -Z (forward) is (0, -0.866, -0.5), so the light
+    // sits back along its aim at (0, 17.32, 10) and targets the stage center.
+    syncSceneLights(
+      kit,
+      [stageLight({ kind: "distant", angle: 45, world_transform: transform([0, 0, 0], -60) })],
+      LIGHT_SETTINGS,
+    );
+
+    const [light] = kit.sceneLights;
+    expect(light!.position.x).toBeCloseTo(0, 6);
+    expect(light!.position.y).toBeCloseTo(17.3205081, 5);
+    expect(light!.position.z).toBeCloseTo(10, 5);
+  });
+
+  it("places a positional light at its world transform, shifted with the scene center", () => {
+    const kit = lightKit();
+    // integrateScene re-centers the geometry, so the transform's translation
+    // must shift by the same center.
+    kit.sceneCenter = new THREE.Vector3(0, 1, 0);
+
+    syncSceneLights(kit, [stageLight({ world_transform: transform([0, 3, 0]) })], LIGHT_SETTINGS);
+
+    expect(kit.sceneLights[0]!.position.toArray()).toEqual([0, 2, 0]);
+  });
+
+  it("orients a spot light from its transform's axes", () => {
+    const kit = lightKit();
+
+    syncSceneLights(
+      kit,
+      [
+        stageLight({
+          world_transform: transform([0, 3, 0], 90),
+          shaping: { cone_angle: 45, cone_softness: 0 },
+        }),
+      ],
+      LIGHT_SETTINGS,
+    );
+
+    const spot = kit.sceneLights[0] as THREE.SpotLight;
+    expect(spot.position.toArray()).toEqual([0, 3, 0]);
+    // forward is (0, 1, 0): the target sits one unit along it.
+    expect(spot.target.position.x).toBeCloseTo(0, 10);
+    expect(spot.target.position.y).toBeCloseTo(4, 10);
+    expect(spot.target.position.z).toBeCloseTo(0, 10);
+  });
+
+  it("orients a rect light along its transform's forward axis", () => {
+    const kit = lightKit();
+
+    syncSceneLights(
+      kit,
+      [stageLight({ kind: "rect", width: 2, height: 1, world_transform: transform([-3, 2, 0], 90) })],
+      LIGHT_SETTINGS,
+    );
+
+    const rect = kit.sceneLights[0] as THREE.RectAreaLight;
+    expect(rect.position.toArray()).toEqual([-3, 2, 0]);
+    // getWorldDirection is the object's +Z; a light emits down its -Z.
+    const forward = rect.getWorldDirection(new THREE.Vector3()).negate();
+    expect(forward.x).toBeCloseTo(0, 10);
+    expect(forward.y).toBeCloseTo(1, 10);
+    expect(forward.z).toBeCloseTo(0, 10);
+  });
+
+  it("falls back to the anchor for a light with no transform", () => {
+    const kit = lightKit();
+
+    syncSceneLights(kit, [stageLight({})], LIGHT_SETTINGS);
+
+    expect(kit.sceneLights[0]!.position.toArray()).toEqual([6, 9, 6]);
+  });
+
+  it("writes the tone mapping exposure the scene branch would otherwise leave at 1.0", () => {
+    const kit = lightKit();
+    kit.renderer = { toneMappingExposure: 1 } as unknown as RendererKit["renderer"];
+    const previous = viewerSettings.toneExposure;
+    viewerSettings.toneExposure = 2.5;
+    try {
+      syncSceneLights(kit, [stageLight({})], LIGHT_SETTINGS);
+
+      expect(kit.renderer.toneMappingExposure).toBe(2.5);
+    } finally {
+      viewerSettings.toneExposure = previous;
+    }
+  });
+
+  it("sizes a scene light's shadow map from the viewer setting", () => {
+    const kit = lightKit();
+
+    syncSceneLights(kit, [stageLight({ kind: "distant", casts_shadow: true })], {
+      ...LIGHT_SETTINGS,
+      shadowMapSize: 4096,
+    });
+
+    const [light] = kit.sceneLights as THREE.DirectionalLight[];
+    expect(light!.shadow.mapSize.width).toBe(4096);
+    expect(light!.shadow.mapSize.height).toBe(4096);
+    expect(light!.shadow.bias).toBeCloseTo(-0.0001, 10);
+  });
+
+  it("disposes a removed light's shadow map, which Light.dispose() does not", () => {
+    const kit = lightKit();
+    syncSceneLights(kit, [stageLight({ casts_shadow: true })], LIGHT_SETTINGS);
+    const light = kit.sceneLights[0] as THREE.PointLight;
+    const map = { dispose: vi.fn() };
+    light.shadow.map = map as unknown as THREE.WebGLRenderTarget;
+
+    syncSceneLights(kit, [], LIGHT_SETTINGS);
+
+    // The rig rebuilds on every slider tick: a leaked target per rebuild.
+    expect(map.dispose).toHaveBeenCalled();
   });
 
   it("scales intensity by the exposure stops and the scene light scale", () => {
     const kit = lightKit();
     // f64 widened from f32, as the backend serializes it.
     syncSceneLights(kit, [stageLight({ intensity: 0.8999999761581421, exposure: 2 })], {
+      ...LIGHT_SETTINGS,
       sceneLightScale: 0.5,
-      shadowsEnabled: true,
     });
 
     expect(kit.sceneLights[0]!.intensity).toBeCloseTo(0.9 * 4 * 0.5, 5);
@@ -1166,22 +1318,69 @@ describe("syncSceneLights", () => {
   });
 
   it("maps a textured dome light to the scene environment, not a light", () => {
-    // No DOM in this environment: the stub keeps the image loader from
-    // throwing. The texture is assigned before its pixels arrive.
-    vi.stubGlobal("document", {
-      createElementNS: () => ({
-        addEventListener() {},
-        removeEventListener() {},
-        setAttribute() {},
-        style: {},
-      }),
-    });
+    stubImageDocument();
     const kit = lightKit();
 
     syncSceneLights(kit, [stageLight({ kind: "dome", texture_file: "/tex/checker.png" })], LIGHT_SETTINGS);
 
     expect(kit.sceneLights).toHaveLength(0);
     expect((kit.scene.environment as THREE.Texture).mapping).toBe(THREE.EquirectangularReflectionMapping);
+  });
+
+  it("reads an image dome as sRGB and an EXR dome as linear", () => {
+    stubImageDocument();
+    const kit = lightKit();
+
+    syncSceneLights(kit, [stageLight({ kind: "dome", texture_file: "/tex/checker.png" })], LIGHT_SETTINGS);
+    expect(kit.sceneEnv!.colorSpace).toBe(THREE.SRGBColorSpace);
+
+    syncSceneLights(kit, [stageLight({ kind: "dome", texture_file: "/tex/sky.exr" })], LIGHT_SETTINGS);
+    expect(kit.sceneEnv!.colorSpace).toBe(THREE.NoColorSpace);
+  });
+
+  it("keeps the dome texture across a rebuild of the same file", () => {
+    stubImageDocument();
+    const kit = lightKit();
+    syncSceneLights(kit, [stageLight({ kind: "dome", texture_file: "/tex/steady.png" })], LIGHT_SETTINGS);
+    const first = kit.sceneEnv!;
+    const dispose = vi.spyOn(first, "dispose");
+
+    // A scale-slider tick rebuilds the rig: re-fetching and re-disposing the
+    // same file would blank the environment on every tick.
+    syncSceneLights(kit, [stageLight({ kind: "dome", texture_file: "/tex/steady.png" })], {
+      ...LIGHT_SETTINGS,
+      sceneLightScale: 4,
+    });
+
+    expect(kit.sceneEnv).toBe(first);
+    expect(dispose).not.toHaveBeenCalled();
+    expect(kit.scene.environment).toBe(first);
+  });
+
+  it("disposes the first dome texture when a second file replaces it", () => {
+    stubImageDocument();
+    const kit = lightKit();
+    syncSceneLights(kit, [stageLight({ kind: "dome", texture_file: "/tex/first.png" })], LIGHT_SETTINGS);
+    const first = kit.sceneEnv!;
+    const dispose = vi.spyOn(first, "dispose");
+
+    syncSceneLights(kit, [stageLight({ kind: "dome", texture_file: "/tex/second.png" })], LIGHT_SETTINGS);
+
+    expect(dispose).toHaveBeenCalled();
+    expect(kit.sceneEnv).not.toBe(first);
+  });
+
+  it("gives the environment back when the dome file cannot be read", async () => {
+    stubImageDocument(true);
+    const kit = lightKit();
+    kit.baseEnvironment = new THREE.Texture();
+
+    syncSceneLights(kit, [stageLight({ kind: "dome", texture_file: "/tex/missing.png" })], LIGHT_SETTINGS);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Fail-soft: the stage still renders, on the studio environment.
+    expect(kit.sceneEnv).toBeNull();
+    expect(kit.scene.environment).toBe(kit.baseEnvironment);
   });
 
   it("skips a light the stage marks invisible", () => {
@@ -1221,7 +1420,7 @@ describe("syncSceneLights", () => {
     const kit = lightKit();
 
     syncSceneLights(kit, [stageLight({ casts_shadow: true })], {
-      sceneLightScale: 1,
+      ...LIGHT_SETTINGS,
       shadowsEnabled: false,
     });
 
@@ -1253,6 +1452,40 @@ describe("syncSceneLights", () => {
 
     expect(kit.sceneLights).toHaveLength(0);
     expect(kit.scene.children).toHaveLength(0);
+    expect(kit.ambientLight!.visible).toBe(true);
+    expect(kit.dirLight!.visible).toBe(true);
+  });
+
+  it("restores the studio rig after a lightless stage in scene mode", () => {
+    // The regression: "scene" on a stage with no light authors no light and
+    // hides the rig on purpose. Clearing returned early (nothing to dispose)
+    // and left the viewport permanently black back in auto or studio.
+    const kit = lightKit();
+    syncSceneLights(kit, [], LIGHT_SETTINGS);
+    expect(kit.ambientLight!.visible).toBe(false);
+    expect(kit.dirLight!.visible).toBe(false);
+
+    clearSceneLights(kit);
+
+    expect(kit.ambientLight!.visible).toBe(true);
+    expect(kit.dirLight!.visible).toBe(true);
+  });
+
+  it("restores the environment and the rig after a textured dome (scene -> studio)", () => {
+    stubImageDocument();
+    const kit = lightKit();
+    kit.baseEnvironment = new THREE.Texture();
+    syncSceneLights(kit, [stageLight({ kind: "dome", texture_file: "/tex/leave.png" })], LIGHT_SETTINGS);
+    const env = kit.sceneEnv!;
+    const dispose = vi.spyOn(env, "dispose");
+    expect(kit.scene.environment).toBe(env);
+
+    clearSceneLights(kit);
+
+    expect(dispose).toHaveBeenCalled();
+    expect(kit.sceneEnv).toBeNull();
+    expect(kit.scene.environment).toBe(kit.baseEnvironment);
+    expect(kit.scene.environmentIntensity).toBe(1);
     expect(kit.ambientLight!.visible).toBe(true);
     expect(kit.dirLight!.visible).toBe(true);
   });

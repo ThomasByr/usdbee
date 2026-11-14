@@ -1064,7 +1064,7 @@ fn decode_op(base: &str, invert: bool, value: &Value) -> OpOutcome {
 /// xformOpOrder (a plain prim is still somewhere trustworthy in the world);
 /// `None` when an op in the chain cannot be evaluated — the gizmo gate
 /// reads that as a genuinely unsupported stack.
-fn world_transform(prim: &Prim, time: Option<f64>) -> Result<Option<[f64; 16]>, String> {
+pub(crate) fn world_transform(prim: &Prim, time: Option<f64>) -> Result<Option<[f64; 16]>, String> {
     let mut chain = Vec::new();
     let mut current = Some(prim.clone());
     while let Some(ancestor) = current {

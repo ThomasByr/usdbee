@@ -18,6 +18,7 @@ import {
 } from "$lib/render/posePrefetch";
 import { disposeScene } from "$lib/render/sceneBuilder";
 import { clearTextureCache } from "$lib/render/textureCache";
+import { isExrPath } from "$lib/render/textureLoaders";
 import { upAxisRotation } from "$lib/stage/upAxis";
 import * as frameDiag from "$lib/perf/frameDiag";
 import { requestShadowUpdate } from "$lib/three/shadowMapUpdate";
@@ -457,7 +458,7 @@ export function syncGraphicsSettings(viewer: RendererKit) {
 export function syncLightRig(viewer: RendererKit, lightAzimuth: number, lightElevation: number) {
   // Any rig change moves the light: the casters' shadows all shift.
   requestShadowUpdate();
-  if (viewer.renderer) viewer.renderer.toneMappingExposure = viewerSettings.toneExposure;
+  applyToneExposure(viewer);
   if (viewer.ambientLight) viewer.ambientLight.intensity = viewerSettings.ambientIntensity;
   if (viewer.dirLight) {
     viewer.dirLight.intensity = viewerSettings.dirIntensity;
@@ -482,6 +483,7 @@ export function syncLightRig(viewer: RendererKit, lightAzimuth: number, lightEle
 export interface SceneLightSettings {
   sceneLightScale: number;
   shadowsEnabled: boolean;
+  shadowMapSize: number;
 }
 
 // Spec R1: "auto" lights the stage from its own light prims as soon as it has
@@ -500,12 +502,78 @@ function lightIntensity(info: LightInfo, scale: number): number {
   return info.intensity * 2 ** info.exposure * scale;
 }
 
-// shortcut: the payload carries no light transform, so every positional light
-// sits on one anchor scaled by the scene and aims at the origin (integrateScene
-// re-centers the geometry there). Upgrade when LightInfo ships a world
-// transform.
+// The scene branch never reaches syncLightRig, so the exposure write lives in
+// one helper both lighting sources share: otherwise the slider goes inert and
+// the exposure snaps back to the constructor's 1.0.
+function applyToneExposure(viewer: RendererKit) {
+  if (viewer.renderer) viewer.renderer.toneMappingExposure = viewerSettings.toneExposure;
+}
+
+// FALLBACK ONLY: a light whose world transform cannot be read sits on one
+// anchor scaled by the scene and aims at the origin, where integrateScene
+// re-centers the geometry. Every light that ships a transform is placed there.
 function lightAnchor(viewer: RendererKit): THREE.Vector3 {
   return new THREE.Vector3(0.6, 0.9, 0.6).multiplyScalar(viewer.sceneSize);
+}
+
+type LightPose = { position: THREE.Vector3; forward: THREE.Vector3 };
+
+// Where a light sits and which way it points, in viewer space: the scene group
+// is re-centred on the stage's center, so the transform's translation shifts
+// with it. Row-major, row-vector convention — the same shape
+// values.rs::world_transform produces — so the translation is the last row and
+// row 2 is the local Z axis a USD light emits along (its negative Z).
+function lightPose(viewer: RendererKit, info: LightInfo): LightPose | null {
+  const m = info.world_transform;
+  if (!m || m.length !== 16) return null;
+  const position = new THREE.Vector3(m[12] ?? 0, m[13] ?? 0, m[14] ?? 0).sub(viewer.sceneCenter);
+  const forward = new THREE.Vector3(-(m[8] ?? 0), -(m[9] ?? 0), -(m[10] ?? 0));
+  // A degenerate axis names no direction: fail back to the anchor.
+  if (forward.lengthSq() < 1e-12) return null;
+  return { position, forward: forward.normalize() };
+}
+
+// Drops the dome environment and gives the studio one back; true when there was
+// one to drop.
+function releaseDome(viewer: RendererKit): boolean {
+  if (!viewer.sceneEnv) return false;
+  viewer.sceneEnv.dispose();
+  viewer.sceneEnv = null;
+  viewer.sceneEnvPath = null;
+  if (viewer.scene) {
+    viewer.scene.environment = viewer.baseEnvironment;
+    viewer.scene.environmentIntensity = 1;
+  }
+  return true;
+}
+
+// A textured dome lights the scene as an equirect environment. The texture is
+// kept while the path holds: the rig rebuilds on every slider tick, and a
+// re-fetch plus a re-dispose per tick would drop the image for a frame each
+// time.
+// shortcut: USD's dome color is not baked into the texture; upgrade if a
+// fixture authors a tinted dome.
+function setDomeEnvironment(viewer: RendererKit, file: string, intensity: number) {
+  if (viewer.sceneEnvPath !== file) {
+    // A second textured dome must not leak the first one's image.
+    releaseDome(viewer);
+    const texture = new THREE.TextureLoader().load(convertFileSrc(file), undefined, undefined, () => {
+      // Fail-soft: the stage still renders, on the studio environment. A
+      // newer dome that already won is left alone.
+      if (viewer.sceneEnvPath !== file) return;
+      releaseDome(viewer);
+      requestShadowUpdate();
+    });
+    texture.mapping = THREE.EquirectangularReflectionMapping;
+    // EXR carries linear float data; an image file is sRGB-encoded.
+    texture.colorSpace = isExrPath(file) ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+    viewer.sceneEnv = texture;
+    viewer.sceneEnvPath = file;
+  }
+  if (viewer.scene && viewer.sceneEnv) {
+    viewer.scene.environment = viewer.sceneEnv;
+    viewer.scene.environmentIntensity = intensity;
+  }
 }
 
 function buildSceneLight(
@@ -519,39 +587,41 @@ function buildSceneLight(
   if (info.kind === "dome") {
     // An untextured dome is one flat fill: its color at its intensity.
     if (!info.texture_file) return new THREE.AmbientLight(color, intensity);
-    // A textured dome lights the scene as an equirect environment. shortcut:
-    // USD's dome color is not baked into the texture; upgrade if a fixture
-    // authors a tinted dome.
-    const texture = new THREE.TextureLoader().load(convertFileSrc(info.texture_file));
-    texture.mapping = THREE.EquirectangularReflectionMapping;
-    viewer.sceneEnv = texture;
-    if (viewer.scene) {
-      viewer.scene.environment = texture;
-      viewer.scene.environmentIntensity = intensity;
-    }
+    setDomeEnvironment(viewer, info.texture_file, intensity);
     return null;
   }
 
-  const anchor = lightAnchor(viewer);
+  // The light's own place, or the shared anchor when it carries no transform.
+  const pose = lightPose(viewer, info);
+  const position = pose ? pose.position : lightAnchor(viewer);
+  const aim = pose ? pose.position.clone().add(pose.forward) : new THREE.Vector3();
   let light: THREE.Light;
 
   switch (info.kind) {
     case "distant": {
       const distant = new THREE.DirectionalLight(color, intensity);
-      // USD's `angle` on a distant light is its elevation: the default 90 aims
-      // it straight down.
-      const elevation = THREE.MathUtils.degToRad(info.angle ?? 90);
-      distant.position.set(0, Math.sin(elevation), Math.cos(elevation));
-      distant.position.multiplyScalar(viewer.sceneSize * 2);
-      distant.target.position.set(0, 0, 0);
+      if (pose) {
+        // Only the direction is a distant light's: put it back along its own
+        // aim so its shadow camera sees the stage in front of it.
+        distant.position.copy(pose.position).addScaledVector(pose.forward, -2 * viewer.sceneSize);
+        distant.target.position.copy(pose.position);
+      } else {
+        // No transform: `angle` reads as the elevation, so the default 90 aims
+        // the light straight down.
+        const elevation = THREE.MathUtils.degToRad(info.angle ?? 90);
+        distant.position.set(0, Math.sin(elevation), Math.cos(elevation));
+        distant.position.multiplyScalar(viewer.sceneSize * 2);
+        distant.target.position.set(0, 0, 0);
+      }
       distant.target.updateMatrixWorld();
       light = distant;
       break;
     }
     case "rect": {
       const rect = new THREE.RectAreaLight(color, intensity, info.width ?? 1, info.height ?? 1);
-      rect.position.copy(anchor);
-      rect.lookAt(0, 0, 0);
+      rect.position.copy(position);
+      // three's lookAt points a light's -Z at the target, as USD's does.
+      rect.lookAt(aim);
       light = rect;
       break;
     }
@@ -571,15 +641,15 @@ function buildSceneLight(
           Math.min(THREE.MathUtils.degToRad(info.shaping.cone_angle), Math.PI / 2 - 1e-3),
           info.shaping.cone_softness,
         );
-        spot.position.copy(anchor);
-        spot.target.position.set(0, 0, 0);
+        spot.position.copy(position);
+        spot.target.position.copy(aim);
         spot.target.updateMatrixWorld();
         light = spot;
       } else {
         // shortcut: three has no axis light, so a cylinder's length and its
         // flat ends are not modeled — it lights as a point.
         const point = new THREE.PointLight(color, intensity, distance);
-        point.position.copy(anchor);
+        point.position.copy(position);
         light = point;
       }
     }
@@ -587,12 +657,22 @@ function buildSceneLight(
 
   // three throws shadows from directional, spot and point lights only: a rect
   // area light has no shadow support, so its casts_shadow cannot be honoured.
-  if (settings.shadowsEnabled && info.casts_shadow && !(light as THREE.RectAreaLight).isRectAreaLight) {
+  const shadow = (light as THREE.DirectionalLight).shadow;
+  if (
+    settings.shadowsEnabled &&
+    info.casts_shadow &&
+    shadow &&
+    !(light as THREE.RectAreaLight).isRectAreaLight
+  ) {
     light.castShadow = true;
+    // three's own default is 512; the studio rig sizes its map from the same
+    // setting, so both lighting sources stay consistent.
+    shadow.mapSize.width = settings.shadowMapSize;
+    shadow.mapSize.height = settings.shadowMapSize;
+    shadow.bias = -0.0001;
     const reach = viewer.sceneSize * 1.2;
     if ((light as THREE.DirectionalLight).isDirectionalLight) {
       // The default ortho bounds cover 5 units: the stage's own extent decides.
-      const shadow = (light as THREE.DirectionalLight).shadow;
       shadow.camera.left = -reach;
       shadow.camera.right = reach;
       shadow.camera.top = reach;
@@ -610,10 +690,17 @@ function buildSceneLight(
 // Spec R3: scene lights replace the rig entirely. Rebuilds per load and per
 // settings change, so the previous build is disposed first.
 export function syncSceneLights(viewer: RendererKit, lights: LightInfo[], settings: SceneLightSettings) {
-  clearSceneLights(viewer);
+  // The lights go, the dome stays: a scale-slider tick rebuilds the rig and
+  // must not re-fetch and re-dispose the environment image.
+  releaseSceneLights(viewer);
   // The studio key and fill would double the stage's own light.
   if (viewer.ambientLight) viewer.ambientLight.visible = false;
   if (viewer.dirLight) viewer.dirLight.visible = false;
+  applyToneExposure(viewer);
+
+  // A build with no textured dome gives the environment back to the studio one.
+  const texturedDome = lights.some((info) => info.enabled && info.kind === "dome" && info.texture_file);
+  if (!texturedDome) releaseDome(viewer);
 
   for (const info of lights) {
     // `enabled` is the prim's computed visibility: an invisible light is off.
@@ -628,26 +715,41 @@ export function syncSceneLights(viewer: RendererKit, lights: LightInfo[], settin
   requestShadowUpdate();
 }
 
-// Back to the studio rig: drop the stage lights, put the environment back.
-export function clearSceneLights(viewer: RendererKit) {
-  if (viewer.sceneLights.length === 0 && !viewer.sceneEnv) return;
-
+// Drops the built scene lights; true when there was one.
+function releaseSceneLights(viewer: RendererKit): boolean {
+  const had = viewer.sceneLights.length > 0;
   for (const light of viewer.sceneLights) {
     viewer.scene?.remove(light);
+    // Light.dispose() frees no shadow render target, and the rig rebuilds on
+    // every slider tick: an undisposed map leaks one per rebuild.
+    (light as THREE.DirectionalLight).shadow?.map?.dispose();
     light.dispose();
   }
   viewer.sceneLights.length = 0;
+  return had;
+}
 
-  if (viewer.sceneEnv) {
-    viewer.sceneEnv.dispose();
-    viewer.sceneEnv = null;
-    if (viewer.scene) {
-      viewer.scene.environment = viewer.baseEnvironment;
-      viewer.scene.environmentIntensity = 1;
-    }
+// Shows the studio rig again; true when either light was hidden.
+function restoreRig(viewer: RendererKit): boolean {
+  let shown = false;
+  if (viewer.ambientLight && !viewer.ambientLight.visible) {
+    viewer.ambientLight.visible = true;
+    shown = true;
   }
+  if (viewer.dirLight && !viewer.dirLight.visible) {
+    viewer.dirLight.visible = true;
+    shown = true;
+  }
+  return shown;
+}
 
-  if (viewer.ambientLight) viewer.ambientLight.visible = true;
-  if (viewer.dirLight) viewer.dirLight.visible = true;
-  requestShadowUpdate();
+// Back to the studio rig: drop the stage lights, put the environment back and
+// show the rig again. The rig restore is unconditional — a lightless stage in
+// "scene" mode hides the rig, so an early return here left the viewport
+// permanently black as soon as the user switched back to auto or studio.
+export function clearSceneLights(viewer: RendererKit) {
+  const released = releaseSceneLights(viewer);
+  const dome = releaseDome(viewer);
+  const rig = restoreRig(viewer);
+  if (released || dome || rig) requestShadowUpdate();
 }

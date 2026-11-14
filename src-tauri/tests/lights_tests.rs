@@ -399,6 +399,94 @@ fn fixture_lights_carry_the_values_the_mapping_needs() {
     );
 }
 
+/// The translation of a light's world transform (row-vector: last row).
+fn light_translation(info: &LightInfo) -> [f64; 3] {
+    let transform = info
+        .world_transform
+        .expect("the light should carry a world transform");
+    [transform[12], transform[13], transform[14]]
+}
+
+/// The forward axis (-Z) of a light's world transform, normalized.
+fn forward(info: &LightInfo) -> [f64; 3] {
+    let transform = info
+        .world_transform
+        .expect("the light should carry a world transform");
+    let axis = [-transform[8], -transform[9], -transform[10]];
+    let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    [axis[0] / length, axis[1] / length, axis[2] / length]
+}
+
+#[test]
+fn fixture_lights_carry_the_transforms_the_placement_needs() {
+    let lights = fixture_lights();
+
+    assert_eq!(
+        light_translation(light(&lights, "/World/L_sphere")),
+        [0.0, 3.0, 0.0]
+    );
+    assert_eq!(
+        light_translation(light(&lights, "/World/L_rect")),
+        [-3.0, 2.0, 0.0]
+    );
+    assert_eq!(
+        light_translation(light(&lights, "/World/L_cyl")),
+        [0.0, 1.0, 3.0]
+    );
+
+    // L_distant authors rotateXYZ = (-45, 0, 0): its forward axis tilts out of
+    // the XZ plane instead of staying straight down.
+    let distant = light(&lights, "/World/L_distant");
+    let [x, y, z] = forward(distant);
+    closed(0.0, x);
+    assert!(
+        z < 0.0 && y < 0.0,
+        "-45 about X aims -Z down and back: {:?}",
+        [x, y, z]
+    );
+    closed(-std::f64::consts::FRAC_1_SQRT_2, z);
+    closed(-std::f64::consts::FRAC_1_SQRT_2, y);
+
+    // A light with no xformOpOrder sits at the origin, not without a place.
+    assert_eq!(
+        light_translation(light(&lights, "/World/L_dome")),
+        [0.0, 0.0, 0.0]
+    );
+}
+
+#[test]
+fn an_unevaluable_xform_still_answers_the_light() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = dir.path().join("bad_xform_light.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+
+def Xform "World"
+{
+    # The op name is right but its value is undecodable: the light answers
+    # without a transform instead of dropping out.
+    def SphereLight "L_bad_xform"
+    {
+        string xformOp:orient = "bogus"
+        uniform token[] xformOpOrder = ["xformOp:orient"]
+    }
+}
+"#,
+    )
+    .expect("test stage should be written");
+
+    let (stage, _) = open_stage(&root).expect("stage should open");
+    let lights = stage_lights(&stage, None);
+    let broken = light(&lights, "/World/L_bad_xform");
+    assert_eq!(broken.kind, "sphere");
+    assert!(
+        broken.world_transform.is_none(),
+        "no transform beats a wrong one: {:?}",
+        broken.world_transform
+    );
+}
+
 #[test]
 fn an_unreadable_light_drops_itself_and_the_rest_still_answer() {
     let dir = tempfile::tempdir().expect("temp dir should be created");

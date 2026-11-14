@@ -33,6 +33,9 @@ export class RendererKit {
   stageLights = $state.raw<LightInfo[]>([]);
   sceneLights: THREE.Light[] = [];
   sceneEnv: THREE.Texture | null = null;
+  // The file the dome environment was built from: an unchanged path reuses the
+  // texture instead of re-fetching it on every rig rebuild.
+  sceneEnvPath: string | null = null;
   baseEnvironment: THREE.Texture | null = null;
   stats: any = null;
 

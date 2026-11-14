@@ -50,9 +50,9 @@
       <input
         type="range"
         class="slider"
-        min="0"
-        max="10"
-        step="0.05"
+        min="0.01"
+        max="1000"
+        step="0.01"
         bind:value={sceneLightScale}
         onchange={saveGraphicsPreferences}
       />

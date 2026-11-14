@@ -12,6 +12,7 @@
 //! `shaping` (present only where ShapingAPI is applied) and `enabled` (the
 //! prim's computed visibility) carry no fallback.
 
+use crate::values;
 use openusd::gf;
 use openusd::sdf::{self, AssetPath};
 use openusd::usd::{Prim, PrimPredicate, Stage, TimeCode};
@@ -52,6 +53,12 @@ pub struct LightInfo {
     pub shaping: Option<Shaping>,
     #[serde(default)]
     pub texture_file: Option<String>,
+    /// The light's world transform, row-major 4x4 in the USD row-vector
+    /// convention (translation in the last row) — the same shape and the same
+    /// helper as `PrimDetails::world_transform`. `None` when the prim's xform
+    /// stack cannot be evaluated: the light still answers, without a place.
+    #[serde(default)]
+    pub world_transform: Option<[f64; 16]>,
 }
 
 /// The ShapingAPI cone a light applies. Both fields fold the schema fallback
@@ -158,6 +165,8 @@ fn light_info(
         length: facts.length,
         shaping,
         texture_file: facts.texture_file,
+        // Fail-soft: an unevaluable stack drops the transform, never the light.
+        world_transform: values::world_transform(&prim, time).ok().flatten(),
     }))
 }
 

@@ -234,6 +234,11 @@ export interface LightInfo {
   length?: number | null;
   shaping?: Shaping | null;
   texture_file?: string | null;
+  // Row-major 4x4 in the USD row-vector convention (translation in the last
+  // row), the same shape as PrimDetails.world_transform. Absent or null when
+  // the prim's xform stack cannot be evaluated: the light still answers, and
+  // the viewport falls back to its shared anchor.
+  world_transform?: number[] | null;
 }
 
 export interface AttributeInfo {
