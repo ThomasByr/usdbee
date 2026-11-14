@@ -3,6 +3,11 @@
 // texture loader is injected so Task 4 can wire convertFileSrc fetching;
 // tests pass a stub. Fail-soft throughout: unknown texture inputs are
 // skipped and a texture the loader cannot fetch falls back to base color.
+//
+// Textures attach asynchronously (F8): convertMaterial returns the material
+// with its authored constants already applied, and each resolved clone
+// overwrites its own slot on the SAME instance, so a mesh built before the
+// decode finished upgrades in place — no spinner, no placeholder texture.
 import * as THREE from "three";
 import type {
   Displacement,
@@ -14,7 +19,7 @@ import type {
 } from "../stage/types";
 import { isExrPath } from "./textureLoaders";
 
-export type MaterialTextureLoader = (file_path: string, onError: () => void) => THREE.Texture | null;
+export type MaterialTextureLoader = (file_path: string, onError: () => void) => Promise<THREE.Texture>;
 
 type TextureSlot =
   | "map"
@@ -55,13 +60,9 @@ export function convertMaterial(
   material.name = info.name;
 
   const surface = info.surface;
-  let hasMap = false;
   if (surface) {
-    applyTextures(material, surface, loadTexture, fallbackColor);
-    hasMap = material.map !== null;
+    applyTextures(material, info, surface, loadTexture, fallbackColor);
     applySurfaceConstants(material, surface);
-    // An opacity texture blends per-pixel, so the whole material must render in the transparent pass.
-    if (material.alphaMap !== null) material.transparent = true;
   } else if (info.has_volume) {
     // Volume-only material (no surface to draw): translucent gray placeholder.
     material.color.setHex(0x888888);
@@ -70,12 +71,15 @@ export function convertMaterial(
   }
 
   applyDisplacement(material, info.displacement, loadTexture);
-  applyFallbackColor(material, info, surface, hasMap, fallbackColor);
+  // No map has landed yet, so the textured case renders as the untextured one
+  // until its clone arrives (attachSlot re-runs this rule with hasMap = true).
+  applyFallbackColor(material, info, surface, false, fallbackColor);
   return material;
 }
 
 function applyTextures(
   material: THREE.MeshPhysicalMaterial,
+  info: MaterialInfo,
   surface: PreviewSurface,
   loadTexture: MaterialTextureLoader,
   fallbackColor: string | null,
@@ -83,28 +87,72 @@ function applyTextures(
   for (const texture of surface.textures) {
     const slot = TEXTURE_SLOTS[texture.input];
     if (!slot) continue;
-    const loaded = loadTexture(texture.file_path, () => {
-      if (!loaded) return;
-      loaded.dispose();
-      if (material[slot] !== loaded) return;
-      material[slot] = null;
-      if (slot === "map") {
-        applyConstantColor(material, surface);
-        applyFallbackColor(material, { name: material.name, surface }, surface, false, fallbackColor);
-      }
-      restoreSlotConstant(material, surface, slot);
-      material.needsUpdate = true;
-    });
-    if (loaded) {
-      loaded.wrapS = wrapMode(texture.wrap_s);
-      loaded.wrapT = wrapMode(texture.wrap_t);
-      loaded.colorSpace = colorSpace(texture.color_space, slot, texture.file_path);
-      // USD occlusion samples the same st UVs, i.e. the base uv set.
-      if (slot === "aoMap") loaded.channel = 0;
-      applyUvTransform(loaded, texture.uv_transform);
-      applyValueScale(material, slot, texture);
-      material[slot] = loaded;
-    }
+    // A failed load needs no undo: the slot still holds the authored constant
+    // this convert applied (the fail-soft rule, now free). The catch keeps a
+    // rejection out of the renderer.
+    loadTexture(texture.file_path, () => {})
+      .then((loaded) => attachSlot(material, info, surface, slot, texture, loaded, fallbackColor))
+      .catch(() => {});
+  }
+}
+
+// Per-slot parameters are applied to this slot's own clone once it lands: the
+// clone was taken after the decode, so it carries the decoded pixel format
+// and is still free of every other slot's wrap/colorSpace/UV settings.
+function attachSlot(
+  material: THREE.MeshPhysicalMaterial,
+  info: MaterialInfo,
+  surface: PreviewSurface,
+  slot: TextureSlot,
+  input: TextureInput,
+  loaded: THREE.Texture,
+  fallbackColor: string | null,
+): void {
+  loaded.wrapS = wrapMode(input.wrap_s);
+  loaded.wrapT = wrapMode(input.wrap_t);
+  loaded.colorSpace = colorSpace(input.color_space, slot, input.file_path);
+  // USD occlusion samples the same st UVs, i.e. the base uv set.
+  if (slot === "aoMap") loaded.channel = 0;
+  applyUvTransform(loaded, input.uv_transform);
+  // The pre-resolve material carries the authored constant; three multiplies
+  // the map by that constant, so drop it to what the map-only path leaves.
+  neutralizeSlot(material, slot);
+  material[slot] = loaded;
+  // An opacity texture blends per-pixel, so the whole material must render in the transparent pass.
+  if (slot === "alphaMap") material.transparent = true;
+  applyValueScale(material, slot, input);
+  if (slot === "map") applyFallbackColor(material, info, surface, true, fallbackColor);
+  material.needsUpdate = true;
+}
+
+// three's own defaults, i.e. the values the synchronous path left in place
+// when a map occupied the slot (it skipped the authored constant entirely).
+// Emissive is the exception: a black multiplier would swallow the map.
+const NEUTRAL = new THREE.MeshPhysicalMaterial();
+
+function neutralizeSlot(material: THREE.MeshPhysicalMaterial, slot: TextureSlot): void {
+  switch (slot) {
+    case "map":
+      material.color.setRGB(1, 1, 1);
+      break;
+    case "emissiveMap":
+      material.emissive.setRGB(1, 1, 1);
+      break;
+    case "specularColorMap":
+      material.specularColor.copy(NEUTRAL.specularColor);
+      break;
+    case "roughnessMap":
+      material.roughness = NEUTRAL.roughness;
+      break;
+    case "metalnessMap":
+      material.metalness = NEUTRAL.metalness;
+      break;
+    case "clearcoatMap":
+      material.clearcoat = NEUTRAL.clearcoat;
+      break;
+    case "clearcoatRoughnessMap":
+      material.clearcoatRoughness = NEUTRAL.clearcoatRoughness;
+      break;
   }
 }
 
@@ -145,38 +193,6 @@ function applySurfaceConstants(material: THREE.MeshPhysicalMaterial, surface: Pr
   }
 }
 
-// A failed async load must undo the map-present rule above: the constant was
-// skipped when the map was assigned, and emissive was painted white. Slots
-// holding no authored constant already sit at three.js's default.
-function restoreSlotConstant(
-  material: THREE.MeshPhysicalMaterial,
-  surface: PreviewSurface,
-  slot: TextureSlot,
-): void {
-  switch (slot) {
-    case "emissiveMap":
-      material.emissive = constantColor(surface.emissive_color) ?? new THREE.Color(0, 0, 0);
-      break;
-    case "specularColorMap": {
-      const specular = constantColor(surface.specular_color);
-      if (specular) material.specularColor = specular;
-      break;
-    }
-    case "roughnessMap":
-      if (surface.roughness != null) material.roughness = surface.roughness;
-      break;
-    case "metalnessMap":
-      if (surface.metallic != null) material.metalness = surface.metallic;
-      break;
-    case "clearcoatMap":
-      if (surface.clearcoat != null) material.clearcoat = surface.clearcoat;
-      break;
-    case "clearcoatRoughnessMap":
-      if (surface.clearcoat_roughness != null) material.clearcoatRoughness = surface.clearcoat_roughness;
-      break;
-  }
-}
-
 // Displacement only moves existing vertices, so a coarse mesh shows little or
 // nothing — accepted (manual-pass note), not a bug. The authored scale stays a
 // multiplier on the map, so it applies alongside it.
@@ -187,17 +203,13 @@ function applyDisplacement(
 ): void {
   if (!displacement) return;
   if (displacement.file_path) {
-    const loaded = loadTexture(displacement.file_path, () => {
-      if (!loaded) return;
-      loaded.dispose();
-      if (material.displacementMap !== loaded) return;
-      material.displacementMap = null;
-      material.needsUpdate = true;
-    });
-    if (loaded) {
-      loaded.colorSpace = THREE.NoColorSpace;
-      material.displacementMap = loaded;
-    }
+    loadTexture(displacement.file_path, () => {})
+      .then((loaded) => {
+        loaded.colorSpace = THREE.NoColorSpace;
+        material.displacementMap = loaded;
+        material.needsUpdate = true;
+      })
+      .catch(() => {});
   }
   if (displacement.scale != null) material.displacementScale = displacement.scale;
 }

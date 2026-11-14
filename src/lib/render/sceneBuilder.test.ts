@@ -32,6 +32,9 @@ function packedGeometry(y = 1): ArrayBuffer {
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
+// Textures attach on a promise chain; one macrotask flushes it.
+const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
 // One triangle carrying per-vertex colors (constant displayColor replicated
 // by tessellation): flag bit2 set, colors section between positions and indices.
 function packedColoredGeometry(): ArrayBuffer {
@@ -69,7 +72,7 @@ function fetchers(overrides: Partial<Parameters<typeof buildScene>[1]> = {}) {
   return {
     getGeometry: vi.fn(async () => packedGeometry()),
     getMaterial: vi.fn(async () => ({ name: "Mat", surface: null })),
-    loadTexture: vi.fn(() => null),
+    loadTexture: vi.fn(async () => new THREE.Texture()),
     ...overrides,
   };
 }
@@ -253,12 +256,61 @@ describe("buildScene", () => {
             textures: [{ input: "diffuseColor", file_path: "/cache/checker.png", st_primvar: "st" }],
           },
         })),
-        loadTexture: vi.fn(() => new THREE.Texture()),
+        loadTexture: vi.fn(async () => new THREE.Texture()),
       }),
     );
 
     const mesh = group.getObjectByName("/World/Floor")!.children[0] as THREE.Mesh;
     expect((mesh.material as THREE.MeshPhysicalMaterial).vertexColors).toBe(false);
+  });
+
+  it("upgrades a built mesh's material in place when its texture lands later", async () => {
+    // buildScene finishes before the decodes do: the mesh must already render
+    // with the authored constant, then take the map on the SAME material.
+    let land!: (texture: THREE.Texture) => void;
+    const group = await buildScene(
+      [
+        node({
+          path: "/World/Floor",
+          name: "Floor",
+          type_name: "Mesh",
+          has_geometry: true,
+          material: "/World/Looks/Floor",
+        }),
+      ],
+      fetchers({
+        getMaterial: vi.fn(async () => ({
+          name: "Floor",
+          surface: {
+            diffuse_color: { type: "color3f", data: [0.5, 0.25, 0.125] },
+            roughness: null,
+            metallic: null,
+            opacity: null,
+            normal: null,
+            textures: [{ input: "diffuseColor", file_path: "/cache/checker.png", st_primvar: "st" }],
+          },
+        })),
+        loadTexture: vi.fn(
+          () =>
+            new Promise<THREE.Texture>((resolve) => {
+              land = resolve;
+            }),
+        ),
+      }),
+    );
+
+    const mesh = group.getObjectByName("/World/Floor")!.children[0] as THREE.Mesh;
+    const material = mesh.material as THREE.MeshPhysicalMaterial;
+    expect(material.map).toBeNull();
+    expect(material.color.r).toBeCloseTo(0.5); // the authored constant
+
+    const texture = new THREE.Texture();
+    land(texture);
+    await flush();
+
+    expect(mesh.material).toBe(material); // upgraded, not replaced
+    expect(material.map).toBe(texture);
+    expect(material.color.r).toBeCloseTo(1); // map wins over the constant
   });
 
   it("keeps a bound untextured material's diffuse color over per-vertex colors", async () => {

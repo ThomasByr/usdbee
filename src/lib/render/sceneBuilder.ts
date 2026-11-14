@@ -290,6 +290,9 @@ async function fetchMaterial(
     if (info === null) info = await fetchers.getMaterial(node.path).catch(() => null);
   }
   const materialInfo = info ?? { name: node.name, surface: null };
+  // Textures attach asynchronously onto this same material, so the mesh below
+  // is built and shown with the authored constants and upgrades in place
+  // when the decodes land — buildScene never waits on an image.
   return convertMaterial(materialInfo, fallbackColorFor(materialInfo, dependencies), fetchers.loadTexture);
 }
 

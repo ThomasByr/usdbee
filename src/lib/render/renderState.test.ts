@@ -1781,13 +1781,21 @@ function meshNode(path: string, material: string | null = null): RenderNode {
   return node({ path, name: path.slice(1), type_name: "Mesh", has_geometry: true, material });
 }
 
+// Textures attach on a promise chain after the scene build returns; one
+// macrotask flushes it.
+const flushTextures = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
 describe("texture dedup", () => {
   it("decodes a file shared by two materials once", async () => {
     // The bike references 92 texture inputs across 10 files: the same image
     // must not be decoded and uploaded once per material.
     const loadSpy = vi
       .spyOn(THREE.TextureLoader.prototype, "load")
-      .mockImplementation(() => new THREE.Texture());
+      .mockImplementation((_url, onLoad?: (texture: THREE.Texture<HTMLImageElement>) => void) => {
+        const texture = new THREE.Texture<HTMLImageElement>();
+        onLoad?.(texture);
+        return texture;
+      });
     try {
       const prims = [meshNode("/Scene/A", "/Scene/Looks/A"), meshNode("/Scene/B", "/Scene/Looks/B")];
       mockedInvoke.mockImplementation((async (cmd: string, args: any) => {
@@ -1799,6 +1807,7 @@ describe("texture dedup", () => {
       }) as any);
 
       const group = await renderState.loadRenderScene();
+      await flushTextures();
       const maps: THREE.MeshPhysicalMaterial[] = [];
       group!.traverse((object) => {
         if ((object as THREE.Mesh).isMesh)
@@ -1816,6 +1825,7 @@ describe("texture dedup", () => {
       // the file again instead of serving a texture from the closed scene.
       disposeScene(group!);
       const rebuilt = await renderState.loadRenderScene();
+      await flushTextures();
       expect(rebuilt).toBeTruthy();
       expect(loadSpy).toHaveBeenCalledTimes(2);
     } finally {

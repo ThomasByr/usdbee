@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import * as THREE from "three";
-import { convertMaterial } from "./materialConverter";
+import { convertMaterial, type MaterialTextureLoader } from "./materialConverter";
 import type { MaterialInfo, PreviewSurface, TextureInput } from "../stage/types";
 
 function surface(over: Partial<PreviewSurface> = {}): PreviewSurface {
@@ -19,13 +19,19 @@ function textureInput(over: Partial<TextureInput> = {}): TextureInput {
   return { input: "diffuseColor", file_path: "/cache/checker.png", st_primvar: "st", ...over };
 }
 
-// Stand-in for Task 4's convertFileSrc-backed loader: returns a texture for
-// every path by default, null for paths containing "missing".
-const loader = (path: string): THREE.Texture | null =>
-  path.includes("missing") ? null : new THREE.Texture();
+// A texture attaches on a promise chain; one macrotask flushes every chain
+// this file starts (stub loaders settle immediately).
+const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+// Stand-in for Task 4's convertFileSrc-backed loader: resolves a texture for
+// every path by default, rejects for paths containing "missing".
+const loader: MaterialTextureLoader = async (path) => {
+  if (path.includes("missing")) throw new Error(`cannot load ${path}`);
+  return new THREE.Texture();
+};
 
 // Texture loader whose textures carry their file path as the name.
-const named = (path: string): THREE.Texture => {
+const named: MaterialTextureLoader = async (path) => {
   const texture = new THREE.Texture();
   texture.name = path;
   return texture;
@@ -73,33 +79,95 @@ describe("convertMaterial", () => {
     expect(material.opacity).toBe(defaults.opacity);
   });
 
-  it("clears a failed async diffuse texture and restores fallback color", () => {
-    const texture = new THREE.Texture();
-    const dispose = vi.spyOn(texture, "dispose");
-    let onError: (() => void) | undefined;
+  it("clears a failed async diffuse texture and restores fallback color", async () => {
     const material = convertMaterial(
       {
         name: "Brick",
         surface: surface({ textures: [textureInput()] }),
       },
       "#ff0000",
-      ((_path: string, error: () => void) => {
-        onError = error;
-        return texture;
-      }) as any,
+      async () => {
+        throw new Error("decode failed");
+      },
     );
-    expect(material.color.g).toBeCloseTo(1.0);
+    // The fallback paints the map's absence: no slot holds a texture yet.
+    expect(material.color.g).toBe(0);
 
-    expect(onError).toBeTypeOf("function");
-    onError!();
+    await flush();
 
     expect(material.map).toBeNull();
-    expect(dispose).toHaveBeenCalledOnce();
     expect(material.color.r).toBeCloseTo(1.0);
     expect(material.color.g).toBe(0);
   });
 
-  it("wires diffuse, normal, roughness, metallic, and opacity textures", () => {
+  it("renders the authored constants until a texture resolves, then upgrades the same instance", async () => {
+    let land!: (texture: THREE.Texture) => void;
+    const pending = new Promise<THREE.Texture>((resolve) => {
+      land = resolve;
+    });
+    const material = convertMaterial(
+      {
+        name: "Wrapped",
+        surface: surface({
+          diffuse_color: { type: "color3f", data: [0.8, 0.2, 0.2] },
+          roughness: 0.35,
+          textures: [textureInput()],
+        }),
+      },
+      null,
+      () => pending,
+    );
+
+    // Pre-resolve: the authored material, no placeholder texture.
+    expect(material.map).toBeNull();
+    expect(material.color.r).toBeCloseTo(0.8);
+    expect(material.roughness).toBe(0.35);
+
+    const texture = new THREE.Texture();
+    land(texture);
+    await flush();
+
+    // Post-resolve: the SAME material the mesh already holds, map-wins rules on.
+    expect(material.map).toBe(texture);
+    expect(material.color.r).toBeCloseTo(1.0, 5);
+  });
+
+  it("keeps the good slot's texture when a second slot on the same image fails", async () => {
+    // Two slots share one file; the first slot's load rejects. Clones are per
+    // slot, so the failure must not cost the good slot its texture.
+    let calls = 0;
+    const material = convertMaterial(
+      {
+        name: "Shared",
+        surface: surface({
+          roughness: 0.35,
+          textures: [
+            textureInput({ input: "roughness", file_path: "/cache/shared.png" }),
+            textureInput({ input: "diffuseColor", file_path: "/cache/shared.png" }),
+          ],
+        }),
+      },
+      null,
+      async (path) => {
+        calls += 1;
+        if (calls === 1) throw new Error("decode failed");
+        const texture = new THREE.Texture();
+        texture.name = path;
+        return texture;
+      },
+    );
+    await flush();
+
+    // The failing slot keeps its authored constant.
+    expect(material.roughnessMap).toBeNull();
+    expect(material.roughness).toBe(0.35);
+    // The good slot keeps its clone.
+    expect(material.map).toBeInstanceOf(THREE.Texture);
+    expect(material.map).not.toBe(material.roughnessMap);
+    expect(material.color.r).toBeCloseTo(1.0, 5);
+  });
+
+  it("wires diffuse, normal, roughness, metallic, and opacity textures", async () => {
     const material = convertMaterial(
       {
         name: "Textured",
@@ -116,6 +184,7 @@ describe("convertMaterial", () => {
       null,
       loader,
     );
+    await flush();
 
     expect(material.map).toBeInstanceOf(THREE.Texture);
     expect(material.normalMap).toBeInstanceOf(THREE.Texture);
@@ -125,7 +194,7 @@ describe("convertMaterial", () => {
     expect(material.color.r).toBeCloseTo(1.0, 5); // untouched white base color
   });
 
-  it("skips textures the loader cannot fetch", () => {
+  it("skips textures the loader cannot fetch", async () => {
     const material = convertMaterial(
       {
         name: "Textured",
@@ -134,11 +203,12 @@ describe("convertMaterial", () => {
       null,
       loader,
     );
+    await flush();
 
     expect(material.map).toBeNull();
   });
 
-  it("applies fallback color for a textured material only when the name matches", () => {
+  it("applies fallback color for a textured material only when the name matches", async () => {
     const mismatch = convertMaterial(
       {
         name: "Brick",
@@ -147,7 +217,6 @@ describe("convertMaterial", () => {
       "#ff0000",
       loader,
     );
-    expect(mismatch.color.r).toBeCloseTo(1.0, 5); // map set + no name match -> untouched
 
     const match = convertMaterial(
       {
@@ -157,12 +226,16 @@ describe("convertMaterial", () => {
       "#ff0000",
       loader,
     );
+    await flush();
+
+    expect(mismatch.map).toBeInstanceOf(THREE.Texture);
+    expect(mismatch.color.r).toBeCloseTo(1.0, 5); // map set + no name match -> untouched
     expect(match.map).toBeInstanceOf(THREE.Texture);
     expect(match.color.r).toBeCloseTo(1.0); // "checkerFloor".includes("checker")
     expect(match.color.g).toBe(0);
   });
 
-  it("marks a material with an opacity texture as transparent", () => {
+  it("marks a material with an opacity texture as transparent", async () => {
     const material = convertMaterial(
       {
         name: "Foliage",
@@ -171,6 +244,8 @@ describe("convertMaterial", () => {
       null,
       loader,
     );
+    await flush();
+
     expect(material.alphaMap).toBeInstanceOf(THREE.Texture);
     expect(material.transparent).toBe(true);
   });
@@ -184,21 +259,27 @@ describe("convertMaterial", () => {
     expect(opaque.transparent).toBe(false);
   });
 
-  it("maps wrap tokens to three.js wrapping modes", () => {
-    const convert = (over: Partial<TextureInput> = {}) =>
-      convertMaterial({ name: "Wrapped", surface: surface({ textures: [textureInput(over)] }) }, null, loader)
-        .map!;
+  it("maps wrap tokens to three.js wrapping modes", async () => {
+    const convert = async (over: Partial<TextureInput> = {}) => {
+      const material = convertMaterial(
+        { name: "Wrapped", surface: surface({ textures: [textureInput(over)] }) },
+        null,
+        loader,
+      );
+      await flush();
+      return material.map!;
+    };
 
-    expect(convert({ wrap_s: "repeat" }).wrapS).toBe(THREE.RepeatWrapping);
-    expect(convert({ wrap_s: "clamp" }).wrapS).toBe(THREE.ClampToEdgeWrapping);
-    expect(convert({ wrap_s: "mirror" }).wrapS).toBe(THREE.MirroredRepeatWrapping);
+    expect((await convert({ wrap_s: "repeat" })).wrapS).toBe(THREE.RepeatWrapping);
+    expect((await convert({ wrap_s: "clamp" })).wrapS).toBe(THREE.ClampToEdgeWrapping);
+    expect((await convert({ wrap_s: "mirror" })).wrapS).toBe(THREE.MirroredRepeatWrapping);
     // "black" and unauthored fall back to repeat (three.js cannot do black borders)
-    expect(convert({ wrap_s: "black" }).wrapS).toBe(THREE.RepeatWrapping);
-    expect(convert().wrapS).toBe(THREE.RepeatWrapping);
-    expect(convert({ wrap_t: "mirror" }).wrapT).toBe(THREE.MirroredRepeatWrapping);
+    expect((await convert({ wrap_s: "black" })).wrapS).toBe(THREE.RepeatWrapping);
+    expect((await convert()).wrapS).toBe(THREE.RepeatWrapping);
+    expect((await convert({ wrap_t: "mirror" })).wrapT).toBe(THREE.MirroredRepeatWrapping);
   });
 
-  it("applies the UsdTransform2d chain to the texture", () => {
+  it("applies the UsdTransform2d chain to the texture", async () => {
     const material = convertMaterial(
       {
         name: "Carbon",
@@ -213,6 +294,7 @@ describe("convertMaterial", () => {
       null,
       loader,
     );
+    await flush();
 
     const map = material.map!;
     expect(map.repeat.x).toBe(6);
@@ -225,7 +307,7 @@ describe("convertMaterial", () => {
     expect(map.rotation).toBeCloseTo(-Math.PI / 2);
   });
 
-  it("gives shared-file slots with different transforms distinct textures", () => {
+  it("gives shared-file slots with different transforms distinct textures", async () => {
     const material = convertMaterial(
       {
         name: "Shared",
@@ -242,13 +324,14 @@ describe("convertMaterial", () => {
       null,
       loader,
     );
+    await flush();
 
     expect(material.map).not.toBe(material.normalMap);
     expect(material.map!.repeat.x).toBe(15);
     expect(material.normalMap!.repeat.x).toBe(4);
   });
 
-  it("treats normal-map value scale/bias as a no-op", () => {
+  it("treats normal-map value scale/bias as a no-op", async () => {
     const material = convertMaterial(
       {
         name: "Tire",
@@ -265,6 +348,7 @@ describe("convertMaterial", () => {
       null,
       loader,
     );
+    await flush();
 
     // three.js already performs the 0..1 -> -1..1 decode in-shader
     expect(material.normalScale!.x).toBe(1);
@@ -272,7 +356,7 @@ describe("convertMaterial", () => {
     expect(material.color.r).toBeCloseTo(1.0, 5);
   });
 
-  it("folds a diffuseColor value scale into the base color", () => {
+  it("folds a diffuseColor value scale into the base color", async () => {
     const material = convertMaterial(
       {
         name: "InnerTire",
@@ -283,30 +367,37 @@ describe("convertMaterial", () => {
       null,
       loader,
     );
+    await flush();
 
     expect(material.color.r).toBeCloseTo(0.44530618);
     expect(material.color.g).toBeCloseTo(0.44530618);
     expect(material.color.b).toBeCloseTo(0.44530618);
   });
 
-  it("applies the authored colorSpace regardless of slot", () => {
-    const convert = (over: Partial<TextureInput> = {}) =>
-      convertMaterial({ name: "Bike", surface: surface({ textures: [textureInput(over)] }) }, null, loader)
-        .map!;
-
-    // the CarbonFrameBike marks diffuse maps raw — three.js must not decode them as sRGB
-    expect(convert({ color_space: "raw" }).colorSpace).toBe(THREE.NoColorSpace);
-    // an authored sRGB on a data slot also wins over the data-slot default
-    expect(
-      convertMaterial(
-        {
-          name: "Bike",
-          surface: surface({ textures: [textureInput({ input: "normal", color_space: "sRGB" })] }),
-        },
+  it("applies the authored colorSpace regardless of slot", async () => {
+    const convert = async (over: Partial<TextureInput> = {}) => {
+      const material = convertMaterial(
+        { name: "Bike", surface: surface({ textures: [textureInput(over)] }) },
         null,
         loader,
-      ).normalMap!.colorSpace,
-    ).toBe(THREE.SRGBColorSpace);
+      );
+      await flush();
+      return material.map!;
+    };
+
+    // the CarbonFrameBike marks diffuse maps raw — three.js must not decode them as sRGB
+    expect((await convert({ color_space: "raw" })).colorSpace).toBe(THREE.NoColorSpace);
+    // an authored sRGB on a data slot also wins over the data-slot default
+    const normal = convertMaterial(
+      {
+        name: "Bike",
+        surface: surface({ textures: [textureInput({ input: "normal", color_space: "sRGB" })] }),
+      },
+      null,
+      loader,
+    );
+    await flush();
+    expect(normal.normalMap!.colorSpace).toBe(THREE.SRGBColorSpace);
   });
 
   it("wires emissive, specular, clearcoat, ior and alphaTest constants", () => {
@@ -339,7 +430,7 @@ describe("convertMaterial", () => {
     expect(material.transparent).toBe(true);
   });
 
-  it("wires the widened texture slots named by input", () => {
+  it("wires the widened texture slots named by input", async () => {
     const material = convertMaterial(
       {
         name: "Textured",
@@ -356,6 +447,7 @@ describe("convertMaterial", () => {
       null,
       named,
     );
+    await flush();
 
     expect(material.emissiveMap!.name).toBe("/cache/emissive.png");
     expect(material.specularColorMap!.name).toBe("/cache/specular.png");
@@ -369,7 +461,7 @@ describe("convertMaterial", () => {
     expect(material.clearcoatMap!.colorSpace).toBe(THREE.NoColorSpace);
   });
 
-  it("reads the occlusion map from the base uv set", () => {
+  it("reads the occlusion map from the base uv set", async () => {
     const material = convertMaterial(
       {
         name: "Occluded",
@@ -378,11 +470,12 @@ describe("convertMaterial", () => {
       null,
       loader,
     );
+    await flush();
 
     expect(material.aoMap!.channel).toBe(0);
   });
 
-  it("skips a slot constant when its texture occupies the slot", () => {
+  it("skips a slot constant when its texture occupies the slot", async () => {
     const material = convertMaterial(
       {
         name: "Both",
@@ -402,6 +495,7 @@ describe("convertMaterial", () => {
       null,
       loader,
     );
+    await flush();
 
     // three multiplies map by constant, so the constant must stay at its default
     const defaults = new THREE.MeshPhysicalMaterial();
@@ -412,11 +506,11 @@ describe("convertMaterial", () => {
     expect(material.emissive.getHex()).toBe(0xffffff);
   });
 
-  it("restores authored constants when a widened slot texture fails to load", () => {
-    // Loader hands back a texture and exposes its rejection for the test.
-    const failedLoad = (input: string, over: Partial<PreviewSurface> = {}) => {
-      let onError: (() => void) | undefined;
-      const material = convertMaterial(
+  it("restores authored constants when a widened slot texture fails to load", async () => {
+    // Loader rejects; each slot must keep the authored constant it showed
+    // before the load started.
+    const failedLoad = (input: string, over: Partial<PreviewSurface> = {}) =>
+      convertMaterial(
         {
           name: "Broken",
           surface: surface({
@@ -425,46 +519,50 @@ describe("convertMaterial", () => {
           }),
         },
         null,
-        ((_path: string, error: () => void) => {
-          onError = error;
-          return new THREE.Texture();
-        }) as any,
+        async () => {
+          throw new Error("decode failed");
+        },
       );
-      onError!();
-      return material;
-    };
     const defaults = new THREE.MeshPhysicalMaterial();
 
     const emissive = failedLoad("emissiveColor", {
       emissive_color: { type: "color3f", data: [1, 0.5, 0.1] },
     });
-    expect(emissive.emissiveMap).toBeNull();
-    expect(emissive.emissive.toArray()).toEqual([1, 0.5, 0.1]);
-    // no authored emissive: back to three's black, not the white map paint
-    expect(failedLoad("emissiveColor").emissive.getHex()).toBe(defaults.emissive.getHex());
-
+    const emissiveBare = failedLoad("emissiveColor");
     const specular = failedLoad("specularColor", {
       specular_color: { type: "color3f", data: [0.2, 0.3, 0.4] },
     });
-    expect(specular.specularColor.toArray()).toEqual([0.2, 0.3, 0.4]);
-    expect(failedLoad("specularColor").specularColor.getHex()).toBe(defaults.specularColor.getHex());
-
+    const specularBare = failedLoad("specularColor");
     const roughness = failedLoad("roughness", { roughness: 0.2 });
+    const roughnessBare = failedLoad("roughness");
+    const metallic = failedLoad("metallic", { metallic: 0.9 });
+    const metallicBare = failedLoad("metallic");
+    const clearcoat = failedLoad("clearcoat", { clearcoat: 0.7 });
+    const clearcoatBare = failedLoad("clearcoat");
+    const clearcoatRoughness = failedLoad("clearcoatRoughness", { clearcoat_roughness: 0.25 });
+    const clearcoatRoughnessBare = failedLoad("clearcoatRoughness");
+    await flush();
+
+    expect(emissive.emissiveMap).toBeNull();
+    expect(emissive.emissive.toArray()).toEqual([1, 0.5, 0.1]);
+    // no authored emissive: back to three's black, not the white map paint
+    expect(emissiveBare.emissive.getHex()).toBe(defaults.emissive.getHex());
+
+    expect(specular.specularColor.toArray()).toEqual([0.2, 0.3, 0.4]);
+    expect(specularBare.specularColor.getHex()).toBe(defaults.specularColor.getHex());
+
     expect(roughness.roughnessMap).toBeNull();
     expect(roughness.roughness).toBe(0.2);
-    expect(failedLoad("roughness").roughness).toBe(defaults.roughness);
+    expect(roughnessBare.roughness).toBe(defaults.roughness);
 
-    const metallic = failedLoad("metallic", { metallic: 0.9 });
     expect(metallic.metalness).toBe(0.9);
-    expect(failedLoad("metallic").metalness).toBe(defaults.metalness);
+    expect(metallicBare.metalness).toBe(defaults.metalness);
 
-    const clearcoat = failedLoad("clearcoat", { clearcoat: 0.7 });
     expect(clearcoat.clearcoat).toBe(0.7);
-    expect(failedLoad("clearcoat").clearcoat).toBe(defaults.clearcoat);
+    expect(clearcoatBare.clearcoat).toBe(defaults.clearcoat);
 
-    const clearcoatRoughness = failedLoad("clearcoatRoughness", { clearcoat_roughness: 0.25 });
     expect(clearcoatRoughness.clearcoatRoughness).toBe(0.25);
-    expect(failedLoad("clearcoatRoughness").clearcoatRoughness).toBe(defaults.clearcoatRoughness);
+    expect(clearcoatRoughnessBare.clearcoatRoughness).toBe(defaults.clearcoatRoughness);
   });
 
   it("renders a volume-only material as translucent gray", () => {
@@ -480,7 +578,7 @@ describe("convertMaterial", () => {
     expect(plain.color.getHex()).toBe(0xffffff);
   });
 
-  it("wires displacement scale and map", () => {
+  it("wires displacement scale and map", async () => {
     const scaled = convertMaterial(
       { name: "Bumpy", surface: null, displacement: { scale: 0.05, file_path: null, st_primvar: "st" } },
       null,
@@ -498,11 +596,13 @@ describe("convertMaterial", () => {
       null,
       named,
     );
+    await flush();
+
     expect(mapped.displacementMap!.name).toBe("/cache/disp.png");
     expect(mapped.displacementScale).toBe(1);
   });
 
-  it("samples an unauthored exr color slot as linear data", () => {
+  it("samples an unauthored exr color slot as linear data", async () => {
     // EXR stores scene-linear floats in every channel: sRGB decoding would
     // wash the map out, so the color-slot default must not apply.
     const material = convertMaterial(
@@ -513,11 +613,12 @@ describe("convertMaterial", () => {
       null,
       loader,
     );
+    await flush();
 
     expect(material.map!.colorSpace).toBe(THREE.NoColorSpace);
   });
 
-  it("lets an authored colorSpace win over the exr linear rule", () => {
+  it("lets an authored colorSpace win over the exr linear rule", async () => {
     const material = convertMaterial(
       {
         name: "Env",
@@ -528,11 +629,12 @@ describe("convertMaterial", () => {
       null,
       loader,
     );
+    await flush();
 
     expect(material.map!.colorSpace).toBe(THREE.SRGBColorSpace);
   });
 
-  it("keeps the sRGB default for an unauthored non-exr color slot", () => {
+  it("keeps the sRGB default for an unauthored non-exr color slot", async () => {
     const material = convertMaterial(
       {
         name: "Env",
@@ -541,13 +643,14 @@ describe("convertMaterial", () => {
       null,
       loader,
     );
+    await flush();
 
     expect(material.map!.colorSpace).toBe(THREE.SRGBColorSpace);
   });
 
-  it("keeps data slots linear for an unauthored exr", () => {
-    const convert = (over: Partial<TextureInput> = {}) =>
-      convertMaterial(
+  it("keeps data slots linear for an unauthored exr", async () => {
+    const convert = async (over: Partial<TextureInput> = {}) => {
+      const material = convertMaterial(
         {
           name: "Env",
           surface: surface({ textures: [textureInput({ file_path: "/cache/env/studio.exr", ...over })] }),
@@ -555,17 +658,27 @@ describe("convertMaterial", () => {
         null,
         loader,
       );
+      await flush();
+      return material;
+    };
 
-    expect(convert({ input: "normal" }).normalMap!.colorSpace).toBe(THREE.NoColorSpace);
-    expect(convert({ input: "roughness" }).roughnessMap!.colorSpace).toBe(THREE.NoColorSpace);
+    expect((await convert({ input: "normal" })).normalMap!.colorSpace).toBe(THREE.NoColorSpace);
+    expect((await convert({ input: "roughness" })).roughnessMap!.colorSpace).toBe(THREE.NoColorSpace);
   });
 
-  it("picks the per-slot colorSpace default for unauthored sourceColorSpace", () => {
-    const convert = (over: Partial<TextureInput> = {}) =>
-      convertMaterial({ name: "Auto", surface: surface({ textures: [textureInput(over)] }) }, null, loader);
+  it("picks the per-slot colorSpace default for unauthored sourceColorSpace", async () => {
+    const convert = async (over: Partial<TextureInput> = {}) => {
+      const material = convertMaterial(
+        { name: "Auto", surface: surface({ textures: [textureInput(over)] }) },
+        null,
+        loader,
+      );
+      await flush();
+      return material;
+    };
 
-    expect(convert({}).map!.colorSpace).toBe(THREE.SRGBColorSpace);
-    expect(convert({ input: "normal" }).normalMap!.colorSpace).toBe(THREE.NoColorSpace);
-    expect(convert({ input: "roughness" }).roughnessMap!.colorSpace).toBe(THREE.NoColorSpace);
+    expect((await convert({})).map!.colorSpace).toBe(THREE.SRGBColorSpace);
+    expect((await convert({ input: "normal" })).normalMap!.colorSpace).toBe(THREE.NoColorSpace);
+    expect((await convert({ input: "roughness" })).roughnessMap!.colorSpace).toBe(THREE.NoColorSpace);
   });
 });

@@ -1,7 +1,8 @@
 // Loader pick by extension: EXR holds float data that the image path cannot
 // read, so it goes through three's DataTextureLoader-based EXRLoader. Both
-// loaders return their texture synchronously (EXR decodes into it later), so
-// the synchronous MaterialTextureLoader contract holds either way.
+// loaders return their texture synchronously (EXR decodes into it later); the
+// promise the cache hands out settles on their onLoad, so a slow decode is
+// ordinary async here.
 import * as THREE from "three";
 import { EXRLoader } from "three/addons/loaders/EXRLoader.js";
 

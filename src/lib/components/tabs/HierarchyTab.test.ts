@@ -104,7 +104,7 @@ beforeEach(async () => {
   const loadedGroup = await buildScene(manifest, {
     getGeometry: async () => packedTriangle(),
     getMaterial: async () => ({ name: "Plastic", surface: null }),
-    loadTexture: () => null,
+    loadTexture: async () => new THREE.Texture(),
   });
   const scene = new THREE.Scene();
   scene.add(loadedGroup);
