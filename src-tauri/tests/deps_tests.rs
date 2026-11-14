@@ -145,6 +145,14 @@ fn unsupported_layer_format_degrades_the_scan() {
         "the unreadable layer is not a dependency: {:?}",
         scan.entries
     );
+    // Accepted loss (R1): the degraded scan stops at the layer stack, so the
+    // healthy root layer's own asset is missing too. This pins the limitation
+    // so a future asset walk has to change it on purpose.
+    assert!(
+        !scan.entries.iter().any(|e| e.key.ends_with(".png")),
+        "checker.png belongs to the healthy root layer and is not rediscovered: {:?}",
+        scan.entries
+    );
     for entry in &scan.entries {
         assert!(entry.node.resolved, "{}: {:?}", entry.key, entry.node);
         assert!(
@@ -182,6 +190,30 @@ fn degraded_scan_reports_the_layer_stack_only() {
     assert_eq!(keys, vec!["sub.usda"], "the layer stack and nothing else");
     assert!(scan.entries[0].node.resolved);
     assert!(scan.entries[0].node.error_msg.is_none());
+
+    // The owner path must agree with the standalone scan on this same scene,
+    // not only on the single-layer fixture (whose entry loops prove nothing).
+    let owner = spawn_stage_owner();
+    let info = owner.open(&root);
+    let through_owner = owner
+        .state
+        .get_dependencies(info.stage_id)
+        .expect("an open stage must still report its dependencies");
+    let owner_keys: Vec<&str> = through_owner
+        .entries
+        .iter()
+        .map(|e| e.key.as_str())
+        .collect();
+    assert!(through_owner.degraded, "the owner scan degrades too");
+    assert_eq!(
+        owner_keys, keys,
+        "the owner scan reports a different layer stack"
+    );
+    assert_eq!(through_owner.root, scan.root);
+    owner
+        .state
+        .close_stage(info.stage_id)
+        .expect("the stage closes cleanly");
 }
 
 #[test]

@@ -108,6 +108,9 @@ pub fn dependency_scan_from_stage(stage: &Stage, root: &Path) -> Result<Dependen
 /// The degraded answer to a layer walk the unsupported format stopped: the
 /// stage's own layer stack, without the root layer (the full walk leaves it
 /// out too) and without the session layers (bookkeeping, not scene content).
+/// shortcut: assets of healthy layers (e.g. a root-layer PNG) are not
+/// rediscovered, upgrade when openusd's format registry reads MaterialX
+/// (openusd issues #214/#215) and the full walk succeeds again.
 fn layer_stack_scan(stage: &Stage, root: &Path) -> DependencyScan {
     let root_dir = root.parent().unwrap_or(Path::new(""));
     let root_id = clean(&root.to_string_lossy());
