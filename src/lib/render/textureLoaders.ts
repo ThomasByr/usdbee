@@ -16,6 +16,11 @@ const imageLoader = new THREE.TextureLoader();
 // shortcut: EXR decode runs on the main thread, a large EXR can hitch the first load,
 // upgrade to a worker decode when a production EXR visibly stutters
 const exrLoader = new EXRLoader();
+// shortcut: only GPU-native ktx2 loads here (uncompressed, ETC2/BC/ASTC
+// containers); basis/UASTC/ETC1S needs the vendored transcoder's WASM worker,
+// which yields no texture in this webview and fail-softs to the authored
+// constant (verified 2026-11-14), upgrade when a basis-compressed asset must
+// render — investigate the Worker/WASM path first
 const ktx2Loader = new KTX2Loader();
 
 // The transcoder is vendored from the installed three dependency into
