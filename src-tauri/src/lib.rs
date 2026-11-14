@@ -3,6 +3,7 @@ mod commands;
 mod fetcher;
 pub use commands::{open_usd_file_path, LoadGate, OPEN_IN_FLIGHT_MESSAGE};
 pub use fetcher::get_usdbee_cache_dir;
+pub mod lights;
 pub mod materials;
 mod models;
 mod omniverse;
@@ -124,6 +125,7 @@ pub fn run() {
             stage::get_animated_pose_batch,
             stage::get_material_data,
             stage::get_material_batch,
+            stage::get_stage_lights,
             stage::set_attribute_value,
             stage::set_attribute_values,
             stage::set_prim_metadata,

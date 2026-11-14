@@ -201,6 +201,41 @@ export interface MaterialInfo {
   has_volume?: boolean;
 }
 
+// Rust lights.rs::Shaping — the ShapingAPI cone a light applies. Both fields
+// fold the schema fallback (90 degrees, 0 softness); the object is present
+// only where the prim applies ShapingAPI.
+export interface Shaping {
+  cone_angle: number;
+  cone_softness: number;
+}
+
+// Rust lights.rs::LightInfo — get_stage_lights payload, one entry per light
+// prim. `kind` is "sphere" | "disk" | "rect" | "cylinder" | "distant" |
+// "dome" (PortalLight/GeometryLight/LightFilter are skipped). `enabled` is
+// the prim's computed visibility: USD has no per-light enable input, so
+// `visibility = "invisible"` is the off switch. `intensity`, `exposure`,
+// `color` and the size fields fold the UsdLux schema fallback. The optional
+// fields carry serde(default), so an older payload may omit them: undefined
+// and null both mean "not this kind". `texture_file` is the resolved,
+// frontend-fetchable path (authored spelling when the file is missing).
+export interface LightInfo {
+  path: string;
+  kind: string;
+  intensity: number;
+  exposure: number;
+  color: number[];
+  enabled: boolean;
+  normalize: boolean;
+  casts_shadow: boolean;
+  radius?: number | null;
+  angle?: number | null;
+  width?: number | null;
+  height?: number | null;
+  length?: number | null;
+  shaping?: Shaping | null;
+  texture_file?: string | null;
+}
+
 export interface AttributeInfo {
   name: string;
   type_name: string;

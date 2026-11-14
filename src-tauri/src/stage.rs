@@ -24,6 +24,7 @@ use openusd_schemas::shade::{Connectable, Material, MaterialBindingAPI};
 use serde::{Deserialize, Serialize};
 
 use crate::fetcher::get_usdbee_cache_dir;
+use crate::lights::{stage_lights, LightInfo};
 use crate::materials::{material_info, MaterialInfo};
 use crate::parser::{dependency_scan_from_stage, DependencyScan};
 use crate::skinning::{skel_joint_transforms_vary, SkelAnimMemo};
@@ -137,6 +138,11 @@ pub enum StageRequest {
     GetMaterialBatch {
         paths: Vec<String>,
         reply: mpsc::Sender<Result<Vec<u8>, String>>,
+    },
+    // Every stage light (Round 2 F4), read once per load. Always at the
+    // default time: light attributes are not refreshed during playback.
+    GetLights {
+        reply: mpsc::Sender<Result<Vec<LightInfo>, String>>,
     },
     SetValue {
         path: String,
@@ -1009,6 +1015,19 @@ fn spawn_stage_owner_for(
                             Ok(frame_batch(slots))
                         }))
                         .unwrap_or_else(panic_reply),
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::GetLights { reply } => {
+                    let response = match current_stage {
+                        // shortcut: read at the default time only, so an
+                        // animated light attribute never follows playback;
+                        // upgrade to a per-time read if an asset demands it
+                        Some(ref stage) => {
+                            catch_unwind(AssertUnwindSafe(|| Ok(stage_lights(stage, None))))
+                                .unwrap_or_else(panic_reply)
+                        }
                         None => Err("no stage open".to_string()),
                     };
                     let _ = reply.send(response);
@@ -5244,6 +5263,25 @@ pub async fn get_material_data(
     state: tauri::State<'_, StageState>,
 ) -> Result<MaterialInfo, String> {
     request_material_data(&state.sender(stage_id)?, &path)
+}
+
+// Every stage light (Round 2 F4): one read per load, no per-path variant.
+#[tauri::command]
+pub async fn get_stage_lights(
+    stage_id: u64,
+    state: tauri::State<'_, StageState>,
+) -> Result<Vec<LightInfo>, String> {
+    request_stage_lights(&state.sender(stage_id)?)
+}
+
+pub fn request_stage_lights(sender: &mpsc::Sender<StageRequest>) -> Result<Vec<LightInfo>, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::GetLights { reply })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
 }
 
 pub fn request_material_data(

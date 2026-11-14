@@ -2,7 +2,11 @@ mod common;
 
 use common::{attribute, fixture, spawn_stage_owner};
 use serde_json::json;
-use usdbee_lib::stage::{open_stage, request_stage_details, request_stage_tree, PrimNode};
+use std::fs;
+use usdbee_lib::lights::{stage_lights, LightInfo};
+use usdbee_lib::stage::{
+    open_stage, request_stage_details, request_stage_lights, request_stage_tree, PrimNode,
+};
 
 /// The prims authored under /World, sorted by name. Round 2's fixtures all
 /// read this file, so the count lives here and nowhere else: adding or
@@ -152,5 +156,222 @@ fn ground_is_one_flat_quad_with_nothing_to_subdivide() {
         attribute(&ground, "subdivisionScheme").value.data,
         json!("none"),
         "a catmullClark quad would round the lights' shadow catcher"
+    );
+}
+
+fn closed(expected: f64, actual: f64) {
+    assert!(
+        (expected - actual).abs() < 1e-6,
+        "expected {}, got {}",
+        expected,
+        actual
+    );
+}
+
+fn fixture_lights() -> Vec<LightInfo> {
+    let (stage, _) = open_stage(&fixture("lights_cameras.usda")).expect("stage should open");
+    let mut lights = stage_lights(&stage, None);
+    lights.sort_by(|a, b| a.path.cmp(&b.path));
+    lights
+}
+
+fn light<'a>(lights: &'a [LightInfo], path: &str) -> &'a LightInfo {
+    lights
+        .iter()
+        .find(|l| l.path == path)
+        .unwrap_or_else(|| panic!("expected {} among {:?}", path, lights))
+}
+
+#[test]
+fn fixture_lights_carry_the_values_the_mapping_needs() {
+    let lights = fixture_lights();
+    let paths: Vec<&str> = lights.iter().map(|l| l.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "/World/L_cyl",
+            "/World/L_disk",
+            "/World/L_distant",
+            "/World/L_dome",
+            "/World/L_dome_tex",
+            "/World/L_off",
+            "/World/L_rect",
+            "/World/L_sphere",
+        ],
+        "every light prim answers, and nothing else does"
+    );
+
+    let sphere = light(&lights, "/World/L_sphere");
+    assert_eq!(sphere.kind, "sphere");
+    assert_eq!(sphere.intensity, 800.0);
+    assert_eq!(sphere.exposure, 0.0);
+    closed(1.0, sphere.color[0]);
+    closed(0.9, sphere.color[1]);
+    closed(0.8, sphere.color[2]);
+    assert_eq!(sphere.radius, Some(0.5));
+    let shaping = sphere
+        .shaping
+        .as_ref()
+        .expect("L_sphere applies ShapingAPI");
+    closed(30.0, shaping.cone_angle);
+    closed(0.1, shaping.cone_softness);
+    assert!(sphere.casts_shadow, "L_sphere applies ShadowAPI");
+    assert!(sphere.enabled);
+    assert!(!sphere.normalize);
+    assert_eq!(sphere.angle, None);
+    assert_eq!(sphere.width, None);
+    assert_eq!(sphere.texture_file, None);
+
+    let disk = light(&lights, "/World/L_disk");
+    assert_eq!(disk.kind, "disk");
+    assert_eq!(disk.intensity, 100.0);
+    assert_eq!(disk.radius, Some(1.0));
+    assert_eq!(
+        disk.color,
+        [1.0, 1.0, 1.0],
+        "an unauthored color takes the schema fallback"
+    );
+    assert_eq!(disk.shaping, None, "no ShapingAPI here");
+
+    let rect = light(&lights, "/World/L_rect");
+    assert_eq!(rect.kind, "rect");
+    assert_eq!(rect.intensity, 50.0);
+    assert_eq!(rect.width, Some(2.0));
+    assert_eq!(rect.height, Some(1.0));
+    assert_eq!(rect.texture_file, None, "no texture authored");
+
+    let cylinder = light(&lights, "/World/L_cyl");
+    assert_eq!(cylinder.kind, "cylinder");
+    assert_eq!(cylinder.intensity, 40.0);
+    assert_eq!(cylinder.length, Some(3.0));
+    closed(0.2, cylinder.radius.expect("the cylinder authors a radius"));
+
+    let distant = light(&lights, "/World/L_distant");
+    assert_eq!(distant.kind, "distant");
+    assert_eq!(distant.intensity, 2.0);
+    assert_eq!(distant.angle, Some(45.0));
+    assert_eq!(distant.radius, None);
+
+    let dome = light(&lights, "/World/L_dome");
+    assert_eq!(dome.kind, "dome");
+    assert_eq!(dome.intensity, 1.0);
+    closed(0.5, dome.color[0]);
+    closed(0.6, dome.color[1]);
+    closed(1.0, dome.color[2]);
+    assert_eq!(dome.texture_file, None);
+
+    let textured = light(&lights, "/World/L_dome_tex");
+    assert_eq!(textured.kind, "dome");
+    assert!(
+        textured
+            .texture_file
+            .as_deref()
+            .is_some_and(|path| path.ends_with("checker.png")),
+        "the dome's texture path reaches the payload: {:?}",
+        textured.texture_file
+    );
+
+    let off = light(&lights, "/World/L_off");
+    assert_eq!(off.kind, "sphere");
+    assert_eq!(off.intensity, 5.0);
+    assert!(
+        !off.enabled,
+        "visibility = invisible is the switch USD has: the light answers disabled"
+    );
+}
+
+#[test]
+fn an_unreadable_light_drops_itself_and_the_rest_still_answer() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = dir.path().join("broken_light.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+
+def Xform "World"
+{
+    def SphereLight "L_ok"
+    {
+        float inputs:intensity = 3
+    }
+
+    # Composition cannot resolve this light's reference: the stage still
+    # opens, and the light answers on its own opinions.
+    def SphereLight "L_dangling" (
+        references = @./does_not_exist.usda@
+    )
+    {
+        float inputs:intensity = 4
+    }
+
+    # Nonsense typed attrs are dropped by composition, never an error: the
+    # reads fold the schema fallback instead of failing the light.
+    def SphereLight "L_nonsense"
+    {
+        string inputs:intensity = "x"
+        string inputs:radius = "wide"
+        token visibility = "bogus"
+    }
+
+    # The traversal's own rules drop these two: abstract and inactive prims
+    # are no part of the composed stage.
+    class SphereLight "L_abstract"
+    {
+    }
+
+    def SphereLight "L_inactive" (
+        active = false
+    )
+    {
+    }
+
+    # Recorded limits: these kinds are skipped, not guessed at.
+    def PortalLight "Portal"
+    {
+        float inputs:intensity = 9
+    }
+
+    def GeometryLight "Geo"
+    {
+    }
+
+    def LightFilter "Filter"
+    {
+    }
+}
+"#,
+    )
+    .expect("test stage should be written");
+
+    let (stage, _) = open_stage(&root).expect("stage should open");
+    let mut lights = stage_lights(&stage, None);
+    lights.sort_by(|a, b| a.path.cmp(&b.path));
+    let paths: Vec<&str> = lights.iter().map(|l| l.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["/World/L_dangling", "/World/L_nonsense", "/World/L_ok"],
+        "the unreadable prims leave the rest of the list intact"
+    );
+    assert_eq!(light(&lights, "/World/L_ok").intensity, 3.0);
+    assert_eq!(
+        light(&lights, "/World/L_dangling").intensity,
+        4.0,
+        "a dangling reference still answers its own opinion"
+    );
+    let nonsense = light(&lights, "/World/L_nonsense");
+    assert_eq!(nonsense.intensity, 1.0, "folded fallback, not a drop");
+    assert_eq!(nonsense.radius, Some(0.5), "folded fallback, not a drop");
+    assert!(nonsense.enabled, "an undecodable token is not invisible");
+}
+
+#[test]
+fn the_lights_command_answers_through_the_stage_owner() {
+    let state = spawn_stage_owner();
+    open_fixture(&state);
+    let lights = request_stage_lights(&state.sender()).expect("lights should serialize");
+    assert_eq!(
+        lights.len(),
+        8,
+        "all eight fixture lights reach the command"
     );
 }
