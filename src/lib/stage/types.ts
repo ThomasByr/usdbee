@@ -220,7 +220,7 @@ export interface Shaping {
 // frontend-fetchable path (authored spelling when the file is missing).
 export interface LightInfo {
   path: string;
-  kind: string;
+  kind: "sphere" | "disk" | "rect" | "cylinder" | "distant" | "dome";
   intensity: number;
   exposure: number;
   color: number[];

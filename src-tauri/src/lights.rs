@@ -18,8 +18,8 @@ use openusd::usd::{Prim, PrimPredicate, Stage, TimeCode};
 use openusd_schemas::geom::{Imageable, ImageableExt, Visibility};
 use openusd_schemas::lux::{
     CylinderLight, CylinderLightSchema, DiskLight, DiskLightSchema, DistantLight,
-    DistantLightSchema, DomeLight, DomeLightSchema, LightAPI, RectLight, RectLightSchema,
-    ShadowAPI, ShapingAPI, SphereLight, SphereLightSchema,
+    DistantLightSchema, DomeLight, DomeLightSchema, DomeLight_1, DomeLight_1Schema, LightAPI,
+    RectLight, RectLightSchema, ShadowAPI, ShapingAPI, SphereLight, SphereLightSchema,
 };
 use serde::{Deserialize, Serialize};
 
@@ -98,8 +98,10 @@ fn light_info(
 
     // The shared light interface, through the unchecked view: the concrete
     // class views reach it the same way, and this keeps one read per field.
-    // Every getter folds the schema fallback; the `unwrap_or` only stands in
-    // for a stage opened without this family's registry.
+    // Every getter already folds the type's own schema fallback, so the
+    // `unwrap_or` below never fires for a light read from a stage with this
+    // family registered; it stands in only for one opened without the lux
+    // registry.
     let light = LightAPI::from_prim_unchecked(prim.clone());
     let color = light
         .color()
@@ -139,6 +141,10 @@ fn light_info(
     Ok(Some(LightInfo {
         path: path.to_string(),
         kind: facts.kind.to_string(),
+        // The `unwrap_or` values are not USD's defaults: each type declares
+        // its own fallback (DistantLight's `inputs:intensity` is 50000), and
+        // the getter already folds it. These stand in only for a stage
+        // opened without the lux registry.
         intensity: wide(light.intensity().map_err(err)?).unwrap_or(1.0),
         exposure: wide(light.exposure().map_err(err)?).unwrap_or(0.0),
         color: [color[0] as f64, color[1] as f64, color[2] as f64],
@@ -211,8 +217,18 @@ fn kind_facts(prim: &Prim) -> Result<Option<KindFacts>, String> {
             ..KindFacts::default()
         }));
     }
-    // The DomeLight view also covers the legacy `DomeLight_1` typeName.
     if let Some(light) = DomeLight::from_prim(prim.clone()).map_err(err)? {
+        return Ok(Some(KindFacts {
+            kind: "dome",
+            texture_file: texture_file(light.texture_file().map_err(err)?),
+            ..KindFacts::default()
+        }));
+    }
+    // `DomeLight_1` is its own class here (a `DomeLight` prim is not `is_a`
+    // it, and the reverse), so it needs its own arm: without it a legacy
+    // asset's dome light vanishes from the payload. Its shared fields read
+    // the same way, through LightAPI.
+    if let Some(light) = DomeLight_1::from_prim(prim.clone()).map_err(err)? {
         return Ok(Some(KindFacts {
             kind: "dome",
             texture_file: texture_file(light.texture_file().map_err(err)?),

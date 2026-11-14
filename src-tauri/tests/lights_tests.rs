@@ -168,6 +168,116 @@ fn closed(expected: f64, actual: f64) {
     );
 }
 
+/// One light authored under an ancestor whose visibility the test controls.
+/// The scene is written per test: the shared fixture must stay untouched, and
+/// inherited visibility is the only way a light goes off without its own
+/// `token visibility`.
+fn ancestor_visibility_lights(ancestor_visibility: &str) -> Vec<LightInfo> {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = dir.path().join("inherited_visibility.usda");
+    fs::write(
+        &root,
+        format!(
+            r#"#usda 1.0
+
+def Xform "World"
+{{
+    def Xform "Hidden" (
+        kind = "group"
+    )
+    {{
+        token visibility = "{ancestor_visibility}"
+
+        def SphereLight "L_child"
+        {{
+            float inputs:intensity = 7
+        }}
+    }}
+
+    def SphereLight "L_sibling"
+    {{
+        float inputs:intensity = 8
+    }}
+}}
+"#
+        ),
+    )
+    .expect("test stage should be written");
+
+    let (stage, _) = open_stage(&root).expect("stage should open");
+    let mut lights = stage_lights(&stage, None);
+    lights.sort_by(|a, b| a.path.cmp(&b.path));
+    lights
+}
+
+#[test]
+fn an_invisible_ancestor_disables_the_light_underneath() {
+    let hidden = ancestor_visibility_lights("invisible");
+    let paths: Vec<&str> = hidden.iter().map(|l| l.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["/World/Hidden/L_child", "/World/L_sibling"],
+        "a light under an invisible Xform still answers"
+    );
+    assert!(
+        !light(&hidden, "/World/Hidden/L_child").enabled,
+        "the light inherits the ancestor's invisible visibility: enabled is the computed \
+         visibility, not the prim's own opinion"
+    );
+    assert!(
+        light(&hidden, "/World/L_sibling").enabled,
+        "a sibling outside the invisible group stays on"
+    );
+
+    let shown = ancestor_visibility_lights("inherited");
+    assert!(
+        light(&shown, "/World/Hidden/L_child").enabled,
+        "an inherited ancestor visibility leaves the light on"
+    );
+}
+
+#[test]
+fn a_legacy_dome_light_answers_as_a_dome() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = dir.path().join("legacy_dome.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+
+def Xform "World"
+{
+    # The pre-0.8 dome light: its own class, not a subtype of `DomeLight`.
+    # A legacy asset must not lose its dome light.
+    def DomeLight_1 "L_legacy"
+    {
+        float inputs:intensity = 3
+        color3f inputs:color = (0.25, 0.5, 0.75)
+        asset inputs:texture:file = @./sky.exr@
+    }
+}
+"#,
+    )
+    .expect("test stage should be written");
+
+    let (stage, _) = open_stage(&root).expect("stage should open");
+    let lights = stage_lights(&stage, None);
+    let legacy = light(&lights, "/World/L_legacy");
+    assert_eq!(legacy.kind, "dome");
+    assert_eq!(legacy.intensity, 3.0);
+    closed(0.25, legacy.color[0]);
+    closed(0.5, legacy.color[1]);
+    closed(0.75, legacy.color[2]);
+    assert!(
+        legacy
+            .texture_file
+            .as_deref()
+            .is_some_and(|path| path.ends_with("sky.exr")),
+        "the legacy dome's texture path reaches the payload: {:?}",
+        legacy.texture_file
+    );
+    assert!(legacy.enabled);
+}
+
 fn fixture_lights() -> Vec<LightInfo> {
     let (stage, _) = open_stage(&fixture("lights_cameras.usda")).expect("stage should open");
     let mut lights = stage_lights(&stage, None);
@@ -232,6 +342,11 @@ fn fixture_lights_carry_the_values_the_mapping_needs() {
         "an unauthored color takes the schema fallback"
     );
     assert_eq!(disk.shaping, None, "no ShapingAPI here");
+    assert!(
+        disk.casts_shadow,
+        "a light that applies no ShadowAPI is not shadow-disabled: the schema's own \
+         shadow:enable fallback (true) answers for it"
+    );
 
     let rect = light(&lights, "/World/L_rect");
     assert_eq!(rect.kind, "rect");
@@ -269,6 +384,10 @@ fn fixture_lights_carry_the_values_the_mapping_needs() {
             .is_some_and(|path| path.ends_with("checker.png")),
         "the dome's texture path reaches the payload: {:?}",
         textured.texture_file
+    );
+    assert!(
+        textured.casts_shadow,
+        "no ShadowAPI composes no shadow:enable, so the schema fallback answers"
     );
 
     let off = light(&lights, "/World/L_off");
