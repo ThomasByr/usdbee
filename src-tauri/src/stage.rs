@@ -23,6 +23,7 @@ use openusd_schemas::shade::nodes::{PreviewSurface, UVTexture};
 use openusd_schemas::shade::{Connectable, Material, MaterialBindingAPI};
 use serde::{Deserialize, Serialize};
 
+use crate::cameras::{stage_cameras, CameraInfo};
 use crate::fetcher::get_usdbee_cache_dir;
 use crate::lights::{stage_lights, LightInfo};
 use crate::materials::{material_info, MaterialInfo};
@@ -143,6 +144,11 @@ pub enum StageRequest {
     // default time: light attributes are not refreshed during playback.
     GetLights {
         reply: mpsc::Sender<Result<Vec<LightInfo>, String>>,
+    },
+    // Every stage camera (Round 2 F5), read once per load. Always at the
+    // default time: camera attributes are not refreshed during playback.
+    GetCameras {
+        reply: mpsc::Sender<Result<Vec<CameraInfo>, String>>,
     },
     SetValue {
         path: String,
@@ -1026,6 +1032,19 @@ fn spawn_stage_owner_for(
                         // upgrade to a per-time read if an asset demands it
                         Some(ref stage) => {
                             catch_unwind(AssertUnwindSafe(|| Ok(stage_lights(stage, None))))
+                                .unwrap_or_else(panic_reply)
+                        }
+                        None => Err("no stage open".to_string()),
+                    };
+                    let _ = reply.send(response);
+                }
+                StageRequest::GetCameras { reply } => {
+                    let response = match current_stage {
+                        // shortcut: read at the default time only, so an
+                        // animated camera attribute never follows playback;
+                        // upgrade to a per-time read if an asset demands it
+                        Some(ref stage) => {
+                            catch_unwind(AssertUnwindSafe(|| Ok(stage_cameras(stage, None))))
                                 .unwrap_or_else(panic_reply)
                         }
                         None => Err("no stage open".to_string()),
@@ -5278,6 +5297,27 @@ pub fn request_stage_lights(sender: &mpsc::Sender<StageRequest>) -> Result<Vec<L
     let (reply, response) = mpsc::channel();
     sender
         .send(StageRequest::GetLights { reply })
+        .map_err(|_| "stage service unavailable".to_string())?;
+    response
+        .recv()
+        .map_err(|_| "stage service unavailable".to_string())?
+}
+
+// Every stage camera (Round 2 F5): one read per load, no per-path variant.
+#[tauri::command]
+pub async fn get_stage_cameras(
+    stage_id: u64,
+    state: tauri::State<'_, StageState>,
+) -> Result<Vec<CameraInfo>, String> {
+    request_stage_cameras(&state.sender(stage_id)?)
+}
+
+pub fn request_stage_cameras(
+    sender: &mpsc::Sender<StageRequest>,
+) -> Result<Vec<CameraInfo>, String> {
+    let (reply, response) = mpsc::channel();
+    sender
+        .send(StageRequest::GetCameras { reply })
         .map_err(|_| "stage service unavailable".to_string())?;
     response
         .recv()

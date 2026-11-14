@@ -241,6 +241,29 @@ export interface LightInfo {
   world_transform?: number[] | null;
 }
 
+// Rust cameras.rs::CameraInfo — get_stage_cameras payload, one entry per
+// camera prim. `name` is the prim's own name (the last path component).
+// `projection` is "perspective" | "orthographic". `focal_length`, both
+// apertures and `projection` fold the UsdGeom schema fallback (50, 20.9550,
+// 15.2908, perspective); `clipping_range` is authored-only and null/absent
+// when the prim authors none (USD's 1..1000000 fallback is scene-scale
+// dependent, so the viewer picks its own near/far). Vertical FOV:
+// 2 * atan(vertical_aperture / (2 * focal_length)).
+// `world_transform` is row-major in the USD row-vector convention
+// (translation in the last row), the same shape as PrimDetails.world_transform;
+// the forward axis is the negated third row. A camera whose xform stack cannot
+// be evaluated is absent from the payload: it has no place to look through.
+export interface CameraInfo {
+  path: string;
+  name: string;
+  projection: "perspective" | "orthographic";
+  focal_length: number;
+  horizontal_aperture: number;
+  vertical_aperture: number;
+  clipping_range?: [number, number] | null;
+  world_transform: number[];
+}
+
 export interface AttributeInfo {
   name: string;
   type_name: string;

@@ -1,3 +1,4 @@
+pub mod cameras;
 mod cli;
 mod commands;
 mod fetcher;
@@ -126,6 +127,7 @@ pub fn run() {
             stage::get_material_data,
             stage::get_material_batch,
             stage::get_stage_lights,
+            stage::get_stage_cameras,
             stage::set_attribute_value,
             stage::set_attribute_values,
             stage::set_prim_metadata,

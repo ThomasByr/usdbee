@@ -3,9 +3,11 @@ mod common;
 use common::{attribute, fixture, spawn_stage_owner};
 use serde_json::json;
 use std::fs;
+use usdbee_lib::cameras::{stage_cameras, CameraInfo};
 use usdbee_lib::lights::{stage_lights, LightInfo};
 use usdbee_lib::stage::{
-    open_stage, request_stage_details, request_stage_lights, request_stage_tree, PrimNode,
+    open_stage, request_stage_cameras, request_stage_details, request_stage_lights,
+    request_stage_tree, PrimNode,
 };
 
 /// The prims authored under /World, sorted by name. Round 2's fixtures all
@@ -569,6 +571,213 @@ def Xform "World"
     assert_eq!(nonsense.intensity, 1.0, "folded fallback, not a drop");
     assert_eq!(nonsense.radius, Some(0.5), "folded fallback, not a drop");
     assert!(nonsense.enabled, "an undecodable token is not invisible");
+}
+
+fn fixture_cameras() -> Vec<CameraInfo> {
+    let (stage, _) = open_stage(&fixture("lights_cameras.usda")).expect("stage should open");
+    let mut cameras = stage_cameras(&stage, None);
+    cameras.sort_by(|a, b| a.path.cmp(&b.path));
+    cameras
+}
+
+fn camera<'a>(cameras: &'a [CameraInfo], path: &str) -> &'a CameraInfo {
+    cameras
+        .iter()
+        .find(|c| c.path == path)
+        .unwrap_or_else(|| panic!("expected {} among {:?}", path, cameras))
+}
+
+/// The translation of a camera's world transform (row-vector: last row).
+fn camera_translation(info: &CameraInfo) -> [f64; 3] {
+    let t = &info.world_transform;
+    [t[12], t[13], t[14]]
+}
+
+/// The forward axis (-Z) of a camera's world transform, normalized.
+fn camera_forward(info: &CameraInfo) -> [f64; 3] {
+    let t = &info.world_transform;
+    let axis = [-t[8], -t[9], -t[10]];
+    let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    [axis[0] / length, axis[1] / length, axis[2] / length]
+}
+
+#[test]
+fn fixture_cameras_carry_the_values_the_look_through_needs() {
+    let cameras = fixture_cameras();
+    let paths: Vec<&str> = cameras.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["/World/Cam_tele", "/World/Cam_wide"],
+        "every camera prim answers, and nothing else does"
+    );
+
+    let wide = camera(&cameras, "/World/Cam_wide");
+    assert_eq!(wide.name, "Cam_wide");
+    assert_eq!(wide.projection, "perspective");
+    assert_eq!(wide.focal_length, 24.0);
+    assert_eq!(wide.horizontal_aperture, 36.0);
+    assert_eq!(wide.vertical_aperture, 24.0);
+    assert_eq!(wide.clipping_range, Some([0.1f32 as f64, 1000.0f32 as f64]));
+    assert_eq!(camera_translation(wide), [0.0, 4.0, 8.0]);
+
+    let tele = camera(&cameras, "/World/Cam_tele");
+    assert_eq!(tele.name, "Cam_tele");
+    assert_eq!(tele.projection, "perspective");
+    assert_eq!(tele.focal_length, 200.0);
+    assert_eq!(tele.horizontal_aperture, 36.0);
+    assert_eq!(tele.vertical_aperture, 24.0);
+    assert_eq!(tele.clipping_range, Some([0.1f32 as f64, 1000.0f32 as f64]));
+    assert_eq!(camera_translation(tele), [0.0, 4.0, 20.0]);
+
+    // The fixture cameras differ in the lens and the place, nothing else. A
+    // field that silently changes shape (a widened projection, a lost range)
+    // shows up here.
+    let mut lens_swapped = wide.clone();
+    lens_swapped.name = "Cam_tele".to_string();
+    lens_swapped.path = "/World/Cam_tele".to_string();
+    lens_swapped.focal_length = tele.focal_length;
+    lens_swapped.world_transform = tele.world_transform;
+    assert_eq!(lens_swapped, *tele);
+}
+
+#[test]
+fn camera_world_transforms_aim_at_the_world_origin() {
+    let cameras = fixture_cameras();
+
+    // rotateXYZ = -26.565 about X: the row-vector forward axis (-Z) is
+    // (0, sin, -cos). The camera sits at (0, 4, 8), so that is the direction
+    // to the origin.
+    let tilt = (-26.565f64).to_radians();
+    let [x, y, z] = camera_forward(camera(&cameras, "/World/Cam_wide"));
+    closed(0.0, x);
+    closed(tilt.sin(), y);
+    closed(-tilt.cos(), z);
+
+    let tilt = (-11.31f64).to_radians();
+    let [x, y, z] = camera_forward(camera(&cameras, "/World/Cam_tele"));
+    closed(0.0, x);
+    closed(tilt.sin(), y);
+    closed(-tilt.cos(), z);
+
+    // Both directions are the vector from the camera to the origin.
+    for info in &cameras {
+        let [px, py, pz] = camera_translation(info);
+        let [fx, fy, fz] = camera_forward(info);
+        let align = -(px * fx + py * fy + pz * fz) / (px * px + py * py + pz * pz).sqrt();
+        assert!(
+            align > 0.9999,
+            "{} does not aim at the origin: cos = {}",
+            info.path,
+            align
+        );
+    }
+}
+
+#[test]
+fn camera_payload_fields_serialize_snake_case() {
+    let cameras = fixture_cameras();
+    let wide =
+        serde_json::to_value(camera(&cameras, "/World/Cam_wide")).expect("camera should serialize");
+    assert_eq!(wide["name"], json!("Cam_wide"));
+    assert_eq!(wide["focal_length"], json!(24.0));
+    assert_eq!(wide["horizontal_aperture"], json!(36.0));
+    assert_eq!(wide["vertical_aperture"], json!(24.0));
+    assert_eq!(
+        wide["clipping_range"],
+        json!([0.1f32 as f64, 1000.0f32 as f64])
+    );
+    assert_eq!(
+        wide["world_transform"].as_array().map(|a| a.len()),
+        Some(16)
+    );
+}
+
+#[test]
+fn an_unauthored_camera_folds_the_schema_defaults_but_keeps_no_clip_range() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = dir.path().join("bare_cameras.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+
+def Xform "World"
+{
+    # No lens, no clip range: the schema's own fallbacks answer for the lens.
+    def Camera "Cam_bare"
+    {
+    }
+
+    def Camera "Cam_ortho"
+    {
+        token projection = "orthographic"
+    }
+}
+"#,
+    )
+    .expect("test stage should be written");
+
+    let (stage, _) = open_stage(&root).expect("stage should open");
+    let cameras = stage_cameras(&stage, None);
+
+    let bare = camera(&cameras, "/World/Cam_bare");
+    assert_eq!(bare.projection, "perspective");
+    closed(50.0, bare.focal_length);
+    closed(20.955, bare.horizontal_aperture);
+    closed(15.2908, bare.vertical_aperture);
+    assert_eq!(
+        bare.clipping_range, None,
+        "an unauthored range stays absent: a 1..1e6 fallback is not a viewport's near/far"
+    );
+    assert_eq!(camera_translation(bare), [0.0, 0.0, 0.0]);
+
+    assert_eq!(
+        camera(&cameras, "/World/Cam_ortho").projection,
+        "orthographic"
+    );
+}
+
+#[test]
+fn a_camera_without_a_place_drops_itself() {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = dir.path().join("bad_xform_camera.usda");
+    fs::write(
+        &root,
+        r#"#usda 1.0
+
+def Xform "World"
+{
+    # The op name is right but its value is undecodable: a camera with no
+    # place cannot be looked through, so it drops instead of guessing one.
+    def Camera "Cam_bad_xform"
+    {
+        string xformOp:orient = "bogus"
+        uniform token[] xformOpOrder = ["xformOp:orient"]
+    }
+
+    def Camera "Cam_ok"
+    {
+    }
+}
+"#,
+    )
+    .expect("test stage should be written");
+
+    let (stage, _) = open_stage(&root).expect("stage should open");
+    let cameras = stage_cameras(&stage, None);
+    let paths: Vec<&str> = cameras.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["/World/Cam_ok"],
+        "the unreadable camera leaves the rest of the list intact"
+    );
+}
+
+#[test]
+fn the_cameras_command_answers_through_the_stage_owner() {
+    let state = spawn_stage_owner();
+    open_fixture(&state);
+    let cameras = request_stage_cameras(&state.sender()).expect("cameras should serialize");
+    assert_eq!(cameras.len(), 2, "both fixture cameras reach the command");
 }
 
 #[test]
