@@ -15,9 +15,12 @@ describe("pickTextureLoader", () => {
     expect(pickTextureLoader("/cache/tex/albedo.jpg")).toBeInstanceOf(THREE.TextureLoader);
   });
 
-  it("routes ktx2 and ktx paths to KTX2Loader", () => {
+  it("routes ktx2 paths to KTX2Loader and leaves ktx1 to the image loader", () => {
     expect(pickTextureLoader("/cache/tex/albedo.ktx2")).toBeInstanceOf(KTX2Loader);
-    expect(pickTextureLoader("/cache/tex/ALBEDO.KTX")).toBeInstanceOf(KTX2Loader);
+    expect(pickTextureLoader("/cache/tex/ALBEDO.KTX2")).toBeInstanceOf(KTX2Loader);
+    // KTX1 is a different container KTX2Loader cannot read: it fails soft
+    // through the image path instead of failing silently in the ktx2 one.
+    expect(pickTextureLoader("/cache/tex/albedo.ktx")).toBeInstanceOf(THREE.TextureLoader);
   });
 
   it("does not mistake a longer name for an exr", () => {
@@ -30,7 +33,7 @@ describe("pickTextureLoader", () => {
     expect(isKtx2Path("/cache/tex/studio.ktx2.png")).toBe(false);
     expect(isKtx2Path("/cache/tex/studioktx2")).toBe(false);
     expect(isKtx2Path("/cache/tex/studio.ktx2")).toBe(true);
-    expect(isKtx2Path("/cache/tex/studio.ktx")).toBe(true);
+    expect(isKtx2Path("/cache/tex/studio.ktx")).toBe(false);
   });
 });
 
@@ -62,7 +65,7 @@ describe("loadTexture", () => {
   });
 
   it("routes a ktx2 failure to the cache's error callback", () => {
-    const loader = pickTextureLoader("/cache/tex/albedo.ktx") as KTX2Loader;
+    const loader = pickTextureLoader("/cache/tex/albedo.ktx2") as KTX2Loader;
     const fail = vi.spyOn(loader, "load").mockImplementation(((
       _url: string,
       _onLoad: unknown,
@@ -74,7 +77,7 @@ describe("loadTexture", () => {
 
     let failed = false;
     loadTexture(
-      "/cache/tex/albedo.ktx",
+      "/cache/tex/albedo.ktx2",
       "blob:albedo",
       () => {},
       () => (failed = true),

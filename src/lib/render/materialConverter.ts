@@ -17,7 +17,7 @@ import type {
   UvTransform,
   ValuePayload,
 } from "../stage/types";
-import { isExrPath } from "./textureLoaders";
+import { isExrPath, isKtx2Path } from "./textureLoaders";
 
 export type MaterialTextureLoader = (file_path: string, onError: () => void) => Promise<THREE.Texture>;
 
@@ -241,12 +241,14 @@ function colorSpace(
   // samples linear; upgrade when an EXR authored sRGB must display sRGB, or a
   // non-half-float EXR path appears
   if (token === "sRGB") return THREE.SRGBColorSpace;
-  // shortcut: a space the loader stamped wins over the per-slot default — a
-  // KTX2 header names its own primaries and transfer function, which beats the
-  // slot's guess about what the file holds; a header with unspecified
-  // primaries reads as NoColorSpace, i.e. indistinguishable from unstamped and
-  // back to the slot default. Upgrade when a ktx2 must override its own header.
-  if (loadedSpace !== THREE.NoColorSpace) return loadedSpace as THREE.ColorSpace;
+  // shortcut: a space the loader stamped wins over the per-slot default, but
+  // only for KTX2 — its header names its own primaries and transfer function,
+  // which beats the slot's guess about what the file holds. EXRLoader stamps
+  // LinearSRGBColorSpace on every decode, so an ungated rule would kill the
+  // .exr case below. A KTX2 header with unspecified primaries reads as
+  // NoColorSpace, i.e. indistinguishable from unstamped and back to the slot
+  // default. Upgrade when a ktx2 must override its own header.
+  if (loadedSpace !== THREE.NoColorSpace && isKtx2Path(filePath)) return loadedSpace as THREE.ColorSpace;
   if (isExrPath(filePath)) return THREE.NoColorSpace;
   return COLOR_SLOTS.includes(slot) ? THREE.SRGBColorSpace : THREE.NoColorSpace; // unauthored "auto"
 }

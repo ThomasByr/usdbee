@@ -27,8 +27,7 @@ export function isExrPath(filePath: string): boolean {
 }
 
 export function isKtx2Path(filePath: string): boolean {
-  const lower = filePath.toLowerCase();
-  return lower.endsWith(".ktx2") || lower.endsWith(".ktx");
+  return filePath.toLowerCase().endsWith(".ktx2");
 }
 
 // shortcut: .hdr/RGBE stays unsupported (log-encoded, needs RGBELoader plus its

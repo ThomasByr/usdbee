@@ -683,6 +683,33 @@ describe("convertMaterial", () => {
     expect((await convert({ input: "roughness" })).roughnessMap!.colorSpace).toBe(THREE.NoColorSpace);
   });
 
+  it("keeps the exr linear rule over a loader-stamped color space", async () => {
+    // EXRLoader stamps LinearSRGBColorSpace on every decode, but an EXR holds
+    // scene-linear floats in a half-float container: Round 1's .exr rule must
+    // still win, as it did before the ktx2 rule existed.
+    const stamped: MaterialTextureLoader = async () => {
+      const texture = new THREE.Texture();
+      texture.colorSpace = THREE.LinearSRGBColorSpace;
+      return texture;
+    };
+    const convert = async (path: string) => {
+      const material = convertMaterial(
+        {
+          name: "Env",
+          surface: surface({ textures: [textureInput({ file_path: path })] }),
+        },
+        null,
+        stamped,
+      );
+      await flush();
+      return material;
+    };
+
+    expect((await convert("/cache/env/studio.exr")).map!.colorSpace).toBe(THREE.NoColorSpace);
+    // Only a ktx2 path may take the loader's stamp over the slot default.
+    expect((await convert("/cache/env/studio.png")).map!.colorSpace).toBe(THREE.SRGBColorSpace);
+  });
+
   it("lets a loader-stamped ktx2 color space beat the per-slot default", async () => {
     // A KTX2 header names its own primaries and transfer function; the slot
     // only guesses what the file holds, so the loader's stamp wins.
