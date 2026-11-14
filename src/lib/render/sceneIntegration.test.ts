@@ -1108,20 +1108,52 @@ describe("sceneLightsActive", () => {
 describe("syncSceneLights", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("aims the fallback direction by the authored angle, per axis", () => {
+  // Blender, Maya and Houdini exports are Z-up: integrateScene stands the
+  // group upright before it re-centres it, so a light's stage pose takes the
+  // same rotation. Without it every light lands on the wrong axes.
+  function zUpStage() {
+    stageState.stageInfo = { ...stageState.stageInfo!, up_axis: "Z" } as any;
+  }
+
+  it("stands a Z-up stage's light upright before shifting it with the scene center", () => {
+    zUpStage();
     const kit = lightKit();
 
-    // 30 degrees, not the 90 an earlier test used: at 90 both horizontal axes
-    // are zero, and at 45 the two are equal, so either would still pass with y
-    // and z swapped.
-    syncSceneLights(kit, [stageLight({ kind: "distant", angle: 30 })], LIGHT_SETTINGS);
+    syncSceneLights(kit, [stageLight({ world_transform: transform([0, 3, 0]) })], LIGHT_SETTINGS);
+
+    // USD (x, y, z) -> viewport (x, z, -y): three units up the stage's Y is
+    // three units along the viewport's -Z.
+    const [light] = kit.sceneLights;
+    expect(light!.position.x).toBeCloseTo(0, 6);
+    expect(light!.position.y).toBeCloseTo(0, 6);
+    expect(light!.position.z).toBeCloseTo(-3, 6);
+
+    // The scene box is measured after the rotation, so the centre is already
+    // viewport-space: rotate first, then shift.
+    kit.sceneCenter = new THREE.Vector3(0, 1, 0);
+    syncSceneLights(kit, [stageLight({ world_transform: transform([0, 3, 0]) })], LIGHT_SETTINGS);
+
+    expect(kit.sceneLights[0]!.position.x).toBeCloseTo(0, 6);
+    expect(kit.sceneLights[0]!.position.y).toBeCloseTo(-1, 6);
+    expect(kit.sceneLights[0]!.position.z).toBeCloseTo(-3, 6);
+  });
+
+  it("stands a Z-up stage's distant direction upright too", () => {
+    zUpStage();
+    const kit = lightKit();
+
+    // rotateX(90) aims the light's -Z up the stage's Y; the up-axis rotation
+    // carries that aim onto the viewport's -Z.
+    syncSceneLights(
+      kit,
+      [stageLight({ kind: "distant", world_transform: transform([0, 3, 0], 90) })],
+      LIGHT_SETTINGS,
+    );
 
     const [light] = kit.sceneLights;
-    const distance = 2 * kit.sceneSize;
-    expect(light).toBeInstanceOf(THREE.DirectionalLight);
     expect(light!.position.x).toBeCloseTo(0, 6);
-    expect(light!.position.y).toBeCloseTo(0.5 * distance, 6);
-    expect(light!.position.z).toBeCloseTo(Math.cos(Math.PI / 6) * distance, 6);
+    expect(light!.position.y).toBeCloseTo(0, 6);
+    expect(light!.position.z).toBeCloseTo(17, 5);
   });
 
   it("aims a distant light along its transform's forward axis", () => {

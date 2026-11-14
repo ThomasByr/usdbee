@@ -518,16 +518,22 @@ function lightAnchor(viewer: RendererKit): THREE.Vector3 {
 
 type LightPose = { position: THREE.Vector3; forward: THREE.Vector3 };
 
-// Where a light sits and which way it points, in viewer space: the scene group
-// is re-centred on the stage's center, so the transform's translation shifts
-// with it. Row-major, row-vector convention — the same shape
-// values.rs::world_transform produces — so the translation is the last row and
-// row 2 is the local Z axis a USD light emits along (its negative Z).
+// Where a light sits and which way it points, in viewer space. Row-major,
+// row-vector convention — the same shape values.rs::world_transform produces —
+// so the translation is the last row and row 2 is the local Z axis a USD light
+// emits along (its negative Z).
+// The stage group is stood upright and only then re-centred by integrateScene,
+// so the pose takes the same up-axis rotation first; the scene center it is
+// shifted by is already viewport-space (the box is measured after the rotation).
 function lightPose(viewer: RendererKit, info: LightInfo): LightPose | null {
   const m = info.world_transform;
   if (!m || m.length !== 16) return null;
-  const position = new THREE.Vector3(m[12] ?? 0, m[13] ?? 0, m[14] ?? 0).sub(viewer.sceneCenter);
-  const forward = new THREE.Vector3(-(m[8] ?? 0), -(m[9] ?? 0), -(m[10] ?? 0));
+  const axis = new THREE.Vector3(1, 0, 0);
+  const spin = upAxisRotation(stageState.stageInfo?.up_axis ?? "Y");
+  const position = new THREE.Vector3(m[12] ?? 0, m[13] ?? 0, m[14] ?? 0)
+    .applyAxisAngle(axis, spin)
+    .sub(viewer.sceneCenter);
+  const forward = new THREE.Vector3(-(m[8] ?? 0), -(m[9] ?? 0), -(m[10] ?? 0)).applyAxisAngle(axis, spin);
   // A degenerate axis names no direction: fail back to the anchor.
   if (forward.lengthSq() < 1e-12) return null;
   return { position, forward: forward.normalize() };
@@ -591,29 +597,26 @@ function buildSceneLight(
     return null;
   }
 
-  // The light's own place, or the shared anchor when it carries no transform.
+  // The light's own place, or the shared anchor when it carries no transform
+  // (which then aims at the origin, where the geometry is re-centred).
   const pose = lightPose(viewer, info);
   const position = pose ? pose.position : lightAnchor(viewer);
-  const aim = pose ? pose.position.clone().add(pose.forward) : new THREE.Vector3();
+  const forward = pose ? pose.forward : position.clone().negate().normalize();
+  const aim = position.clone().add(forward);
   let light: THREE.Light;
 
   switch (info.kind) {
     case "distant": {
       const distant = new THREE.DirectionalLight(color, intensity);
-      if (pose) {
-        // Only the direction is a distant light's: put it back along its own
-        // aim so its shadow camera sees the stage in front of it.
-        distant.position.copy(pose.position).addScaledVector(pose.forward, -2 * viewer.sceneSize);
-        distant.target.position.copy(pose.position);
-      } else {
-        // No transform: `angle` reads as the elevation, so the default 90 aims
-        // the light straight down.
-        const elevation = THREE.MathUtils.degToRad(info.angle ?? 90);
-        distant.position.set(0, Math.sin(elevation), Math.cos(elevation));
-        distant.position.multiplyScalar(viewer.sceneSize * 2);
-        distant.target.position.set(0, 0, 0);
-      }
+      // A distant light's own orientation IS its direction: put it back along
+      // its aim so its shadow camera sees the stage in front of it.
+      distant.position.copy(position).addScaledVector(forward, -2 * viewer.sceneSize);
+      distant.target.position.copy(position);
       distant.target.updateMatrixWorld();
+      // shortcut: USD's DistantLight.angle is the emitter's angular diameter
+      // (soft-shadow size) and three's DirectionalLight has no equivalent knob,
+      // so `angle` stays authored data unused for direction; upgrade if three
+      // grows a directional soft-shadow radius.
       light = distant;
       break;
     }
@@ -721,8 +724,10 @@ function releaseSceneLights(viewer: RendererKit): boolean {
   for (const light of viewer.sceneLights) {
     viewer.scene?.remove(light);
     // Light.dispose() frees no shadow render target, and the rig rebuilds on
-    // every slider tick: an undisposed map leaks one per rebuild.
-    (light as THREE.DirectionalLight).shadow?.map?.dispose();
+    // every slider tick: an undisposed one leaks per rebuild. LightShadow's
+    // own dispose frees the map and the map pass both; the hand-rolled map
+    // dispose leaked the VSM map pass.
+    (light as THREE.DirectionalLight).shadow?.dispose();
     light.dispose();
   }
   viewer.sceneLights.length = 0;
