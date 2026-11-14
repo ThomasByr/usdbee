@@ -2993,8 +2993,8 @@ fn stage_err(error: openusd::Error) -> String {
 /// via the schemas `ImageableExt` walk) is `proxy` or `guide` are excluded;
 /// `visible` is the computed visibility (an `invisible` opinion on the prim
 /// or any imageable ancestor clears it, re-authoring `inherited` stops the
-/// walk); geometry nodes (Mesh/BasisCurves/Points) carry their direct
-/// `material:binding` target path;
+/// walk); geometry nodes (Mesh/BasisCurves/NurbsCurves/Points/Sphere) carry
+/// their direct `material:binding` target path;
 /// PointInstancer nodes carry one synthetic child per prototype with the
 /// per-prototype instance matrices (see `prototype_children`).
 #[derive(Debug, Clone, Serialize, Deserialize)]

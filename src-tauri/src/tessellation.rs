@@ -4,10 +4,10 @@
 //!
 //! `Mesh` prims triangulate by fanning each face `(v0, vi, vi+1)` over
 //! `faceVertexIndices` and `faceVertexCounts` (holes and bridging are out
-//! of scope; subdivision meshes render their base hull). `BasisCurves`
-//! prims tessellate to open 6-sided tubes (no end caps) with constant
-//! widths; `Points` prims tessellate to a point cloud (indices empty);
-//! `Sphere` prims tessellate analytically at a fixed 24×12 density.
+//! of scope; subdivision meshes render their base hull). `BasisCurves` and
+//! `NurbsCurves` prims tessellate to open 6-sided tubes (no end caps) with
+//! constant widths; `Points` prims tessellate to a point cloud (indices
+//! empty); `Sphere` prims tessellate analytically at a fixed 24×12 density.
 //! Authored `normals`, `primvars:st` and `primvars:displayColor` are read
 //! at the queried time code; for meshes unauthored normals are generated
 //! as per-vertex area-weighted face-normal averages.
