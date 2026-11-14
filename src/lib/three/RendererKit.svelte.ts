@@ -10,7 +10,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as frameDiag from "$lib/perf/frameDiag";
 import { initOnDemandShadows, renderWithShadowUpdate } from "$lib/three/shadowMapUpdate";
 import { nextFrameTime, shouldRenderFrame } from "$lib/three/fpsLimiter";
-import type { LightInfo } from "$lib/stage/types";
+import type { CameraInfo, LightInfo } from "$lib/stage/types";
 
 export class RendererKit {
   canvas: HTMLCanvasElement | null = null;
@@ -31,6 +31,9 @@ export class RendererKit {
   // re-runs when a load replaces them) and the three lights built from them.
   // The rest is bookkeeping for the rebuild and its dispose.
   stageLights = $state.raw<LightInfo[]>([]);
+  // F5: the stage's camera prims as last fetched (the look-through picker's
+  // source), one fetch per load, same shape as the lights above.
+  stageCameras = $state.raw<CameraInfo[]>([]);
   sceneLights: THREE.Light[] = [];
   sceneEnv: THREE.Texture | null = null;
   // The file the dome environment was built from: an unchanged path reuses the

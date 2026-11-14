@@ -30,6 +30,7 @@ const CONTRACT = {
   reset_performance: {},
   screenshot: {},
   set_camera: { "position?": "vec3", "target?": "vec3", "fov?": "number" },
+  look_through_camera: { "path?": "string" },
   close_app: {},
   open_app: {},
 };

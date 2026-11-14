@@ -28,6 +28,9 @@ const READ_ONLY = new Set([
   "search_objects",
   "get_performance",
   "box_report",
+  // F5: no-arg lists the stage's cameras; a framing run leaves its result
+  // (camera, fov) on screen, so the palette stays open for another pick.
+  "look_through_camera",
   "screenshot",
 ]);
 

@@ -15,7 +15,8 @@ import { authorLocalTransform } from "$lib/render/gizmoCommit.svelte";
 import { bindSelectionBox } from "$lib/render/sceneIntegration";
 import * as frameDiag from "$lib/perf/frameDiag";
 import { renderWithShadowUpdate } from "$lib/three/shadowMapUpdate";
-import type { PrimDetails, RenderNode } from "$lib/stage/types";
+import { upAxisRotation } from "$lib/stage/upAxis";
+import type { CameraInfo, PrimDetails, RenderNode } from "$lib/stage/types";
 
 const NODE_CAP = 200;
 const MATCH_CAP = 50;
@@ -35,11 +36,24 @@ export interface BridgeViewer {
   pinnedCamera: { position: THREE.Vector3; target: THREE.Vector3 } | null;
   activeCameraIndex: number;
   usdCameras: THREE.Camera[];
+  // F5: the stage's camera prims, as last fetched, plus the re-centring the
+  // loaded group got — a prim transform needs both to become a viewer pose.
+  stageCameras: CameraInfo[];
+  sceneCenter: THREE.Vector3;
+  sceneSize: number;
 }
 
 // A palette click runs without a mounted viewport or an open stage, where the
 // dev bridge always had both: these sets turn that into a readable error.
-const NEEDS_VIEWER = new Set(["play", "pause", "screenshot", "select_node", "set_camera", "box_report"]);
+const NEEDS_VIEWER = new Set([
+  "play",
+  "pause",
+  "screenshot",
+  "select_node",
+  "set_camera",
+  "look_through_camera",
+  "box_report",
+]);
 const NEEDS_STAGE = new Set(["inspect_scene", "search_objects", "transform_object"]);
 
 export function numberArg(value: unknown): number | null {
@@ -161,6 +175,24 @@ async function transformObject(args: Record<string, unknown>) {
   return { ok: true };
 }
 
+// Reapplied after every scene rebuild, so a pinned view outlives a reload.
+function pinView(viewer: BridgeViewer) {
+  viewer.controls.update();
+  viewer.pinnedCamera = {
+    position: viewer.camera.position.clone(),
+    target: viewer.controls.target.clone(),
+  };
+}
+
+function applyFov(viewer: BridgeViewer, fov: number) {
+  viewer.fov = fov;
+  // The Viewport effect is the other fov consumer; writing both keeps them
+  // consistent where that effect is not mounted.
+  const camera = viewer.camera as THREE.PerspectiveCamera;
+  camera.fov = fov;
+  camera.updateProjectionMatrix();
+}
+
 function setCamera(viewer: BridgeViewer, args: Record<string, unknown>) {
   const position = vec3(args.position);
   const target = vec3(args.target);
@@ -173,20 +205,64 @@ function setCamera(viewer: BridgeViewer, args: Record<string, unknown>) {
     viewer.controls.update();
     // Pin the whole view, not the given channels: a rebuild frames the scene
     // from scratch, so an unpinned channel would come back reframed.
-    viewer.pinnedCamera = {
-      position: viewer.camera.position.clone(),
-      target: viewer.controls.target.clone(),
+    pinView(viewer);
+  }
+  if (fov !== null) applyFov(viewer, fov);
+  return { ok: true, pinned: viewer.pinnedCamera !== null };
+}
+
+// F5: frame the viewport through a stage camera. The pose math mirrors
+// lightPose (sceneIntegration): the prim transform is row-major in the USD
+// row-vector convention, so the translation is the last row and the negated
+// third row the look axis, and the stage group was stood upright and
+// re-centred before either applies.
+function lookThroughCamera(viewer: BridgeViewer, args: Record<string, unknown>) {
+  const path = typeof args.path === "string" ? args.path.trim() : "";
+  if (!path) {
+    return {
+      cameras: viewer.stageCameras.map((camera) => ({
+        path: camera.path,
+        name: camera.name,
+        projection: camera.projection,
+      })),
     };
   }
-  if (fov !== null) {
-    viewer.fov = fov;
-    // The Viewport effect is the other fov consumer; writing both keeps them
-    // consistent where that effect is not mounted.
-    const camera = viewer.camera as THREE.PerspectiveCamera;
-    camera.fov = fov;
-    camera.updateProjectionMatrix();
+  const info = viewer.stageCameras.find((camera) => camera.path === path);
+  if (!info) throw new Error(`no stage camera at ${path}`);
+  const m = info.world_transform;
+  if (!m || m.length !== 16) throw new Error(`camera ${path} has no evaluated transform`);
+
+  const axis = new THREE.Vector3(1, 0, 0);
+  const spin = upAxisRotation(stageState.stageInfo?.up_axis ?? "Y");
+  const position = new THREE.Vector3(m[12] ?? 0, m[13] ?? 0, m[14] ?? 0)
+    .applyAxisAngle(axis, spin)
+    .sub(viewer.sceneCenter);
+  const forward = new THREE.Vector3(-(m[8] ?? 0), -(m[9] ?? 0), -(m[10] ?? 0)).applyAxisAngle(axis, spin);
+  if (forward.lengthSq() < 1e-12) throw new Error(`camera ${path} has no look direction`);
+  forward.normalize();
+
+  // Keep the framing distance the viewer had, so the look-through lands with
+  // comparable context instead of on the camera prim itself.
+  const distance = viewer.controls.target.distanceTo(viewer.camera.position) || viewer.sceneSize;
+  viewer.camera.position.copy(position);
+  viewer.controls.target.copy(position).addScaledVector(forward, distance);
+  pinView(viewer);
+
+  // An orthographic camera's lens is not a vertical fov; the viewer's stays.
+  const lens = info.vertical_aperture > 0 && info.focal_length > 0;
+  if (info.projection !== "perspective" || !lens) {
+    return {
+      ok: true,
+      path,
+      name: info.name,
+      projection: info.projection,
+      fov: viewer.fov,
+      framed_only: true,
+    };
   }
-  return { ok: true, pinned: viewer.pinnedCamera !== null };
+  const fov = THREE.MathUtils.radToDeg(2 * Math.atan(info.vertical_aperture / (2 * info.focal_length)));
+  applyFov(viewer, fov);
+  return { ok: true, path, name: info.name, projection: info.projection, fov };
 }
 
 // Cached vs precise AABB of the selected subtree, plus the meshes that
@@ -361,6 +437,8 @@ export async function dispatchCommand(
       return { ok: true };
     case "set_camera":
       return setCamera(view, args);
+    case "look_through_camera":
+      return lookThroughCamera(view, args);
     case "screenshot":
       return screenshot(view);
     case "close_app":

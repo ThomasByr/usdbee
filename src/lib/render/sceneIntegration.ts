@@ -5,6 +5,7 @@ import {
   renderState,
   advanceStageTime,
   getStageLights,
+  getStageCameras,
   prefetchPoses,
   snapToTimeCodes,
   snapToPlayableTime,
@@ -77,6 +78,9 @@ export function resetLoadedScene(viewer: RendererKit) {
   viewer.animationProgress = 0;
   // The closed stage's light prims go with it: the next load fetches its own.
   viewer.stageLights = [];
+  // Same for its cameras: a closed stage must not answer the look-through
+  // picker with prims that are gone.
+  viewer.stageCameras = [];
 }
 
 // Camera fit / grid / light framing for the rust scene (no skinned
@@ -185,6 +189,10 @@ export function integrateScene(viewer: RendererKit, group: THREE.Group) {
     void getStageLights(stageId).then((lights) => {
       // A late answer for a stage that is already gone must not relight it.
       if (stageState.activeStageId === stageId) viewer.stageLights = lights;
+    });
+    // F5: same one-fetch-per-load shape; the look-through picker reads this.
+    void getStageCameras(stageId).then((cameras) => {
+      if (stageState.activeStageId === stageId) viewer.stageCameras = cameras;
     });
   }
 }

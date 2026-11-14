@@ -15,6 +15,7 @@ vi.mock("$lib/stage/stageState.svelte", () => {
     activeStageId: 1,
     status: "ready",
     error: null as string | null,
+    stageInfo: { up_axis: "Y" } as { up_axis: string } | null,
     fetchPrimDetails: vi.fn(async () => null),
     refreshAfterEdit: vi.fn(async () => {}),
     selectPrim: vi.fn(async () => true),
@@ -43,8 +44,12 @@ import { stageState } from "$lib/stage/stageState.svelte";
 import { tabsState } from "$lib/state/tabsState.svelte";
 import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
 import { dispatchCommand, fetchManifest, type BridgeViewer } from "./dispatch";
+import type { CameraInfo } from "$lib/stage/types";
 
-const stage = stageState as unknown as { activeStageId: number };
+const stage = stageState as unknown as {
+  activeStageId: number;
+  stageInfo: { up_axis: string } | null;
+};
 const tabs = tabsState as unknown as {
   closeTab: ReturnType<typeof vi.fn>;
   closeConfirmed: ReturnType<typeof vi.fn>;
@@ -62,11 +67,15 @@ function viewer(): BridgeViewer {
     pinnedCamera: null,
     activeCameraIndex: -1,
     usdCameras: [],
+    stageCameras: [],
+    sceneCenter: new THREE.Vector3(),
+    sceneSize: 10,
   } as unknown as BridgeViewer;
 }
 
 beforeEach(() => {
   stage.activeStageId = 1;
+  stage.stageInfo = { up_axis: "Y" };
   tabs.closeTab.mockReset();
   tabs.closeConfirmed.mockReset();
   orchestrator.modalError = null;
@@ -181,6 +190,92 @@ describe("close_app", () => {
     expect(destroy).toHaveBeenCalled();
     expect(saveWindowState).toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
+  });
+});
+
+describe("look_through_camera", () => {
+  // Row-major, row-vector: translation in the last row, -Z the look axis.
+  const WIDE: CameraInfo = {
+    path: "/World/Cam_wide",
+    name: "Cam_wide",
+    projection: "perspective",
+    focal_length: 24,
+    horizontal_aperture: 36,
+    vertical_aperture: 24,
+    clipping_range: [1, 1000],
+    world_transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 2, -5, 1],
+  };
+  const TELE: CameraInfo = { ...WIDE, path: "/World/Cam_tele", name: "Cam_tele", focal_length: 200 };
+
+  it("lists the stage's cameras when no path is given", async () => {
+    const view = viewer();
+    view.stageCameras = [WIDE, TELE];
+    expect(await dispatchCommand(view, "look_through_camera", {})).toEqual({
+      cameras: [
+        { path: "/World/Cam_wide", name: "Cam_wide", projection: "perspective" },
+        { path: "/World/Cam_tele", name: "Cam_tele", projection: "perspective" },
+      ],
+    });
+  });
+
+  it("frames the viewer from the camera's transform and lens, and pins the view", async () => {
+    const view = viewer();
+    view.stageCameras = [WIDE];
+    // 10 units from the controls target: the framing keeps that distance.
+    view.camera.position.set(0, 0, 10);
+
+    const result = await dispatchCommand(view, "look_through_camera", { path: "/World/Cam_wide" });
+
+    expect(view.camera.position.toArray()).toEqual([10, 2, -5]);
+    expect(view.controls.target.toArray()).toEqual([10, 2, -15]);
+    expect(view.fov).toBeCloseTo(53.13, 2);
+    expect((view.camera as THREE.PerspectiveCamera).fov).toBeCloseTo(53.13, 2);
+    expect(view.pinnedCamera?.position.toArray()).toEqual([10, 2, -5]);
+    expect(view.pinnedCamera?.target.toArray()).toEqual([10, 2, -15]);
+    expect(result).toMatchObject({ ok: true, path: "/World/Cam_wide", projection: "perspective" });
+  });
+
+  it("takes the fov from the camera's own aperture and focal length", async () => {
+    const view = viewer();
+    view.stageCameras = [TELE];
+    view.camera.position.set(0, 0, 10);
+
+    await dispatchCommand(view, "look_through_camera", { path: "/World/Cam_tele" });
+
+    expect(view.fov).toBeCloseTo(6.87, 2);
+  });
+
+  it("stands the pose upright and shifts it to the re-centred stage, as the lights do", async () => {
+    const view = viewer();
+    view.stageCameras = [WIDE];
+    view.camera.position.set(0, 0, 10);
+    view.sceneCenter = new THREE.Vector3(0, 0, 3);
+    stage.stageInfo = { up_axis: "Z" };
+
+    await dispatchCommand(view, "look_through_camera", { path: "/World/Cam_wide" });
+
+    // Z-up: (10, 2, -5) stands upright to (10, -5, -2), then re-centres.
+    expect(view.camera.position.toArray().map((v) => Number(v.toFixed(3)))).toEqual([10, -5, -5]);
+  });
+
+  it("frames an orthographic camera without touching the fov", async () => {
+    const view = viewer();
+    view.stageCameras = [{ ...WIDE, projection: "orthographic" }];
+    view.camera.position.set(0, 0, 10);
+
+    const result = await dispatchCommand(view, "look_through_camera", { path: "/World/Cam_wide" });
+
+    expect(view.camera.position.toArray()).toEqual([10, 2, -5]);
+    expect(view.fov).toBe(75);
+    expect(result).toMatchObject({ ok: true, projection: "orthographic", framed_only: true });
+  });
+
+  it("reports an unknown path as a command error the palette can show", async () => {
+    const view = viewer();
+    view.stageCameras = [WIDE];
+    await expect(dispatchCommand(view, "look_through_camera", { path: "/World/Nope" })).rejects.toThrow(
+      "no stage camera at /World/Nope",
+    );
   });
 });
 

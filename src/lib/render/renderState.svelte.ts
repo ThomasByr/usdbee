@@ -11,7 +11,7 @@
 // rebuilt.
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import * as THREE from "three";
-import type { MaterialInfo, LightInfo, RenderNode } from "../stage/types";
+import type { CameraInfo, MaterialInfo, LightInfo, RenderNode } from "../stage/types";
 import { stageState } from "../stage/stageState.svelte";
 import { decodeGeometryBatch, decodeMaterialBatch } from "./geometryDecoder";
 import { decodeAnimatedPose } from "./poseDecoder";
@@ -113,6 +113,18 @@ export async function getStageLights(stageId: number): Promise<LightInfo[]> {
     return (await invoke<LightInfo[]>("get_stage_lights", { stageId })) ?? [];
   } catch (e) {
     console.warn("usdbee: stage lights unavailable; keeping the studio rig:", e);
+    return [];
+  }
+}
+
+// F5: the stage's camera prims (path, name, lens and world transform), read
+// once per load like the lights. A failed read leaves the look-through picker
+// empty rather than failing the load.
+export async function getStageCameras(stageId: number): Promise<CameraInfo[]> {
+  try {
+    return (await invoke<CameraInfo[]>("get_stage_cameras", { stageId })) ?? [];
+  } catch (e) {
+    console.warn("usdbee: stage cameras unavailable; the look-through picker is empty:", e);
     return [];
   }
 }

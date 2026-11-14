@@ -120,6 +120,20 @@ export const COMMANDS = [
     ],
   },
   {
+    name: "look_through_camera",
+    description:
+      "Frame the viewport through one of the stage's own camera prims: position, look direction and vertical FOV come from its USD transform and lens, and the view is pinned like set_camera. Orthographic cameras are framed by position and direction only, with the current FOV kept. Without a path, lists the stage's cameras.",
+    args: [
+      {
+        key: "path",
+        type: "string",
+        optional: true,
+        autocomplete: "prim_path",
+        describe: "camera prim path, e.g. /World/Cam_wide; omit to list the cameras",
+      },
+    ],
+  },
+  {
     name: "screenshot",
     description: "Render the viewport and return it as a PNG image.",
     args: [],

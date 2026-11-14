@@ -41,7 +41,7 @@ describe("command registry", () => {
     }
   });
 
-  it("exposes the 16 bridge commands the MCP server registers", () => {
+  it("exposes the 17 bridge commands the MCP server registers", () => {
     const bridge = COMMANDS.filter((command) => command.mcp !== false);
     expect(bridge.map((command) => command.name)).toEqual([
       "status",
@@ -58,6 +58,7 @@ describe("command registry", () => {
       "box_report",
       "reset_performance",
       "set_camera",
+      "look_through_camera",
       "screenshot",
       "close_app",
     ]);
