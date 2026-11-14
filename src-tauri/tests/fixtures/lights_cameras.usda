@@ -64,7 +64,7 @@ def Xform "World"
     def DomeLight "L_dome_tex"
     {
         float inputs:intensity = 1
-        asset inputs:texture:file = @./checker.png@
+        asset inputs:texture:file = @./env_equirect.png@
     }
 
     # USD has no light "enable" attribute; visibility is the switch.

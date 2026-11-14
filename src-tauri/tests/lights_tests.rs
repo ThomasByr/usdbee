@@ -381,7 +381,7 @@ fn fixture_lights_carry_the_values_the_mapping_needs() {
         textured
             .texture_file
             .as_deref()
-            .is_some_and(|path| path.ends_with("checker.png")),
+            .is_some_and(|path| path.ends_with("env_equirect.png")),
         "the dome's texture path reaches the payload: {:?}",
         textured.texture_file
     );

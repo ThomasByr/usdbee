@@ -571,6 +571,9 @@ function setDomeEnvironment(viewer: RendererKit, file: string, intensity: number
       requestShadowUpdate();
     });
     texture.mapping = THREE.EquirectangularReflectionMapping;
+    // shortcut: a degenerate equirect (1x1) samples as black in three's
+    // environment lookup, so a dome must point at a real 2:1 image or the
+    // stage goes dark; upgrade if a guard against tiny maps is ever needed.
     // EXR carries linear float data; an image file is sRGB-encoded.
     texture.colorSpace = isExrPath(file) ? THREE.NoColorSpace : THREE.SRGBColorSpace;
     viewer.sceneEnv = texture;
