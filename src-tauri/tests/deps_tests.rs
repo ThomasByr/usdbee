@@ -24,6 +24,7 @@ fn scan_finds_referenced_asset() {
     assert!(dep.node.resolved, "asset.usda sits next to the scene");
     assert!(dep.node.size_bytes.is_some());
     assert!(dep.node.error_msg.is_none());
+    assert!(!scan.degraded, "a supported layer scans in full");
 }
 
 #[test]
@@ -132,6 +133,119 @@ fn stage_scan_matches_the_standalone_scan() {
 }
 
 #[test]
+fn unsupported_layer_format_degrades_the_scan() {
+    // F1: a scene whose composition tolerates an unreadable layer format
+    // (MaterialX here) must open with a degraded scan, not a failed one.
+    let scan = scan_dependencies(&fixture("mtlx_scene.usda"))
+        .expect("an unsupported layer format must not fail the scan");
+
+    assert!(scan.degraded, "the scan could not reach every layer");
+    assert!(
+        !scan.entries.iter().any(|e| e.key.ends_with(".mtlx")),
+        "the unreadable layer is not a dependency: {:?}",
+        scan.entries
+    );
+    for entry in &scan.entries {
+        assert!(entry.node.resolved, "{}: {:?}", entry.key, entry.node);
+        assert!(
+            entry.node.error_msg.is_none(),
+            "{}: {:?}",
+            entry.key,
+            entry.node
+        );
+    }
+}
+
+#[test]
+fn degraded_scan_reports_the_layer_stack_only() {
+    // R1: the degraded scan answers with the stage's layer stack and stops
+    // there. Assets reached through the layers the unsupported format hid
+    // are not discovered.
+    let dir = tempfile::tempdir().unwrap();
+    fs::copy(
+        fixture("material_openpbr.mtlx"),
+        dir.path().join("material_openpbr.mtlx"),
+    )
+    .unwrap();
+    fs::write(dir.path().join("sub.usda"), "#usda 1.0\n").unwrap();
+    let root = dir.path().join("scene.usda");
+    fs::write(
+        &root,
+        "#usda 1.0\n(\n    subLayers = [@./sub.usda@]\n)\ndef \"W\"\n{\n    def Scope \"M\" (\n        prepend references = @./material_openpbr.mtlx@</MaterialX/Materials>\n    )\n    {\n    }\n}\n",
+    )
+    .unwrap();
+
+    let scan = scan_dependencies(&root).expect("the scene opens with a degraded scan");
+
+    assert!(scan.degraded);
+    let keys: Vec<&str> = scan.entries.iter().map(|e| e.key.as_str()).collect();
+    assert_eq!(keys, vec!["sub.usda"], "the layer stack and nothing else");
+    assert!(scan.entries[0].node.resolved);
+    assert!(scan.entries[0].node.error_msg.is_none());
+}
+
+#[test]
+fn owner_scan_of_mtlx_scene_is_degraded() {
+    // The open path: the owner's scan must answer too, so the load survives.
+    let owner = spawn_stage_owner();
+    let info = owner.open(&fixture("mtlx_scene.usda"));
+    // The user-facing notice rides the stage modal's composition errors.
+    assert!(
+        info.composition_errors
+            .iter()
+            .any(|e| e.contains("material_openpbr.mtlx")),
+        "the failed layer must be named: {:?}",
+        info.composition_errors
+    );
+    let scan = owner
+        .state
+        .get_dependencies(info.stage_id)
+        .expect("an open stage must still report its dependencies");
+
+    assert!(scan.degraded);
+    // The session layer lives in the app cache and is bookkeeping, not a
+    // scene dependency: every entry stays inside the scene's directory.
+    let fixture_dir = fixture("mtlx_scene.usda");
+    let fixture_dir = fixture_dir.parent().unwrap();
+    for entry in &scan.entries {
+        assert!(
+            Path::new(&entry.node.path).starts_with(fixture_dir),
+            "{} is not a scene dependency: {:?}",
+            entry.key,
+            entry.node
+        );
+        assert!(
+            entry.node.error_msg.is_none(),
+            "{}: {:?}",
+            entry.key,
+            entry.node
+        );
+    }
+    assert!(
+        !scan.entries.iter().any(|e| e.key.ends_with(".mtlx")),
+        "entries: {:?}",
+        scan.entries
+    );
+    owner
+        .state
+        .close_stage(info.stage_id)
+        .expect("the stage closes cleanly");
+}
+
+#[test]
+fn a_scan_error_that_is_not_an_unsupported_format_stays_fatal() {
+    let err = match scan_dependencies(Path::new("no/such/scene.usda")) {
+        Ok(_) => panic!("a root that cannot be read must fail the scan"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("Failed to resolve"),
+        "unexpected error shape: {}",
+        err
+    );
+}
+
+#[test]
 fn every_fixture_scans_without_error() {
     // The fixtures are the shared corpus for Phases 1-3; this pins that
     // each parses and scans cleanly as authored.
@@ -146,6 +260,7 @@ fn every_fixture_scans_without_error() {
         "xforms.usda",
         "mesh_primvars.usda",
         "material_scene.usda",
+        "mtlx_scene.usda",
     ] {
         let scan = scan_dependencies(&fixture(name))
             .unwrap_or_else(|e| panic!("{} failed to scan: {}", name, e));

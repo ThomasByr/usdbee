@@ -21,6 +21,9 @@ pub struct DependencyEntry {
 pub struct DependencyScan {
     pub root: PathBuf,
     pub entries: Vec<DependencyEntry>,
+    /// `true` when the layer walk met a layer format openusd cannot read and
+    /// answered from the stage's layer stack instead of the full walk.
+    pub degraded: bool,
 }
 
 /// Scans every layer and asset `root` reaches, through openusd's
@@ -49,26 +52,25 @@ pub fn scan_dependencies(root: &Path) -> Result<DependencyScan, String> {
 /// directory the entry keys are relative to.
 pub fn dependency_scan_from_stage(stage: &Stage, root: &Path) -> Result<DependencyScan, String> {
     let root_str = clean(&root.to_string_lossy());
-    let deps = compute_all_dependencies(stage, &root_str)
-        .map_err(|e| format!("Failed to compute dependencies of {}: {}", root_str, e))?;
+    let deps = match compute_all_dependencies(stage, &root_str) {
+        Ok(deps) => deps,
+        // The stage opened this far, so the walk only failed on a layer
+        // format openusd cannot read: answer from the layer stack.
+        Err(openusd::Error::UnsupportedFormat(_)) => return Ok(layer_stack_scan(stage, root)),
+        Err(e) => {
+            return Err(format!(
+                "Failed to compute dependencies of {}: {}",
+                root_str, e
+            ))
+        }
+    };
 
     let root_dir = root.parent().unwrap_or(Path::new(""));
 
     // layers[0] is the root itself; the entries are what it reaches.
     let mut entries = Vec::new();
     for identifier in deps.layers.iter().skip(1).chain(&deps.assets) {
-        let path = clean(identifier);
-        let size = fs::metadata(identifier).map(|m| m.len()).ok();
-        entries.push(DependencyEntry {
-            key: relative_key(identifier, root_dir),
-            node: UsdDependencyNode {
-                path,
-                resolved: true,
-                size_bytes: size,
-                fallback_color: None,
-                error_msg: None,
-            },
-        });
+        entries.push(resolved_entry(identifier, root_dir));
     }
     for identifier in &deps.unresolved {
         if let Some(url) = remote_url(identifier) {
@@ -99,7 +101,44 @@ pub fn dependency_scan_from_stage(stage: &Stage, root: &Path) -> Result<Dependen
     Ok(DependencyScan {
         root: root.to_path_buf(),
         entries,
+        degraded: false,
     })
+}
+
+/// The degraded answer to a layer walk the unsupported format stopped: the
+/// stage's own layer stack, without the root layer (the full walk leaves it
+/// out too) and without the session layers (bookkeeping, not scene content).
+fn layer_stack_scan(stage: &Stage, root: &Path) -> DependencyScan {
+    let root_dir = root.parent().unwrap_or(Path::new(""));
+    let root_id = clean(&root.to_string_lossy());
+    let session = stage.session_layer().map(|layer| clean(layer.identifier()));
+    let entries = stage
+        .layer_identifiers()
+        .iter()
+        .map(|identifier| clean(identifier))
+        .filter(|identifier| *identifier != root_id && Some(identifier) != session.as_ref())
+        .map(|identifier| resolved_entry(&identifier, root_dir))
+        .collect();
+
+    DependencyScan {
+        root: root.to_path_buf(),
+        entries,
+        degraded: true,
+    }
+}
+
+fn resolved_entry(identifier: &str, root_dir: &Path) -> DependencyEntry {
+    let size = fs::metadata(identifier).map(|m| m.len()).ok();
+    DependencyEntry {
+        key: relative_key(identifier, root_dir),
+        node: UsdDependencyNode {
+            path: clean(identifier),
+            resolved: true,
+            size_bytes: size,
+            fallback_color: None,
+            error_msg: None,
+        },
+    }
 }
 
 /// Fetches the remote dependencies a scan found into the download cache.
