@@ -1,0 +1,27 @@
+#usda 1.0
+(
+    defaultPrim = "Scene"
+)
+
+def Xform "Scene"
+{
+    # A quadratic NURBS arc and a BasisCurves through the same control points:
+    # the NURBS one bows toward the arc, the BasisCurves one stays on the chords.
+    def NurbsCurves "C_nurbs"
+    {
+        int[] curveVertexCounts = [4]
+        point3f[] points = [(1, 0, 0), (0.7, 0.7, 0), (0, 1, 0), (-0.7, 0.7, 0)]
+        int[] order = [3]
+        double[] knots = [0, 0, 0, 1, 2, 2, 2]
+        double[] pointWeights = [1, 1.5, 1.5, 1]
+        double2[] ranges = [(0, 2)]
+        float[] widths = [0.05]
+    }
+
+    def BasisCurves "C_basis"
+    {
+        int[] curveVertexCounts = [4]
+        point3f[] points = [(1, 0, 0), (0.7, 0.7, 0), (0, 1, 0), (-0.7, 0.7, 0)]
+        float[] widths = [0.05]
+    }
+}

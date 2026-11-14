@@ -1,0 +1,57 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    def Mesh "TexturedQuad"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </World/Looks/Textured>
+    }
+
+    # Bound to a MaterialX material: the reference arc cannot compose, so this
+    # half of the scene renders with the flat fallback.
+    def Mesh "MtlxQuad"
+    {
+        double3 xformOp:translate = (2.5, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+        rel material:binding = </World/Looks/mtlx/Plastic>
+    }
+
+    def Scope "Looks"
+    {
+        def Scope "mtlx" (
+            prepend references = @./material_openpbr.mtlx@</MaterialX/Materials>
+        )
+        {
+        }
+
+        def Material "Textured"
+        {
+            token outputs:surface.connect = </World/Looks/Textured/PreviewSurface.outputs:surface>
+
+            def Shader "Albedo"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./checker.png@
+                float3 outputs:rgb
+            }
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/Looks/Textured/Albedo.outputs:rgb>
+                token outputs:surface
+            }
+        }
+    }
+}
