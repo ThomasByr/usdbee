@@ -2,7 +2,7 @@ mod common;
 
 use common::{attribute, fixture, spawn_stage_owner};
 use serde_json::json;
-use usdbee_lib::stage::{request_stage_details, request_stage_tree, PrimNode};
+use usdbee_lib::stage::{open_stage, request_stage_details, request_stage_tree, PrimNode};
 
 /// The prims authored under /World, sorted by name. Round 2's fixtures all
 /// read this file, so the count lives here and nowhere else: adding or
@@ -94,11 +94,32 @@ fn sphere_light_authors_its_shaping_and_shadow_inputs() {
     let state = spawn_stage_owner();
     open_fixture(&state);
 
+    // Pin the applied schemas, not only the values. A prim keeps any authored
+    // attribute whether or not a schema applies it, so the value assertions
+    // below do not prove the fixture's `prepend apiSchemas` took effect;
+    // later tasks read these inputs through the typed schema views, which
+    // exist only when the schema is applied. No light class applies these two
+    // by default, so these assertions go red when the `prepend` is dropped.
+    let (stage, _) = open_stage(&fixture("lights_cameras.usda")).expect("stage should open");
+    let sphere_prim = stage
+        .prim("/World/L_sphere")
+        .expect("L_sphere should exist");
+    assert!(
+        sphere_prim
+            .has_api_schema("ShapingAPI")
+            .expect("apiSchemas should resolve"),
+        "L_sphere must apply ShapingAPI for its shaping inputs to compose"
+    );
+    assert!(
+        sphere_prim
+            .has_api_schema("ShadowAPI")
+            .expect("apiSchemas should resolve"),
+        "L_sphere must apply ShadowAPI for its shadow inputs to compose"
+    );
+
     let sphere =
         request_stage_details(&state.sender(), "/World/L_sphere", None).expect("L_sphere details");
     assert_eq!(sphere.type_name, "SphereLight");
-    // Both need the apiSchemas the fixture prepends; without them the inputs
-    // would not compose onto the prim at all.
     assert_eq!(
         attribute(&sphere, "inputs:shaping:cone:angle").value.data,
         json!(30.0f32 as f64)
