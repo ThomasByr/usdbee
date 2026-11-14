@@ -23,6 +23,7 @@ import {
   takePose,
 } from "./posePrefetch";
 import { loadCachedTexture, clearTextureCache } from "./textureCache";
+import { clearUdimAtlases } from "./materialConverter";
 import { loadTexture } from "./textureLoaders";
 import * as frameDiag from "../perf/frameDiag";
 import { requestShadowUpdate } from "../three/shadowMapUpdate";
@@ -718,6 +719,9 @@ export const renderState = $state({
     // disposed by whoever dropped it, so the images they shared go too
     // before the new build repopulates the memo.
     clearTextureCache();
+    // UDIM atlases are shared per tile set for one load, so they follow the
+    // same lifetime: the materials that sampled them are already gone.
+    clearUdimAtlases();
     // A new scene invalidates every looked-ahead pose (other stage, other
     // codes): an in-flight batch lands stale and is dropped.
     frameDiag.onInvalidate("load");

@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import * as THREE from "three";
-import { convertMaterial, type MaterialTextureLoader } from "./materialConverter";
+import {
+  clearUdimAtlases,
+  convertMaterial,
+  udimTileIndex,
+  type MaterialTextureLoader,
+} from "./materialConverter";
 import type { MaterialInfo, PreviewSurface, TextureInput } from "../stage/types";
 
 function surface(over: Partial<PreviewSurface> = {}): PreviewSurface {
@@ -735,5 +740,310 @@ describe("convertMaterial", () => {
 
     expect((await convert({})).normalMap!.colorSpace).toBe(THREE.SRGBColorSpace);
     expect((await convert({ color_space: "raw" })).normalMap!.colorSpace).toBe(THREE.NoColorSpace);
+  });
+});
+
+// Spec R4's formula as written: tile = 1000 + floor(u*10) + floor(v*10)*10.
+// The brief's examples (0.1,0.1) -> 1001 and (1.5,0.2) -> 1015 do not follow
+// from it ((0.1,0.1) -> 1011, (1.5,0.2) -> 1035); the formula is pinned here.
+describe("udimTileIndex", () => {
+  it("pins the spec R4 formula", () => {
+    expect(udimTileIndex(0.1, 0.1, [1011])).toBe(1011);
+    expect(udimTileIndex(1.5, 0.2, [1035])).toBe(1035);
+  });
+
+  it("answers 1001 without a tile set", () => {
+    expect(udimTileIndex(0.1, 0.2, [])).toBe(1001);
+  });
+
+  it("falls back to 1001 when the cell's tile is missing", () => {
+    // cell (5,0) -> 1005, absent, so even the nearer 1002 loses to 1001
+    expect(udimTileIndex(0.55, 0.05, [1001, 1002])).toBe(1001);
+  });
+
+  it("reads the nearest loaded tile for a uv outside the grid", () => {
+    // cell (150,5) is outside the 10x10 grid: 1055 is nearer than 1001
+    expect(udimTileIndex(15, 0.55, [1001, 1055])).toBe(1055);
+    expect(udimTileIndex(-3, -3, [1001, 1055])).toBe(1001);
+  });
+
+  it("clamps to the nearest tile when 1001 is not loaded", () => {
+    // cell (5,0) with no 1001: 1003 (distance 2) beats 1002 (distance 3)
+    expect(udimTileIndex(0.55, 0.05, [1002, 1003])).toBe(1003);
+  });
+
+  it("never answers NaN", () => {
+    expect(udimTileIndex(Number.NaN, 0.1, [1002, 1003])).toBe(1002);
+    expect(udimTileIndex(Number.NaN, Number.NaN, [])).toBe(1001);
+  });
+});
+
+// One solid-colour data tile: the array-texture assembly reads typed arrays
+// (the canvas readback for image-backed tiles has no headless equivalent).
+function pixelTile(red: number, green: number, blue: number, width = 1, height = 1): THREE.DataTexture {
+  const data = new Uint8Array(width * height * 4);
+  for (let pixel = 0; pixel < width * height; pixel++) {
+    data[pixel * 4] = red;
+    data[pixel * 4 + 1] = green;
+    data[pixel * 4 + 2] = blue;
+    data[pixel * 4 + 3] = 255;
+  }
+  return new THREE.DataTexture(data, width, height);
+}
+
+const udimTexture = (tiles: { tile: number; file_path: string }[]): TextureInput =>
+  textureInput({ file_path: "/cache/tex.<UDIM>.png", udim_tiles: tiles });
+
+// Loader keyed by tile file name; a name it does not know rejects.
+function tileLoader(tiles: Record<string, () => THREE.Texture>, seen: string[] = []): MaterialTextureLoader {
+  return async (path) => {
+    seen.push(path);
+    const make = tiles[path.split("/").pop() ?? ""];
+    if (!make) throw new Error(`cannot load ${path}`);
+    return make();
+  };
+}
+
+describe("udim atlas", () => {
+  const twoTiles = [
+    { tile: 1001, file_path: "/cache/tex.1001.png" },
+    { tile: 1002, file_path: "/cache/tex.1002.png" },
+  ];
+
+  // The atlases outlive a material (they are shared per tile set), so every test
+  // starts from an empty cache and from the real physical shader source.
+  beforeEach(() => clearUdimAtlases());
+
+  const patched = (material: THREE.Material, fragmentShader = "#include <map_fragment>") => {
+    const shader = {
+      uniforms: {} as Record<string, THREE.IUniform>,
+      vertexShader: "",
+      fragmentShader,
+    };
+    material.onBeforeCompile(
+      shader as unknown as THREE.WebGLProgramParametersWithUniforms,
+      {} as THREE.WebGLRenderer,
+    );
+    return shader;
+  };
+
+  const atlasOf = (material: THREE.Material): THREE.DataArrayTexture =>
+    patched(material).uniforms.usdbeeUdimAtlas?.value as THREE.DataArrayTexture;
+
+  it("stacks one layer per loaded tile and never fetches the pattern", async () => {
+    const seen: string[] = [];
+    const material = convertMaterial(
+      { name: "Udim", surface: surface({ textures: [udimTexture(twoTiles)] }) },
+      null,
+      tileLoader(
+        { "tex.1001.png": () => pixelTile(255, 0, 0), "tex.1002.png": () => pixelTile(0, 255, 0) },
+        seen,
+      ),
+    );
+    // Nothing resolves in the same tick: the mesh renders the constants first.
+    expect(material.map).toBeNull();
+    await flush();
+
+    expect(seen.sort()).toEqual(["/cache/tex.1001.png", "/cache/tex.1002.png"]);
+    const atlas = atlasOf(material);
+    expect(atlas).toBeInstanceOf(THREE.DataArrayTexture);
+    expect(atlas.image.depth).toBe(2);
+    expect(atlas.image.width).toBe(1);
+    expect(Array.from(atlas.image.data ?? [])).toEqual([255, 0, 0, 255, 0, 255, 0, 255]);
+    // The sampler is the array texture, so the material map is a stand-in that
+    // exists only to compile the uv varying in.
+    expect(material.map).toBeInstanceOf(THREE.Texture);
+    expect(material.map).not.toBe(atlas);
+  });
+
+  it("patches the map chunk with the tile lookup and the uv transform", async () => {
+    const material = convertMaterial(
+      {
+        name: "Udim",
+        surface: surface({
+          textures: [
+            textureInput({
+              file_path: "/cache/tex.<UDIM>.png",
+              udim_tiles: twoTiles,
+              uv_transform: { scale: [3, 1], translation: [0, 0], rotation: 0 },
+            }),
+          ],
+        }),
+      },
+      null,
+      tileLoader({ "tex.1001.png": () => pixelTile(255, 0, 0), "tex.1002.png": () => pixelTile(0, 255, 0) }),
+    );
+    await flush();
+
+    // The SRT rides three's own mapTransform through this stand-in map.
+    expect(material.map!.repeat.x).toBe(3);
+
+    const shader = patched(material);
+
+    expect(shader.fragmentShader).not.toContain("#include <map_fragment>");
+    expect(shader.fragmentShader).toContain("usdbeeUdimAtlas");
+    expect(shader.fragmentShader).toContain("vMapUv");
+    expect(shader.uniforms.usdbeeUdimCount.value).toBe(2);
+    expect(shader.uniforms.usdbeeUdimHas1001.value).toBe(1);
+    expect(shader.uniforms.usdbeeUdimFallback.value).toBe(0);
+    expect([...(shader.uniforms.usdbeeUdimCells.value as Float32Array).slice(0, 4)]).toEqual([1, 0, 2, 0]);
+    expect([...(shader.uniforms.usdbeeUdimLayers.value as Int32Array).slice(0, 2)]).toEqual([0, 1]);
+  });
+
+  it("patches the real physical fragment shader", async () => {
+    const material = convertMaterial(
+      { name: "Udim", surface: surface({ textures: [udimTexture(twoTiles)] }) },
+      null,
+      tileLoader({ "tex.1001.png": () => pixelTile(255, 0, 0), "tex.1002.png": () => pixelTile(0, 255, 0) }),
+    );
+    await flush();
+
+    // The chunk this branch depends on is three's, not a stub: a rename there
+    // would leave the atlas unsampled, so it is pinned here.
+    expect(THREE.ShaderLib.physical.fragmentShader).toContain("#include <map_fragment>");
+    const shader = patched(material, THREE.ShaderLib.physical.fragmentShader);
+
+    expect(shader.fragmentShader).not.toContain("#include <map_fragment>");
+    expect(shader.fragmentShader).toContain("#include <common>");
+    expect(shader.fragmentShader).toContain("uniform sampler2DArray usdbeeUdimAtlas;");
+    expect(shader.fragmentShader).toContain("usdbeeUdimLayer( vMapUv )");
+  });
+
+  it("shares one atlas between materials of the same tile set", async () => {
+    const seen: string[] = [];
+    const load = tileLoader(
+      { "tex.1001.png": () => pixelTile(255, 0, 0), "tex.1002.png": () => pixelTile(0, 255, 0) },
+      seen,
+    );
+    const build = () =>
+      convertMaterial({ name: "Udim", surface: surface({ textures: [udimTexture(twoTiles)] }) }, null, load);
+    const first = build();
+    await flush();
+    const second = build();
+    await flush();
+
+    expect(seen).toHaveLength(2); // one decode per tile, not per material
+    expect(atlasOf(second)).toBe(atlasOf(first));
+  });
+
+  it("keeps rendering the constants until the atlas resolves", async () => {
+    const material = convertMaterial(
+      {
+        name: "Udim",
+        surface: surface({
+          diffuse_color: { type: "color3f", data: [0.5, 0.25, 0.125] },
+          textures: [udimTexture(twoTiles)],
+        }),
+      },
+      null,
+      tileLoader({ "tex.1001.png": () => pixelTile(255, 0, 0), "tex.1002.png": () => pixelTile(0, 255, 0) }),
+    );
+
+    expect(material.color.r).toBeCloseTo(0.5);
+    await flush();
+    // Resolved: the atlas owns the pixels, so the constant drops to white.
+    expect(material.color.r).toBeCloseTo(1);
+  });
+
+  it("drops a tile that failed to load", async () => {
+    const material = convertMaterial(
+      { name: "Udim", surface: surface({ textures: [udimTexture(twoTiles)] }) },
+      null,
+      tileLoader({ "tex.1001.png": () => pixelTile(255, 0, 0) }),
+    );
+    await flush();
+
+    const atlas = atlasOf(material);
+    expect(atlas.image.depth).toBe(1);
+    expect(Array.from(atlas.image.data ?? [])).toEqual([255, 0, 0, 255]);
+  });
+
+  it("leaves the constant when every tile failed", async () => {
+    const material = convertMaterial(
+      {
+        name: "Udim",
+        surface: surface({
+          diffuse_color: { type: "color3f", data: [0.5, 0.25, 0.125] },
+          textures: [udimTexture(twoTiles)],
+        }),
+      },
+      null,
+      tileLoader({}),
+    );
+    await flush();
+
+    expect(material.map).toBeNull();
+    expect(atlasOf(material)).toBeUndefined();
+    expect(material.color.r).toBeCloseTo(0.5);
+  });
+
+  it("rejects a tile whose size differs from the atlas", async () => {
+    const material = convertMaterial(
+      {
+        name: "Udim",
+        surface: surface({
+          textures: [
+            udimTexture([
+              { tile: 1001, file_path: "/cache/tex.1001.png" },
+              { tile: 1002, file_path: "/cache/tex.1002.png" },
+            ]),
+          ],
+        }),
+      },
+      null,
+      tileLoader({
+        "tex.1001.png": () => pixelTile(255, 0, 0, 2, 2),
+        "tex.1002.png": () => pixelTile(0, 255, 0, 1, 1),
+      }),
+    );
+    await flush();
+
+    const atlas = atlasOf(material);
+    expect(atlas.image.depth).toBe(1);
+    expect(atlas.image.width).toBe(2);
+    expect(Array.from(atlas.image.data ?? []).slice(0, 4)).toEqual([255, 0, 0, 255]);
+  });
+
+  it("flips rows for a tile the loader marks flipped", async () => {
+    const flipped = (): THREE.Texture => {
+      const tile = new THREE.DataTexture(new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255]), 1, 2);
+      // TextureLoader textures arrive flipY, i.e. bottom row first
+      tile.flipY = true;
+      return tile;
+    };
+    const material = convertMaterial(
+      {
+        name: "Udim",
+        surface: surface({ textures: [udimTexture([{ tile: 1001, file_path: "/cache/tex.1001.png" }])] }),
+      },
+      null,
+      tileLoader({ "tex.1001.png": flipped }),
+    );
+    await flush();
+
+    expect(Array.from(atlasOf(material).image.data ?? [])).toEqual([0, 255, 0, 255, 255, 0, 0, 255]);
+  });
+
+  it("reads one tile for a slot the atlas does not cover", async () => {
+    const seen: string[] = [];
+    const material = convertMaterial(
+      {
+        name: "Udim",
+        surface: surface({
+          textures: [
+            textureInput({ input: "roughness", file_path: "/cache/tex.<UDIM>.png", udim_tiles: twoTiles }),
+          ],
+        }),
+      },
+      null,
+      tileLoader(
+        { "tex.1001.png": () => pixelTile(255, 0, 0), "tex.1002.png": () => pixelTile(0, 255, 0) },
+        seen,
+      ),
+    );
+    await flush();
+
+    expect(seen).toEqual(["/cache/tex.1001.png"]);
+    expect(material.roughnessMap).toBeInstanceOf(THREE.Texture);
   });
 });

@@ -14,6 +14,7 @@ import type {
   MaterialInfo,
   PreviewSurface,
   TextureInput,
+  UdimTile,
   UvTransform,
   ValuePayload,
 } from "../stage/types";
@@ -87,13 +88,35 @@ function applyTextures(
   for (const texture of surface.textures) {
     const slot = TEXTURE_SLOTS[texture.input];
     if (!slot) continue;
+    if (slot === "map" && texture.udim_tiles?.length) {
+      attachAtlas(material, info, surface, texture, loadTexture, fallbackColor);
+      continue;
+    }
     // A failed load needs no undo: the slot still holds the authored constant
     // this convert applied (the fail-soft rule, now free). The catch keeps a
     // rejection out of the renderer.
-    loadTexture(texture.file_path, () => {})
-      .then((loaded) => attachSlot(material, info, surface, slot, texture, loaded, fallbackColor))
+    const source = resolvedTileInput(texture);
+    loadTexture(source.file_path, () => {})
+      .then((loaded) => attachSlot(material, info, surface, slot, source, loaded, fallbackColor))
       .catch(() => {});
   }
+}
+
+// The authored `<UDIM>` pattern is not fetchable, so a slot the atlas does not
+// cover reads one concrete tile instead. shortcut: one tile per slot — a UDIM
+// normal/roughness map renders tile 1001 everywhere; upgrade when the payload
+// carries tiles for a non-diffuse input
+function resolvedTileInput(input: TextureInput): TextureInput {
+  const tiles = input.udim_tiles;
+  if (!tiles?.length) return input;
+  // Near the origin the rule answers 1001 when it exists, else the closest tile.
+  const chosen = udimTileIndex(
+    0.05,
+    0.05,
+    tiles.map((tile) => tile.tile),
+  );
+  const file = tiles.find((tile) => tile.tile === chosen) ?? tiles[0]!;
+  return { ...input, file_path: file.file_path };
 }
 
 // Per-slot parameters are applied to this slot's own clone once it lands: the
@@ -212,6 +235,327 @@ function applyDisplacement(
       .catch(() => {});
   }
   if (displacement.scale != null) material.displacementScale = displacement.scale;
+}
+
+// ---- UDIM atlas (F7) -------------------------------------------------------
+
+// One fragment uniform pairs a tile's grid cell with its atlas layer. The full
+// 10x10 grid would cost 200 vec4s of uniform space on top of MeshPhysicalMaterial.
+const UDIM_MAX_TILES = 16;
+const UDIM_GRID = 10;
+
+// Spec R4 as written: `tile = 1000 + floor(u*10) + floor(v*10)*10`. The plan's
+// examples do not follow from it ((0.1,0.1) -> 1011, (1.5,0.2) -> 1035); the
+// formula is the pinned statement. Fallbacks, in order: the cell's own tile, else
+// 1001 (Hydra's missing-tile answer) while the cell is inside the grid, else the
+// nearest loaded cell (a uv outside the grid has no tile of its own). Ties, a
+// non-finite uv and an empty set all end on 1001 or the lowest loaded tile, so
+// the answer is never NaN. The GLSL copy in UDIM_HEADER must change with this.
+export function udimTileIndex(u: number, v: number, tiles: number[]): number {
+  if (tiles.length === 0) return 1001;
+  const column = Math.floor(u * UDIM_GRID);
+  const row = Math.floor(v * UDIM_GRID);
+  const inside = column >= 0 && column < UDIM_GRID && row >= 0 && row < UDIM_GRID;
+  const exact = 1000 + column + row * UDIM_GRID;
+  const hasDefault = tiles.includes(1001);
+  let best = hasDefault ? 1001 : Math.min(...tiles);
+  // 1001 stands for every missing cell, so no non-exact tile may beat it.
+  let bestDistance = inside && hasDefault ? 0.5 : Infinity;
+  for (const tile of tiles) {
+    if (inside && tile === exact) return tile;
+    const distance = Math.max(
+      Math.abs(((tile - 1000) % UDIM_GRID) - column),
+      Math.abs(Math.floor((tile - 1000) / UDIM_GRID) - row),
+    );
+    if (distance < bestDistance) {
+      best = tile;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+// GLSL mirror of udimTileIndex plus the layer lookup: `usdbeeUdimCells` holds
+// each layer's (column, row) and `usdbeeUdimHas1001` tells the loop whether a
+// non-exact tile may beat the 1001 fallback (0.5 stands for "only an exact
+// match wins"). `vMapUv` is already SRT-transformed by three's mapTransform, so
+// the cell comes straight from the transformed uv — the same values the
+// single-texture path samples, only in atlas coordinates.
+const UDIM_HEADER = /* glsl */ `
+uniform sampler2DArray usdbeeUdimAtlas;
+uniform int usdbeeUdimCount;
+uniform int usdbeeUdimHas1001;
+uniform int usdbeeUdimFallback;
+uniform vec2 usdbeeUdimCells[ ${UDIM_MAX_TILES} ];
+uniform int usdbeeUdimLayers[ ${UDIM_MAX_TILES} ];
+
+int usdbeeUdimLayer( vec2 uv ) {
+	vec2 cell = floor( uv * ${UDIM_GRID}.0 );
+	float exact = 1000.0 + cell.x + cell.y * ${UDIM_GRID}.0;
+	bool inGrid = cell.x >= 0.0 && cell.x < ${UDIM_GRID}.0 && cell.y >= 0.0 && cell.y < ${UDIM_GRID}.0;
+	int layer = usdbeeUdimFallback;
+	float bestDistance = ( inGrid && usdbeeUdimHas1001 == 1 ) ? 0.5 : 1e9;
+	for ( int i = 0; i < ${UDIM_MAX_TILES}; i ++ ) {
+		if ( i >= usdbeeUdimCount ) break;
+		vec2 tile = usdbeeUdimCells[ i ];
+		float tileDistance = ( inGrid && 1000.0 + tile.x + tile.y * ${UDIM_GRID}.0 == exact ) ? 0.0 : max( abs( tile.x - cell.x ), abs( tile.y - cell.y ) );
+		if ( tileDistance < bestDistance ) {
+			bestDistance = tileDistance;
+			layer = usdbeeUdimLayers[ i ];
+		}
+	}
+	return layer;
+}
+`;
+
+// The only fragment chunk replaced by the atlas branch. `sampler2DArray` takes a
+// vec3, so the layer rides the third coordinate, and the intra-tile uv is the
+// fractional part of the same transformed uv the cell came from.
+const UDIM_MAP_FRAGMENT = /* glsl */ `
+#ifdef USE_MAP
+	vec4 sampledDiffuseColor = texture(
+		usdbeeUdimAtlas,
+		vec3( fract( vMapUv * ${UDIM_GRID}.0 ), float( usdbeeUdimLayer( vMapUv ) ) )
+	);
+	diffuseColor *= sampledDiffuseColor;
+#endif
+`;
+
+interface AtlasSource {
+  tile: number;
+  file_path: string;
+  texture: THREE.Texture;
+}
+
+interface AtlasLayerInfo {
+  tile: number;
+  layer: number;
+}
+
+interface BuiltAtlas {
+  atlas: THREE.DataArrayTexture;
+  layers: AtlasLayerInfo[];
+}
+
+// One array texture per tile set, shared by every material that binds that set:
+// a material is created per prim, and a 4-tile 2K set is ~67 MB, so N prims on
+// one tiled skin would otherwise upload N copies. The per-material uv transform
+// lives in that material's own uniforms, so sharing costs nothing.
+const atlases = new Map<string, BuiltAtlas>();
+
+function atlasKey(tiles: UdimTile[]): string {
+  return tiles.map((tile) => `${tile.tile}:${tile.file_path}`).join("|");
+}
+
+// Called where the texture cache is cleared (a new scene load): the materials
+// that sampled these atlases are already disposed.
+export function clearUdimAtlases(): void {
+  for (const built of atlases.values()) built.atlas.dispose();
+  atlases.clear();
+}
+
+// Loads every tile, then stacks the ones that decoded into one array texture.
+// The material keeps its authored constant until this resolves and keeps it for
+// good when nothing decoded, so a tile can only ever lose its own pixels.
+function attachAtlas(
+  material: THREE.MeshPhysicalMaterial,
+  info: MaterialInfo,
+  surface: PreviewSurface,
+  input: TextureInput,
+  loadTexture: MaterialTextureLoader,
+  fallbackColor: string | null,
+): void {
+  const tiles = [...(input.udim_tiles ?? [])].sort((a, b) => a.tile - b.tile);
+  const key = atlasKey(tiles);
+  const cached = atlases.get(key);
+  if (cached) {
+    applyAtlas(material, info, surface, input, cached, fallbackColor);
+    return;
+  }
+  Promise.allSettled(tiles.map((tile) => loadTexture(tile.file_path, () => {})))
+    .then((results) => {
+      const sources: AtlasSource[] = [];
+      results.forEach((result, index) => {
+        const tile = tiles[index]!;
+        if (result.status === "fulfilled") sources.push({ ...tile, texture: result.value });
+      });
+      if (sources.length === 0) return; // every tile failed: the constant stands
+      const built = buildAtlas(sources, input);
+      if (!built) return;
+      // A tile that failed is not cached as missing: the next material would
+      // inherit the hole, and a retry is the fail-soft answer.
+      if (built.layers.length === tiles.length) atlases.set(key, built);
+      applyAtlas(material, info, surface, input, built, fallbackColor);
+    })
+    .catch(() => {});
+}
+
+// Row-major RGBA pixels of one decoded tile. Image-backed tiles (PNG/JPEG) can
+// only be read through a canvas; data-backed ones (EXR) already hold their array.
+interface TilePixels {
+  data: ArrayLike<number>;
+  width: number;
+  height: number;
+  type: THREE.TextureDataType;
+}
+
+function tilePixels(texture: THREE.Texture): TilePixels | null {
+  const image = texture.image as { data?: ArrayLike<number>; width?: number; height?: number } | null;
+  if (!image) return null;
+  const width = image.width ?? 0;
+  const height = image.height ?? 0;
+  if (width <= 0 || height <= 0) return null;
+  if (image.data && image.data.length >= width * height * 4) {
+    return { data: image.data, width, height, type: texture.type };
+  }
+  if (typeof document === "undefined") return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  try {
+    context.drawImage(image as unknown as CanvasImageSource, 0, 0);
+  } catch {
+    return null;
+  }
+  return {
+    data: context.getImageData(0, 0, width, height).data,
+    width,
+    height,
+    type: THREE.UnsignedByteType,
+  };
+}
+
+// One layer per tile that decoded at the size the first tile set. A mismatched
+// tile cannot join a fixed-size array texture, so it is dropped rather than
+// resizing the atlas under the layers already copied.
+function buildAtlas(sources: AtlasSource[], input: TextureInput): BuiltAtlas | null {
+  const kept: { source: AtlasSource; pixels: TilePixels }[] = [];
+  for (const source of sources) {
+    const pixels = tilePixels(source.texture);
+    const Target = pixels ? PIXEL_ARRAYS[pixels.type] : undefined;
+    if (!pixels || !Target) {
+      console.warn(`usdbee: udim tile ${source.tile} has no readable RGBA pixels`);
+      continue;
+    }
+    const head = kept[0]?.pixels;
+    if (head && (head.width !== pixels.width || head.height !== pixels.height || head.type !== pixels.type)) {
+      // shortcut: the first tile's layout wins for the whole atlas — a mixed-size
+      // tile set has no single array-texture depth; upgrade when a real asset
+      // ships tiles at different resolutions
+      console.warn(
+        `usdbee: udim tile ${source.tile} rejected: layout differs from tile ${kept[0]!.source.tile}`,
+      );
+      continue;
+    }
+    kept.push({ source, pixels });
+  }
+  const head = kept[0];
+  if (!head) return null;
+  const { width, height, type } = head.pixels;
+  const stride = width * height * 4;
+  const Target = PIXEL_ARRAYS[type]!;
+  const data = new Target(stride * kept.length);
+  kept.forEach((entry, layer) =>
+    copyTilePixels(entry.pixels, entry.source.texture.flipY, data, layer * stride),
+  );
+
+  const atlas = new THREE.DataArrayTexture(data, width, height, kept.length);
+  atlas.format = THREE.RGBAFormat;
+  atlas.type = type;
+  atlas.colorSpace = colorSpace(
+    input.color_space,
+    "map",
+    head.source.file_path,
+    head.source.texture.colorSpace,
+  );
+  // shortcut: no mip chain (a 3D mip pass needs GPU work), so a minified tile
+  // aliases; float and half-float tiles stay nearest because linear filtering of
+  // one needs OES_texture_float_linear
+  atlas.generateMipmaps = false;
+  atlas.minFilter = type === THREE.UnsignedByteType ? THREE.LinearFilter : THREE.NearestFilter;
+  atlas.magFilter = atlas.minFilter;
+  // shortcut: one sampler state serves every layer, so sampling clamps at a
+  // tile's edge — a per-tile wrap mode is not modelled
+  atlas.wrapS = THREE.ClampToEdgeWrapping;
+  atlas.wrapT = THREE.ClampToEdgeWrapping;
+  atlas.needsUpdate = true;
+  return { atlas, layers: kept.map((entry, layer) => ({ tile: entry.source.tile, layer })) };
+}
+
+// The types an atlas can hold: the decoders hand out bytes for images, half
+// floats for EXR (its own container) and floats for a raw float texture.
+const PIXEL_ARRAYS: Partial<
+  Record<THREE.TextureDataType, Uint8ArrayConstructor | Uint16ArrayConstructor | Float32ArrayConstructor>
+> = {
+  [THREE.UnsignedByteType]: Uint8Array,
+  [THREE.HalfFloatType]: Uint16Array,
+  [THREE.FloatType]: Float32Array,
+};
+
+// An array texture uploads as raw rows, so the row order of a `flipY` texture
+// (TextureLoader's default) has to be reversed here — the GPU flip only applies
+// to image uploads.
+function copyTilePixels(
+  pixels: TilePixels,
+  flipY: boolean,
+  target: Uint8Array | Uint16Array | Float32Array,
+  offset: number,
+): void {
+  const rowLength = pixels.width * 4;
+  for (let row = 0; row < pixels.height; row++) {
+    const from = (flipY ? pixels.height - 1 - row : row) * rowLength;
+    const to = offset + row * rowLength;
+    for (let i = 0; i < rowLength; i++) target[to + i] = pixels.data[from + i]!;
+  }
+}
+
+// The atlas is sampled by the patched chunk, so the material's map slot gets a
+// 1x1 stand-in: it exists only to compile `vMapUv` in, and its own repeat/offset/
+// rotation carry the SRT that transforms that varying — three's mapTransform
+// math, i.e. exactly what the single-texture path gets from applyUvTransform.
+function applyAtlas(
+  material: THREE.MeshPhysicalMaterial,
+  info: MaterialInfo,
+  surface: PreviewSurface,
+  input: TextureInput,
+  built: BuiltAtlas,
+  fallbackColor: string | null,
+): void {
+  const standIn = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+  standIn.colorSpace = THREE.NoColorSpace;
+  standIn.needsUpdate = true;
+  applyUvTransform(standIn, input.uv_transform);
+
+  neutralizeSlot(material, "map");
+  material.map = standIn;
+  applyValueScale(material, "map", input);
+  applyFallbackColor(material, info, surface, true, fallbackColor);
+
+  const indexed = built.layers.slice(0, UDIM_MAX_TILES);
+  const cells = new Float32Array(UDIM_MAX_TILES * 2);
+  const layers = new Int32Array(UDIM_MAX_TILES);
+  indexed.forEach((entry, i) => {
+    cells[i * 2] = (entry.tile - 1000) % UDIM_GRID;
+    cells[i * 2 + 1] = Math.floor((entry.tile - 1000) / UDIM_GRID);
+    layers[i] = entry.layer;
+  });
+  const fallback = indexed.find((entry) => entry.tile === 1001);
+  const uniforms: Record<string, THREE.IUniform> = {
+    usdbeeUdimAtlas: { value: built.atlas },
+    usdbeeUdimCount: { value: indexed.length },
+    usdbeeUdimHas1001: { value: fallback ? 1 : 0 },
+    usdbeeUdimFallback: { value: fallback?.layer ?? indexed[0]!.layer },
+    usdbeeUdimCells: { value: cells },
+    usdbeeUdimLayers: { value: layers },
+  };
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    shader.fragmentShader =
+      UDIM_HEADER + shader.fragmentShader.replace("#include <map_fragment>", UDIM_MAP_FRAGMENT);
+  };
+  material.needsUpdate = true;
 }
 
 // shortcut: "black"/"useMetadata" and unauthored wrap tokens fall back to
