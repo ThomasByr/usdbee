@@ -19,7 +19,8 @@ const exrLoader = new EXRLoader();
 const ktx2Loader = new KTX2Loader();
 
 // The transcoder is vendored from the installed three dependency into
-// public/basis/ (an npm package ships no static assets of its own).
+// static/basis/ (an npm package ships no static assets of its own), which
+// SvelteKit serves at /basis/ in dev and copies into the build output.
 ktx2Loader.setTranscoderPath("/basis/");
 
 export function isExrPath(filePath: string): boolean {
