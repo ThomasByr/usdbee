@@ -21,8 +21,8 @@ pub struct DependencyEntry {
 pub struct DependencyScan {
     pub root: PathBuf,
     pub entries: Vec<DependencyEntry>,
-    /// `true` when the layer walk met a layer format openusd cannot read and
-    /// answered from the stage's layer stack instead of the full walk.
+    /// `true` when the walk met an asset openusd cannot read: a layer format or
+    /// an asset expansion, answered from the stage's layer stack instead.
     pub degraded: bool,
 }
 
@@ -54,9 +54,13 @@ pub fn dependency_scan_from_stage(stage: &Stage, root: &Path) -> Result<Dependen
     let root_str = clean(&root.to_string_lossy());
     let deps = match compute_all_dependencies(stage, &root_str) {
         Ok(deps) => deps,
-        // The stage opened this far, so the walk only failed on a layer
-        // format openusd cannot read: answer from the layer stack.
-        Err(openusd::Error::UnsupportedFormat(_)) => return Ok(layer_stack_scan(stage, root)),
+        // The stage opened this far, so the walk only failed on an asset
+        // openusd cannot read: a layer format, or a path it cannot expand
+        // (a UDIM pattern or a clip template). Answer from the layer stack.
+        Err(
+            openusd::Error::UnsupportedFormat(_)
+            | openusd::Error::Dependency(openusd::usd_utils::DependencyError::Unsupported { .. }),
+        ) => return Ok(layer_stack_scan(stage, root)),
         Err(e) => {
             return Err(format!(
                 "Failed to compute dependencies of {}: {}",
@@ -105,11 +109,13 @@ pub fn dependency_scan_from_stage(stage: &Stage, root: &Path) -> Result<Dependen
     })
 }
 
-/// The degraded answer to a layer walk the unsupported format stopped: the
-/// stage's own layer stack, without the root layer (the full walk leaves it
-/// out too) and without the session layers (bookkeeping, not scene content).
+/// The degraded answer to a walk an unreadable asset stopped: the stage's own
+/// layer stack, without the root layer (the full walk leaves it out too) and
+/// without the session layers (bookkeeping, not scene content).
 /// shortcut: assets of healthy layers (e.g. a root-layer PNG) are not
-/// rediscovered, upgrade when openusd's format registry reads MaterialX
+/// rediscovered, and an asset expansion openusd cannot compute (UDIM pattern,
+/// clip template) hides the assets it would have found; upgrade when
+/// openusd's format registry reads MaterialX and its walk expands these paths
 /// (openusd issues #214/#215) and the full walk succeeds again.
 fn layer_stack_scan(stage: &Stage, root: &Path) -> DependencyScan {
     let root_dir = root.parent().unwrap_or(Path::new(""));

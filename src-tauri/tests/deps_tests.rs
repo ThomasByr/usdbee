@@ -5,6 +5,7 @@ mod common;
 
 use common::spawn_stage_owner;
 use usdbee_lib::parser::{scan_dependencies, DependencyScan};
+use usdbee_lib::stage::request_material_data;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -258,6 +259,65 @@ fn owner_scan_of_mtlx_scene_is_degraded() {
         "entries: {:?}",
         scan.entries
     );
+    owner
+        .state
+        .close_stage(info.stage_id)
+        .expect("the stage closes cleanly");
+}
+
+#[test]
+fn udim_pattern_degrades_the_scan() {
+    // The walk cannot expand a UDIM pattern (it lists the filesystem), so a
+    // scene authoring one must open with a degraded scan, not a failed one.
+    let scan = scan_dependencies(&fixture("udim_scene.usda"))
+        .expect("an unsupported asset expansion must not fail the scan");
+
+    assert!(scan.degraded, "the scan could not reach every asset");
+    // Accepted loss (R1): the degraded scan stops at the layer stack, and this
+    // scene is a single layer, so no texture is rediscovered.
+    assert!(
+        !scan.entries.iter().any(|e| e.key.contains(".png")),
+        "entries: {:?}",
+        scan.entries
+    );
+}
+
+#[test]
+fn owner_opens_udim_scene_and_keeps_its_materials() {
+    // The open path: a scene authoring a UDIM pattern must open in the app and
+    // stay usable, not only scan.
+    let owner = spawn_stage_owner();
+    let info = owner.open(&fixture("udim_scene.usda"));
+
+    let scan = owner
+        .state
+        .get_dependencies(info.stage_id)
+        .expect("an open stage must still report its dependencies");
+    assert!(scan.degraded);
+    for entry in &scan.entries {
+        assert!(
+            entry.node.error_msg.is_none(),
+            "{}: {:?}",
+            entry.key,
+            entry.node
+        );
+    }
+
+    // The control material's plain texture still resolves: the stage opened
+    // with its shading intact, only the asset map is short.
+    let material = request_material_data(&owner.sender(), "/World/ControlPlane")
+        .expect("the control material resolves");
+    let texture = material
+        .surface
+        .expect("the control material binds a UsdPreviewSurface")
+        .textures
+        .remove(0);
+    assert!(
+        texture.file_path.ends_with("checker.png"),
+        "the control texture resolves: {}",
+        texture.file_path
+    );
+
     owner
         .state
         .close_stage(info.stage_id)
