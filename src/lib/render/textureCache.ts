@@ -47,8 +47,11 @@ export function loadCachedTexture(
   cache.set(filePath, entry);
 
   const fail = (reason: string) => {
-    // A broken image is never served from the cache.
-    cache.delete(filePath);
+    // A broken image is never served from the cache. Only the entry that still
+    // owns the slot may leave it: a superseded decode can fail after a scene
+    // swap (`clearTextureCache`), and it must not evict the newer entry for the
+    // same file.
+    if (cache.get(filePath) === entry) cache.delete(filePath);
     notifyWaiters(entry);
     rejectDecoded(new Error(`usdbee: ${reason}: ${filePath}`));
   };

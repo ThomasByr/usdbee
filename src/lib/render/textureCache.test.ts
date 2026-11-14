@@ -120,6 +120,32 @@ describe("loadCachedTexture", () => {
     expect(a.repeat.x).toBe(4);
   });
 
+  it("does not evict the newer entry when a superseded load fails late", async () => {
+    // A scene swap clears the cache while the previous scene's decode is still
+    // in flight. That stale decode's failure must not delete the entry the new
+    // scene already owns, or the next reference decodes a third time.
+    const decodes: (() => void)[] = [];
+    const errors: (() => void)[] = [];
+    const load = vi.fn((onLoad: () => void, onError: () => void) => {
+      decodes.push(onLoad);
+      errors.push(onError);
+      return new THREE.Texture();
+    });
+
+    const stale = loadCachedTexture("/Textures/texgen_7.png", () => {}, load);
+    clearTextureCache();
+    const fresh = loadCachedTexture("/Textures/texgen_7.png", () => {}, load);
+    expect(load).toHaveBeenCalledTimes(2);
+
+    errors[0]!(); // the superseded decode errors out after the swap
+    await expect(stale).rejects.toThrow();
+    decodes[1]!();
+    await expect(fresh).resolves.toBeInstanceOf(THREE.Texture);
+
+    loadCachedTexture("/Textures/texgen_7.png", () => {}, load);
+    expect(load).toHaveBeenCalledTimes(2); // the new scene's entry survived
+  });
+
   it("drops every entry on clear so the next scene decodes again", async () => {
     const { load, decodeAll } = deferredLoader();
     const first = loadCachedTexture("/Textures/texgen_7.png", () => {}, load);

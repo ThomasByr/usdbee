@@ -136,6 +136,7 @@ describe("convertMaterial", () => {
     // Two slots share one file; the first slot's load rejects. Clones are per
     // slot, so the failure must not cost the good slot its texture.
     let calls = 0;
+    let good!: THREE.Texture;
     const material = convertMaterial(
       {
         name: "Shared",
@@ -151,9 +152,9 @@ describe("convertMaterial", () => {
       async (path) => {
         calls += 1;
         if (calls === 1) throw new Error("decode failed");
-        const texture = new THREE.Texture();
-        texture.name = path;
-        return texture;
+        good = new THREE.Texture();
+        good.name = path;
+        return good;
       },
     );
     await flush();
@@ -161,9 +162,9 @@ describe("convertMaterial", () => {
     // The failing slot keeps its authored constant.
     expect(material.roughnessMap).toBeNull();
     expect(material.roughness).toBe(0.35);
-    // The good slot keeps its clone.
-    expect(material.map).toBeInstanceOf(THREE.Texture);
-    expect(material.map).not.toBe(material.roughnessMap);
+    // The good slot keeps its own texture (clone independence is pinned in
+    // textureCache.test.ts: one decode, distinct clones, shared source).
+    expect(material.map).toBe(good);
     expect(material.color.r).toBeCloseTo(1.0, 5);
   });
 
