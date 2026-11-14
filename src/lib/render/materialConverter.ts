@@ -418,6 +418,13 @@ function tilePixels(texture: THREE.Texture): TilePixels | null {
   const width = image.width ?? 0;
   const height = image.height ?? 0;
   if (width <= 0 || height <= 0) return null;
+  // shortcut: only a raw RGBA array joins the atlas — a KTX2 tile keeps its
+  // pixels as a mipmap array, not raw RGBA, so it cannot enter a
+  // DataArrayTexture without a GPU-side transcode and a KTX2-only UDIM set
+  // falls back to the authored constant; a single-channel EXR tile
+  // (RedFormat, w*h samples) also fails the RGBA length check and drops.
+  // Upgrade when a KTX2 or single-channel UDIM asset appears — transcode the
+  // tiles to one shared RGBA format first
   if (image.data && image.data.length >= width * height * 4) {
     return { data: image.data, width, height, type: texture.type };
   }

@@ -132,7 +132,7 @@ pub struct TextureInput {
     pub value_bias: Option<[f32; 4]>,
     pub color_space: Option<String>,
     /// The sibling tiles when the file names a UDIM pattern (the `<UDIM>`
-    /// token) or one numbered tile (1001-1099), sorted by tile; None for a
+    /// token) or one numbered tile (1001-1100), sorted by tile; None for a
     /// plain texture, a pattern with no siblings, or a directory that cannot
     /// be read.
     #[serde(default)]
