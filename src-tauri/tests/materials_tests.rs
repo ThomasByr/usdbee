@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 mod common;
 
 use common::spawn_stage_owner;
-use usdbee_lib::materials::{material_info, MaterialInfo, PreviewSurface, UvTransform};
+use usdbee_lib::materials::{
+    material_info, MaterialInfo, PreviewSurface, TextureInput, UvTransform,
+};
 use usdbee_lib::stage::{open_stage, request_material_batch, request_material_data};
 
 fn fixture(name: &str) -> PathBuf {
@@ -856,4 +858,114 @@ fn unauthored_wrap_transform_and_scale_default_to_identity() {
     assert_eq!(texture.value_scale, None);
     assert_eq!(texture.value_bias, None);
     assert_eq!(texture.st_primvar, "st", "no st connection defaults to st");
+}
+
+// UDIM tessellation over udim_scene.usda: a texture input whose file names a
+// tile pattern enumerates its sibling tiles, a numbered literal enumerates the
+// same set, and everything else stays plain.
+fn only_texture(state: &common::TestOwner, path: &str) -> TextureInput {
+    let mut textures = surface_of(state, path).textures;
+    assert_eq!(textures.len(), 1, "{} has one texture input", path);
+    textures.remove(0)
+}
+
+fn tile_path(name: &str) -> PathBuf {
+    std::fs::canonicalize(fixture(name)).expect("fixture tile")
+}
+
+#[test]
+fn udim_token_pattern_serializes_every_sibling_tile() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "udim_scene.usda");
+
+    let texture = only_texture(&state, "/World/UdimPlane");
+    assert_eq!(texture.input, "diffuseColor");
+    assert_eq!(
+        texture.file_path, "./tex.<UDIM>.png",
+        "the raw spelling keeps the authored pattern"
+    );
+    let tiles = texture
+        .udim_tiles
+        .as_ref()
+        .expect("a UDIM pattern enumerates its tiles");
+    let seen: Vec<(u32, &Path)> = tiles
+        .iter()
+        .map(|tile| (tile.tile, Path::new(&tile.file_path)))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            (1001, tile_path("tex.1001.png").as_path()),
+            (1002, tile_path("tex.1002.png").as_path())
+        ],
+        "both tiles, sorted, resolved to the sibling files"
+    );
+
+    // The tiles ride the payload as authored JSON, not only as Rust fields.
+    let json = serde_json::to_value(&texture).expect("texture serializes");
+    assert_eq!(json["udim_tiles"][0]["tile"], serde_json::json!(1001));
+    assert_eq!(
+        json["udim_tiles"][1]["file_path"],
+        serde_json::json!(tiles[1].file_path),
+        "the payload carries each tile's resolved path"
+    );
+}
+
+#[test]
+fn udim_numbered_literal_enumerates_the_same_tiles_as_the_token() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "udim_scene.usda");
+
+    let token = only_texture(&state, "/World/UdimPlane");
+    let literal = only_texture(&state, "/World/LiteralPlane");
+    assert!(
+        literal.file_path.ends_with("tex.1001.png"),
+        "the literal spelling is kept verbatim: {}",
+        literal.file_path
+    );
+    let tiles = literal
+        .udim_tiles
+        .as_ref()
+        .expect("a numbered tile still enumerates the set");
+    assert_eq!(
+        literal.udim_tiles, token.udim_tiles,
+        "a literal tile in range is the same UDIM set as the token form"
+    );
+    assert_eq!(
+        tiles.iter().map(|tile| tile.tile).collect::<Vec<_>>(),
+        vec![1001, 1002]
+    );
+}
+
+#[test]
+fn plain_texture_answers_no_udim_tiles() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "udim_scene.usda");
+
+    let texture = only_texture(&state, "/World/ControlPlane");
+    assert!(
+        texture.file_path.ends_with("checker.png"),
+        "the control texture is a plain file: {}",
+        texture.file_path
+    );
+    assert_eq!(
+        texture.udim_tiles, None,
+        "a plain png is not a UDIM pattern"
+    );
+}
+
+#[test]
+fn udim_pattern_without_siblings_answers_none() {
+    let state = spawn_stage_owner();
+    open_via_owner(&state, "udim_scene.usda");
+
+    let texture = only_texture(&state, "/World/NoHitsPlane");
+    assert_eq!(
+        texture.file_path, "./absent.<UDIM>.png",
+        "the authored spelling survives a pattern with no hits"
+    );
+    assert_eq!(
+        texture.udim_tiles, None,
+        "no sibling matches: absent tiles, never an error"
+    );
 }

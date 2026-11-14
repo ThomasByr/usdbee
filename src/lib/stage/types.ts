@@ -142,9 +142,19 @@ export interface TextureInfo {
   color_space?: string | null;
 }
 
+// Rust materials.rs::UdimTile — one tile of a UDIM texture: its 4-digit tile
+// number (1001, 1002, ...) and the tile file, resolved to a frontend-fetchable
+// path.
+export interface UdimTile {
+  tile: number;
+  file_path: string;
+}
+
 // Rust materials.rs::TextureInput — one PreviewSurface input fed by a
 // UsdUVTexture. `file_path` is frontend-fetchable when the file exists,
 // else the unresolved spelling (fetch it and fall back on failure).
+// `udim_tiles` is the sibling tile set when `file_path` names a UDIM pattern
+// (the `<UDIM>` token or one numbered tile); absent otherwise.
 export interface TextureInput {
   input: string;
   file_path: string;
@@ -155,6 +165,7 @@ export interface TextureInput {
   value_scale?: number[] | null;
   value_bias?: number[] | null;
   color_space?: string | null;
+  udim_tiles?: UdimTile[] | null;
 }
 
 // Rust materials.rs::PreviewSurface — serialized UsdPreviewSurface channels.

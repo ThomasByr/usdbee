@@ -102,6 +102,15 @@ pub struct TextureInfo {
     pub color_space: Option<String>,
 }
 
+/// One tile of a UDIM texture: the 4-digit tile number (1001, 1002, ...) and
+/// the tile file, resolved to the frontend-fetchable path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct UdimTile {
+    pub tile: u32,
+    pub file_path: String,
+}
+
 /// One PreviewSurface input fed by a UsdUVTexture: the input name
 /// ("diffuseColor", "normal", ...), the frontend-fetchable file path (or
 /// the unresolved spelling when the file is missing — never an error), and
@@ -122,6 +131,12 @@ pub struct TextureInput {
     pub value_scale: Option<[f32; 4]>,
     pub value_bias: Option<[f32; 4]>,
     pub color_space: Option<String>,
+    /// The sibling tiles when the file names a UDIM pattern (the `<UDIM>`
+    /// token) or one numbered tile (1001-1099), sorted by tile; None for a
+    /// plain texture, a pattern with no siblings, or a directory that cannot
+    /// be read.
+    #[serde(default)]
+    pub udim_tiles: Option<Vec<UdimTile>>,
 }
 
 fn err(error: impl std::fmt::Display) -> String {
@@ -406,9 +421,11 @@ fn preview_surface(surface: &UsdPreviewSurface) -> Result<PreviewSurface, String
 }
 
 fn texture_input(input: &Input, texture: &UVTexture) -> Result<Option<TextureInput>, String> {
-    let Some(file_path) = texture_file(&texture.file_input())? else {
+    let file = texture.file_input();
+    let Some(file_path) = texture_file(&file)? else {
         return Ok(None);
     };
+    let udim_tiles = udim_tiles(&file, &file_path);
     Ok(Some(TextureInput {
         input: input.base_name().to_string(),
         file_path,
@@ -419,6 +436,7 @@ fn texture_input(input: &Input, texture: &UVTexture) -> Result<Option<TextureInp
         uv_transform: uv_transform(texture)?,
         value_scale: float4(&texture.scale_input())?,
         value_bias: float4(&texture.bias_input())?,
+        udim_tiles,
     }))
 }
 
@@ -435,6 +453,92 @@ fn texture_file(input: &Input) -> Result<Option<String>, String> {
         Some(Value::String(path)) => Some(path),
         _ => None,
     })
+}
+
+/// The authored placeholder for a UDIM tile number.
+const UDIM_TOKEN: &str = "<UDIM>";
+
+/// The 4-digit tile numbers a UDIM set spans.
+const UDIM_TILES: std::ops::RangeInclusive<u32> = 1001..=1099;
+
+/// A tile number: a whole 4-digit segment in range. Anything else (a plain
+/// name, a longer or shorter run, a non-numeric segment) is no tile.
+fn tile_number(segment: &str) -> Option<u32> {
+    if segment.len() != 4 {
+        return None;
+    }
+    let tile = segment.parse::<u32>().ok()?;
+    UDIM_TILES.contains(&tile).then_some(tile)
+}
+
+/// The tile pattern `name` spells, as the text before and after the tile
+/// number: the `<UDIM>` token when present (it wins wherever it sits), else a
+/// dot-separated 4-digit run in tile range. None when the name is no pattern.
+fn udim_pattern(name: &str) -> Option<(&str, &str)> {
+    if let Some(at) = name.find(UDIM_TOKEN) {
+        return Some((&name[..at], &name[at + UDIM_TOKEN.len()..]));
+    }
+    let mut start = 0;
+    for segment in name.split('.') {
+        let end = start + segment.len();
+        if tile_number(segment).is_some() {
+            return Some((&name[..start], &name[end..]));
+        }
+        start = end + 1;
+    }
+    None
+}
+
+/// The sibling tiles of a UDIM texture input, sorted by tile. The authored
+/// path's own directory is listed when it is already absolute (the resolved
+/// spelling); a relative one is anchored at the authoring layer's directory,
+/// as value resolution would anchor it.
+/// shortcut: a pattern with no readable siblings answers None, which leaves the
+/// frontend on the authored spelling exactly as a missing file does today;
+/// upgrade if an asset keeps its tiles outside the pattern's own directory
+fn udim_tiles(input: &Input, file_path: &str) -> Option<Vec<UdimTile>> {
+    let path = std::path::Path::new(file_path);
+    let (prefix, suffix) = udim_pattern(path.file_name()?.to_str()?)?;
+    let directory = udim_directory(input, path)?;
+    let mut tiles: Vec<UdimTile> = std::fs::read_dir(directory)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let middle = name.to_str()?.strip_prefix(prefix)?.strip_suffix(suffix)?;
+            let tile = tile_number(middle)?;
+            let path = entry.path();
+            let file_path = std::fs::canonicalize(&path).unwrap_or(path);
+            Some(UdimTile {
+                tile,
+                file_path: file_path.to_string_lossy().into_owned(),
+            })
+        })
+        .collect();
+    if tiles.is_empty() {
+        return None;
+    }
+    tiles.sort_by_key(|tile| tile.tile);
+    Some(tiles)
+}
+
+/// The directory a UDIM pattern's tiles live in: the file's own parent when it
+/// is absolute, else the directory of the layer that authored the asset path
+/// joined with the authored relative parent. None when that layer has no
+/// resolved location (an in-memory stage) — a fail-soft answer, never an error.
+fn udim_directory(input: &Input, path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new(""));
+    if parent.is_absolute() {
+        return Some(parent.to_path_buf());
+    }
+    let attribute = input.attribute();
+    let layer = attribute.resolve_info().ok()?.spec_site()?.layer.clone();
+    let resolved = attribute
+        .stage()
+        .layer(&layer)?
+        .resolved_path()
+        .map(std::path::PathBuf::from)?;
+    Some(resolved.parent()?.join(parent))
 }
 
 /// The primvar the texture's `inputs:st` chain reads (the primvar reader's
@@ -606,6 +710,29 @@ fn color_payload(
 mod tests {
     use super::*;
     use openusd_schemas::shade::NodeGraph;
+
+    /// Spec R7: the `<UDIM>` token wins wherever it sits, a dot-separated
+    /// 4-digit run in range is a pattern, and a plain name is none.
+    #[test]
+    fn udim_pattern_detection() {
+        assert_eq!(udim_pattern("tex.<UDIM>.png"), Some(("tex.", ".png")));
+        assert_eq!(udim_pattern("<UDIM>.png"), Some(("", ".png")));
+        assert_eq!(
+            udim_pattern("tex.1002.png"),
+            Some(("tex.", ".png")),
+            "a numbered literal is the same pattern"
+        );
+        assert_eq!(
+            udim_pattern("tex.<UDIM>.1001.png"),
+            Some(("tex.", ".1001.png"))
+        );
+        assert_eq!(udim_pattern("checker.png"), None);
+        assert_eq!(udim_pattern("tex.1100.png"), None, "out of tile range");
+        assert_eq!(udim_pattern("tex.10011.png"), None, "not a 4-digit run");
+        assert_eq!(tile_number("1001"), Some(1001));
+        assert_eq!(tile_number("1001.png"), None);
+        assert_eq!(tile_number(""), None);
+    }
 
     /// A chain past the producer walk's depth budget is refused, and the
     /// refusal drops the channel instead of failing the material (spec R3).

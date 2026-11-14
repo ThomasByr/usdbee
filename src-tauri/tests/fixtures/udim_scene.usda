@@ -1,0 +1,114 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    def Mesh "UdimPlane"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </World/Looks/Udim>
+    }
+
+    def Mesh "LiteralPlane"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </World/Looks/Literal>
+    }
+
+    def Mesh "ControlPlane"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </World/Looks/Control>
+    }
+
+    def Mesh "NoHitsPlane"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (0, 1, 0)]
+        rel material:binding = </World/Looks/NoHits>
+    }
+
+    def Scope "Looks"
+    {
+        def Material "Udim"
+        {
+            token outputs:surface.connect = </World/Looks/Udim/PreviewSurface.outputs:surface>
+
+            def Shader "Albedo"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./tex.<UDIM>.png@
+                float3 outputs:rgb
+            }
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/Looks/Udim/Albedo.outputs:rgb>
+                token outputs:surface
+            }
+        }
+
+        def Material "Literal"
+        {
+            token outputs:surface.connect = </World/Looks/Literal/PreviewSurface.outputs:surface>
+
+            def Shader "Albedo"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./tex.1001.png@
+                float3 outputs:rgb
+            }
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/Looks/Literal/Albedo.outputs:rgb>
+                token outputs:surface
+            }
+        }
+
+        def Material "Control"
+        {
+            token outputs:surface.connect = </World/Looks/Control/PreviewSurface.outputs:surface>
+
+            def Shader "Albedo"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./checker.png@
+                float3 outputs:rgb
+            }
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/Looks/Control/Albedo.outputs:rgb>
+                token outputs:surface
+            }
+        }
+
+        def Material "NoHits"
+        {
+            token outputs:surface.connect = </World/Looks/NoHits/PreviewSurface.outputs:surface>
+
+            def Shader "Albedo"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./absent.<UDIM>.png@
+                float3 outputs:rgb
+            }
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/Looks/NoHits/Albedo.outputs:rgb>
+                token outputs:surface
+            }
+        }
+    }
+}
