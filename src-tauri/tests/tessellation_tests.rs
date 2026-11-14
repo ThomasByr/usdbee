@@ -1044,6 +1044,62 @@ fn missing_order_entry_affects_only_its_own_curve() {
     );
 }
 
+#[test]
+fn nurbs_with_more_spans_than_the_sample_cap_keeps_the_control_polygon() {
+    // A 5000-point cubic curve has 4997 knot spans: more than the 4096 sample
+    // cap, and the per-span floor of one sample lets the tube grow with the
+    // span count (a 100k-span prim would ship 600k vertices). The cap bounds
+    // the whole curve, so the chords are the fallback.
+    let points = (0..5000)
+        .map(|i| {
+            // Alternating height: an interior control point is off any smooth
+            // curve, so finding one in the tube proves the fallback ran.
+            let height = if i % 2 == 0 { 0 } else { 10 };
+            format!("({i}, {height}, 0)")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    // len(knots) == len(points) + degree + 1 for a cubic (order 4) curve.
+    let knots = (0..=5003)
+        .map(|knot| knot.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let stage = open_scene(
+        &dir,
+        "huge_spans.usda",
+        &format!(
+            concat!(
+                "#usda 1.0\n\ndef Xform \"Scene\"\n{{\n",
+                "    def NurbsCurves \"Huge\"\n{{\n",
+                "        int[] curveVertexCounts = [5000]\n",
+                "        point3f[] points = [{}]\n",
+                "        int[] order = [4]\n",
+                "        double[] knots = [{}]\n",
+                "        float[] widths = [0.04]\n",
+                "    }}\n}}\n",
+            ),
+            points, knots,
+        ),
+    );
+
+    let mesh = tessellate(&stage, "/Scene/Huge").expect("an over-capped nurbs prim must render");
+    let centers = ring_centers(&mesh);
+
+    assert_eq!(
+        centers.len(),
+        2 * 4999,
+        "the control polygon's chords, not samples"
+    );
+    // f32 keeps ~7 digits: the 1001st point survives to within 1e-4.
+    assert!(
+        centers
+            .iter()
+            .any(|center| (center[0] - 1001.0).abs() < 1e-2 && (center[1] - 10.0).abs() < 1e-2),
+        "an interior control point in the tube proves the fallback"
+    );
+}
+
 fn count_geometry(nodes: &[RenderNode]) -> usize {
     nodes
         .iter()

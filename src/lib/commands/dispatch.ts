@@ -211,6 +211,21 @@ function setCamera(viewer: BridgeViewer, args: Record<string, unknown>) {
   return { ok: true, pinned: viewer.pinnedCamera !== null };
 }
 
+// Plan Review Focus 3: an authored clipping range reaches the viewer camera on
+// a look-through. The studio framing path (integrateScene) sets its own
+// near/far from the scene extent and is untouched, so this only runs here. A
+// range that cannot bound a view (zero, negative or inverted) would crash the
+// projection: the viewer keeps the near/far it had.
+function applyClippingRange(viewer: BridgeViewer, range: [number, number] | null | undefined) {
+  if (!range) return;
+  const [near, far] = range;
+  if (!(near > 0) || !(far > near)) return;
+  const camera = viewer.camera as THREE.PerspectiveCamera;
+  camera.near = near;
+  camera.far = far;
+  camera.updateProjectionMatrix();
+}
+
 // F5: frame the viewport through a stage camera. The pose math mirrors
 // lightPose (sceneIntegration): the prim transform is row-major in the USD
 // row-vector convention, so the translation is the last row and the negated
@@ -252,6 +267,7 @@ function lookThroughCamera(viewer: BridgeViewer, args: Record<string, unknown>) 
   viewer.camera.position.copy(position);
   viewer.controls.target.copy(position).addScaledVector(forward, distance);
   pinView(viewer);
+  applyClippingRange(viewer, info.clipping_range);
 
   // An orthographic camera's lens is not a vertical fov; the viewer's stays.
   const lens = info.vertical_aperture > 0 && info.focal_length > 0;

@@ -272,6 +272,44 @@ describe("look_through_camera", () => {
     expect(view.controls.target.toArray()).toEqual([10, 2, -9]);
   });
 
+  it("takes the authored clipping range onto the viewer camera", async () => {
+    const view = viewer();
+    view.stageCameras = [{ ...WIDE, clipping_range: [2, 500] }];
+    view.camera.position.set(0, 0, 10);
+
+    await dispatchCommand(view, "look_through_camera", { path: "/World/Cam_wide" });
+
+    expect((view.camera as THREE.PerspectiveCamera).near).toBe(2);
+    expect((view.camera as THREE.PerspectiveCamera).far).toBe(500);
+  });
+
+  it("keeps the viewer's own clipping when the camera authors none", async () => {
+    const view = viewer();
+    view.stageCameras = [{ ...WIDE, clipping_range: null }];
+    view.camera.position.set(0, 0, 10);
+
+    await dispatchCommand(view, "look_through_camera", { path: "/World/Cam_wide" });
+
+    expect((view.camera as THREE.PerspectiveCamera).near).toBe(0.1);
+    expect((view.camera as THREE.PerspectiveCamera).far).toBe(1000);
+  });
+
+  it.each([[[0, 500]], [[-1, 500]], [[100, 1]], [[500, 500]]])(
+    "ignores a clipping range that cannot bound a view (%j)",
+    async (range) => {
+      const view = viewer();
+      view.stageCameras = [{ ...WIDE, clipping_range: range as [number, number] }];
+      view.camera.position.set(0, 0, 10);
+
+      await dispatchCommand(view, "look_through_camera", { path: "/World/Cam_wide" });
+
+      // A zero, negative or inverted range would crash the projection: the
+      // viewer's own near/far survive it.
+      expect((view.camera as THREE.PerspectiveCamera).near).toBe(0.1);
+      expect((view.camera as THREE.PerspectiveCamera).far).toBe(1000);
+    },
+  );
+
   it("frames an orthographic camera without touching the fov", async () => {
     const view = viewer();
     view.stageCameras = [{ ...WIDE, projection: "orthographic" }];

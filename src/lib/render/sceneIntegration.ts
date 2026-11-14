@@ -496,9 +496,11 @@ export interface SceneLightSettings {
 
 // Spec R1: "auto" lights the stage from its own light prims as soon as it has
 // one, "scene" never falls back to the rig, "studio" always keeps it.
+// "auto" probes ENABLED lights only: an invisible prim emits nothing, so a
+// stage whose only light is off falls back to the rig as a user expects.
 export function sceneLightsActive(source: string, lights: LightInfo[]): boolean {
   if (source === "studio") return false;
-  return source === "scene" || lights.length > 0;
+  return source === "scene" || lights.some((light) => light.enabled);
 }
 
 // USD exposure is stops; three has no light units at all, so one global scale
@@ -547,18 +549,24 @@ function lightPose(viewer: RendererKit, info: LightInfo): LightPose | null {
   return { position, forward: forward.normalize() };
 }
 
-// Drops the dome environment and gives the studio one back; true when there was
-// one to drop.
+// Drops the dome texture; true when there was one. The environment itself is
+// the caller's: scene mode falls back to no environment, the studio path to
+// baseEnvironment.
 function releaseDome(viewer: RendererKit): boolean {
   if (!viewer.sceneEnv) return false;
   viewer.sceneEnv.dispose();
   viewer.sceneEnv = null;
   viewer.sceneEnvPath = null;
-  if (viewer.scene) {
-    viewer.scene.environment = viewer.baseEnvironment;
-    viewer.scene.environmentIntensity = 1;
-  }
   return true;
+}
+
+// Spec R1: in scene mode the environment is the authored dome or nothing. The
+// studio RoomEnvironment is fill the stage never authored, so a lightless stage
+// then renders with the light it declares: none.
+function setSceneEnvironment(viewer: RendererKit, texture: THREE.Texture | null, intensity: number) {
+  if (!viewer.scene) return;
+  viewer.scene.environment = texture;
+  viewer.scene.environmentIntensity = intensity;
 }
 
 // A textured dome lights the scene as an equirect environment. The texture is
@@ -572,10 +580,11 @@ function setDomeEnvironment(viewer: RendererKit, file: string, intensity: number
     // A second textured dome must not leak the first one's image.
     releaseDome(viewer);
     const texture = new THREE.TextureLoader().load(convertFileSrc(file), undefined, undefined, () => {
-      // Fail-soft: the stage still renders, on the studio environment. A
-      // newer dome that already won is left alone.
+      // Fail-soft: the stage still renders, on the light it authored. A newer
+      // dome that already won is left alone.
       if (viewer.sceneEnvPath !== file) return;
       releaseDome(viewer);
+      setSceneEnvironment(viewer, null, 1);
       requestShadowUpdate();
     });
     texture.mapping = THREE.EquirectangularReflectionMapping;
@@ -588,8 +597,7 @@ function setDomeEnvironment(viewer: RendererKit, file: string, intensity: number
     viewer.sceneEnvPath = file;
   }
   if (viewer.scene && viewer.sceneEnv) {
-    viewer.scene.environment = viewer.sceneEnv;
-    viewer.scene.environmentIntensity = intensity;
+    setSceneEnvironment(viewer, viewer.sceneEnv, intensity);
   }
 }
 
@@ -712,9 +720,13 @@ export function syncSceneLights(viewer: RendererKit, lights: LightInfo[], settin
   if (viewer.dirLight) viewer.dirLight.visible = false;
   applyToneExposure(viewer);
 
-  // A build with no textured dome gives the environment back to the studio one.
+  // A build with no textured dome leaves the stage with no environment: the
+  // studio one would light it from a source it never authored.
   const texturedDome = lights.some((info) => info.enabled && info.kind === "dome" && info.texture_file);
-  if (!texturedDome) releaseDome(viewer);
+  if (!texturedDome) {
+    releaseDome(viewer);
+    setSceneEnvironment(viewer, null, 1);
+  }
 
   for (const info of lights) {
     // `enabled` is the prim's computed visibility: an invisible light is off.
@@ -759,13 +771,14 @@ function restoreRig(viewer: RendererKit): boolean {
   return shown;
 }
 
-// Back to the studio rig: drop the stage lights, put the environment back and
-// show the rig again. The rig restore is unconditional — a lightless stage in
-// "scene" mode hides the rig, so an early return here left the viewport
-// permanently black as soon as the user switched back to auto or studio.
+// Back to the studio rig: drop the stage lights, put the studio environment
+// back and show the rig again. The rig and environment restores are
+// unconditional — scene mode may have left no environment at all, so an early
+// return would keep the viewport dark on the studio source.
 export function clearSceneLights(viewer: RendererKit) {
   const released = releaseSceneLights(viewer);
   const dome = releaseDome(viewer);
   const rig = restoreRig(viewer);
+  setSceneEnvironment(viewer, viewer.baseEnvironment, 1);
   if (released || dome || rig) requestShadowUpdate();
 }

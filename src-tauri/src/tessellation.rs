@@ -578,6 +578,12 @@ fn evaluate_nurbs(
     if spans.is_empty() {
         return None;
     }
+    // The cap bounds the whole curve. Past it the per-span floor of one sample
+    // would let the tube grow with the span count (a 100k-span curve ships
+    // 600k ring vertices), so a curve this dense keeps its control polygon.
+    if spans.len() > NURBS_SAMPLE_CAP {
+        return None;
+    }
     let per_span = ((NURBS_SAMPLE_CAP - 1) / spans.len()).clamp(1, NURBS_SAMPLES_PER_SPAN);
     let mut samples = Vec::with_capacity(spans.len() * per_span + 1);
     for &(start, end) in &spans {

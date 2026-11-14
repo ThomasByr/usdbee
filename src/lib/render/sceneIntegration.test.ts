@@ -1103,6 +1103,14 @@ describe("sceneLightsActive", () => {
     expect(sceneLightsActive("scene", [])).toBe(true);
     expect(sceneLightsActive("studio", [stageLight({})])).toBe(false);
   });
+
+  it("ignores lights the stage marks invisible (auto)", () => {
+    // A stage whose only light is off still lights from the studio rig: what a
+    // user expects from "auto", and the invisible prim emits nothing anyway.
+    expect(sceneLightsActive("auto", [stageLight({ enabled: false })])).toBe(false);
+    // Naming the source explicitly still forces scene mode.
+    expect(sceneLightsActive("scene", [stageLight({ enabled: false })])).toBe(true);
+  });
 });
 
 describe("syncSceneLights", () => {
@@ -1402,7 +1410,7 @@ describe("syncSceneLights", () => {
     expect(kit.sceneEnv).not.toBe(first);
   });
 
-  it("gives the environment back when the dome file cannot be read", async () => {
+  it("gives up the environment when the dome file cannot be read", async () => {
     stubImageDocument(true);
     const kit = lightKit();
     kit.baseEnvironment = new THREE.Texture();
@@ -1410,9 +1418,58 @@ describe("syncSceneLights", () => {
     syncSceneLights(kit, [stageLight({ kind: "dome", texture_file: "/tex/missing.png" })], LIGHT_SETTINGS);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    // Fail-soft: the stage still renders, on the studio environment.
+    // Fail-soft: the stage still renders, but the studio IBL is not the light
+    // the stage authored — a broken dome leaves it with none.
     expect(kit.sceneEnv).toBeNull();
+    expect(kit.scene.environment).toBeNull();
+  });
+
+  it("leaves a lightless stage in scene mode with no environment", () => {
+    const kit = lightKit();
+    kit.baseEnvironment = new THREE.Texture();
+    // The studio view starts on this environment (RendererKit's setup).
+    kit.scene.environment = kit.baseEnvironment;
+
+    // Spec R1: "scene" on a stage that authors no light renders dark. The
+    // studio RoomEnvironment would be fill the stage never authored.
+    syncSceneLights(kit, [], LIGHT_SETTINGS);
+
+    expect(kit.scene.environment).toBeNull();
+  });
+
+  it("gives the studio environment back on the way out of scene mode", () => {
+    stubImageDocument();
+    const kit = lightKit();
+    kit.baseEnvironment = new THREE.Texture();
+
+    syncSceneLights(kit, [stageLight({ kind: "dome", texture_file: "/tex/checker.png" })], LIGHT_SETTINGS);
+    expect(kit.scene.environment).toBe(kit.sceneEnv);
+
+    clearSceneLights(kit);
+
     expect(kit.scene.environment).toBe(kit.baseEnvironment);
+  });
+
+  it("gives the studio environment back when scene mode authored none", () => {
+    const kit = lightKit();
+    kit.baseEnvironment = new THREE.Texture();
+
+    syncSceneLights(kit, [], LIGHT_SETTINGS);
+    expect(kit.scene.environment).toBeNull();
+
+    clearSceneLights(kit);
+
+    expect(kit.scene.environment).toBe(kit.baseEnvironment);
+  });
+
+  it("leaves the background alone in scene mode", () => {
+    const kit = lightKit();
+    const background = new THREE.Color(0x101010);
+    kit.scene.background = background;
+
+    syncSceneLights(kit, [], LIGHT_SETTINGS);
+
+    expect(kit.scene.background).toBe(background);
   });
 
   it("skips a light the stage marks invisible", () => {
