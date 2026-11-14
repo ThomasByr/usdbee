@@ -228,7 +228,12 @@ function lookThroughCamera(viewer: BridgeViewer, args: Record<string, unknown>) 
     };
   }
   const info = viewer.stageCameras.find((camera) => camera.path === path);
-  if (!info) throw new Error(`no stage camera at ${path}`);
+  if (!info) {
+    // An empty list means the cameras have not arrived yet (or the stage has
+    // none); reporting the path as missing would read as an unknown prim.
+    if (viewer.stageCameras.length === 0) throw new Error("no stage cameras loaded yet");
+    throw new Error(`no stage camera at ${path}`);
+  }
   const m = info.world_transform;
   if (!m || m.length !== 16) throw new Error(`camera ${path} has no evaluated transform`);
 

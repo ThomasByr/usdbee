@@ -256,6 +256,20 @@ describe("look_through_camera", () => {
 
     // Z-up: (10, 2, -5) stands upright to (10, -5, -2), then re-centres.
     expect(view.camera.position.toArray().map((v) => Number(v.toFixed(3)))).toEqual([10, -5, -5]);
+    // The spin applies to the look axis too: -Z becomes -Y, 10 units out.
+    expect(view.controls.target.toArray().map((v) => Number(v.toFixed(3)))).toEqual([10, -15, -5]);
+  });
+
+  it("falls back to the scene size when the framing distance is zero", async () => {
+    const view = viewer();
+    view.stageCameras = [WIDE];
+    view.sceneSize = 4;
+    // The viewer's camera starts on its own target: no distance to keep.
+    expect(view.camera.position.toArray()).toEqual(view.controls.target.toArray());
+
+    await dispatchCommand(view, "look_through_camera", { path: "/World/Cam_wide" });
+
+    expect(view.controls.target.toArray()).toEqual([10, 2, -9]);
   });
 
   it("frames an orthographic camera without touching the fov", async () => {
@@ -275,6 +289,14 @@ describe("look_through_camera", () => {
     view.stageCameras = [WIDE];
     await expect(dispatchCommand(view, "look_through_camera", { path: "/World/Nope" })).rejects.toThrow(
       "no stage camera at /World/Nope",
+    );
+  });
+
+  it("says the cameras are not loaded yet when the list is still empty", async () => {
+    const view = viewer();
+    view.stageCameras = [];
+    await expect(dispatchCommand(view, "look_through_camera", { path: "/World/Cam_wide" })).rejects.toThrow(
+      "no stage cameras loaded yet",
     );
   });
 });
