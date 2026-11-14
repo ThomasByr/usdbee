@@ -110,7 +110,7 @@ function attachSlot(
 ): void {
   loaded.wrapS = wrapMode(input.wrap_s);
   loaded.wrapT = wrapMode(input.wrap_t);
-  loaded.colorSpace = colorSpace(input.color_space, slot, input.file_path);
+  loaded.colorSpace = colorSpace(input.color_space, slot, input.file_path, loaded.colorSpace);
   // USD occlusion samples the same st UVs, i.e. the base uv set.
   if (slot === "aoMap") loaded.channel = 0;
   applyUvTransform(loaded, input.uv_transform);
@@ -228,7 +228,12 @@ function wrapMode(token: string | null | undefined): THREE.Wrapping {
 // sRGB-encoded files, data slots carry linear data. EXR is the exception: the
 // file holds scene-linear floats in every channel, so it never takes the
 // sRGB default, color slot or not.
-function colorSpace(token: string | null | undefined, slot: TextureSlot, filePath: string): THREE.ColorSpace {
+function colorSpace(
+  token: string | null | undefined,
+  slot: TextureSlot,
+  filePath: string,
+  loadedSpace: string,
+): THREE.ColorSpace {
   if (token === "raw") return THREE.NoColorSpace;
   // shortcut: an authored "sRGB" on a half-float EXR still uploads linear —
   // three's verifyColorSpace refuses sRGB for HalfFloatType (only RGBA8 gets an
@@ -236,6 +241,12 @@ function colorSpace(token: string | null | undefined, slot: TextureSlot, filePat
   // samples linear; upgrade when an EXR authored sRGB must display sRGB, or a
   // non-half-float EXR path appears
   if (token === "sRGB") return THREE.SRGBColorSpace;
+  // shortcut: a space the loader stamped wins over the per-slot default — a
+  // KTX2 header names its own primaries and transfer function, which beats the
+  // slot's guess about what the file holds; a header with unspecified
+  // primaries reads as NoColorSpace, i.e. indistinguishable from unstamped and
+  // back to the slot default. Upgrade when a ktx2 must override its own header.
+  if (loadedSpace !== THREE.NoColorSpace) return loadedSpace as THREE.ColorSpace;
   if (isExrPath(filePath)) return THREE.NoColorSpace;
   return COLOR_SLOTS.includes(slot) ? THREE.SRGBColorSpace : THREE.NoColorSpace; // unauthored "auto"
 }

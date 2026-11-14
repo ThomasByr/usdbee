@@ -682,4 +682,31 @@ describe("convertMaterial", () => {
     expect((await convert({ input: "normal" })).normalMap!.colorSpace).toBe(THREE.NoColorSpace);
     expect((await convert({ input: "roughness" })).roughnessMap!.colorSpace).toBe(THREE.NoColorSpace);
   });
+
+  it("lets a loader-stamped ktx2 color space beat the per-slot default", async () => {
+    // A KTX2 header names its own primaries and transfer function; the slot
+    // only guesses what the file holds, so the loader's stamp wins.
+    const stamped: MaterialTextureLoader = async () => {
+      const texture = new THREE.Texture();
+      texture.colorSpace = THREE.SRGBColorSpace;
+      return texture;
+    };
+    const convert = async (over: Partial<TextureInput> = {}) => {
+      const material = convertMaterial(
+        {
+          name: "Stamped",
+          surface: surface({
+            textures: [textureInput({ input: "normal", file_path: "/cache/tex/normal.ktx2", ...over })],
+          }),
+        },
+        null,
+        stamped,
+      );
+      await flush();
+      return material;
+    };
+
+    expect((await convert({})).normalMap!.colorSpace).toBe(THREE.SRGBColorSpace);
+    expect((await convert({ color_space: "raw" })).normalMap!.colorSpace).toBe(THREE.NoColorSpace);
+  });
 });

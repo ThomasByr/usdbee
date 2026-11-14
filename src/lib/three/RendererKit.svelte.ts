@@ -10,6 +10,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as frameDiag from "$lib/perf/frameDiag";
 import { initOnDemandShadows, renderWithShadowUpdate } from "$lib/three/shadowMapUpdate";
 import { nextFrameTime, shouldRenderFrame } from "$lib/three/fpsLimiter";
+import { configureTextureSupport } from "$lib/render/textureLoaders";
 import type { CameraInfo, LightInfo } from "$lib/stage/types";
 
 export class RendererKit {
@@ -114,6 +115,8 @@ export class RendererKit {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     initOnDemandShadows(this.renderer.shadowMap);
+    // KTX2 transcode targets come from this renderer's WebGL extensions.
+    configureTextureSupport(this.renderer);
 
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;

@@ -23,7 +23,7 @@ import {
   takePose,
 } from "./posePrefetch";
 import { loadCachedTexture, clearTextureCache } from "./textureCache";
-import { pickTextureLoader } from "./textureLoaders";
+import { loadTexture } from "./textureLoaders";
 import * as frameDiag from "../perf/frameDiag";
 import { requestShadowUpdate } from "../three/shadowMapUpdate";
 import {
@@ -183,12 +183,12 @@ const fetchers: SceneFetchers = {
     ),
   // F6: one decode per file — loadCachedTexture loads through the shared
   // loader on the first reference and clones for every later one. The loader
-  // is picked by extension (EXR is a data texture, not an image).
+  // is picked by extension (EXR is a data texture, not an image; KTX2 needs
+  // the GPU's transcode target).
   loadTexture: (filePath: string, onError: () => void) =>
     loadCachedTexture(filePath, onError, (onLoad, onImageError) => {
-      const url = convertFileSrc(filePath);
       try {
-        return pickTextureLoader(filePath).load(url, onLoad, undefined, onImageError);
+        return loadTexture(filePath, convertFileSrc(filePath), onLoad, onImageError);
       } catch {
         return null;
       }
