@@ -1680,6 +1680,49 @@ pub struct StageSummary {
     pub dirty_count: u32,
 }
 
+/// Users read one repeated format error per file as a failed open, and the
+/// scene did open, so unsupported-format reports collapse into one notice.
+fn group_composition_errors(errors: Vec<String>) -> Vec<String> {
+    const MARKER: &str = "no file format registered for ";
+    let mut files: Vec<String> = Vec::new();
+    for error in &errors {
+        if let Some(at) = error.rfind(MARKER) {
+            let path = error[at + MARKER.len()..].trim();
+            let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+            if !files.iter().any(|seen| seen == name) {
+                files.push(name.to_owned());
+            }
+        }
+    }
+    // A lone unreadable file keeps its own message: grouping it would add
+    // nothing and hide the path that says which file it was.
+    if files.len() < 2 {
+        return errors;
+    }
+    let mut named = files.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
+    if files.len() > 6 {
+        named.push_str(", …");
+    }
+    let notice = format!(
+        "{} files skipped (unsupported format): {}",
+        files.len(),
+        named
+    );
+    let mut grouped = Vec::with_capacity(errors.len());
+    let mut placed = false;
+    for error in errors {
+        if error.contains(MARKER) {
+            if !placed {
+                grouped.push(notice.clone());
+                placed = true;
+            }
+        } else {
+            grouped.push(error);
+        }
+    }
+    grouped
+}
+
 fn normalized_up_axis(token: &str) -> String {
     if token == "Y" || token == "Z" {
         token.to_owned()
@@ -1788,11 +1831,13 @@ pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
         time_codes_per_second: stage.time_codes_per_second(),
         start_time_code: stage.start_time_code(),
         end_time_code: stage.end_time_code(),
-        composition_errors: stage
-            .composition_errors()
-            .into_iter()
-            .map(|e| e.to_string())
-            .collect(),
+        composition_errors: group_composition_errors(
+            stage
+                .composition_errors()
+                .into_iter()
+                .map(|e| e.to_string())
+                .collect(),
+        ),
         up_axis: stage_up_axis(&stage),
     };
 
@@ -6174,5 +6219,114 @@ mod warmup_budget_tests {
             !warm_fits(&mesh, &frames, 4),
             "the mesh cache is at its entry ceiling"
         );
+    }
+}
+
+#[cfg(test)]
+mod composition_error_grouping_tests {
+    use super::group_composition_errors;
+
+    fn unsupported(path: &str) -> String {
+        format!(
+            "malformed Reference layer @{}@ at /scene/materials{{x=1}}mtlx: no file format registered for {}",
+            path, path
+        )
+    }
+
+    fn shader_ball() -> Vec<String> {
+        // The four MaterialX files the StandardShaderBall scene references, in
+        // the order the crate reports them.
+        [
+            "plastic_openpbr",
+            "gold_openpbr",
+            "glass_openpbr",
+            "bubblegum_openpbr",
+        ]
+        .iter()
+        .map(|name| {
+            unsupported(&format!(
+                "/assets/full_assets/StandardShaderBall/example_materials/{}.mtlx",
+                name
+            ))
+        })
+        .collect()
+    }
+
+    // Four per-file format errors read as a failed open, but the scene
+    // opened; one notice replaces them, in the first one's position.
+    #[test]
+    fn four_unsupported_files_collapse_into_one_notice() {
+        let mut errors = shader_ball();
+        errors.push("unresolved reference prim </missing> in @/a.usda@".to_string());
+        let grouped = group_composition_errors(errors);
+        assert_eq!(grouped.len(), 2, "{:?}", grouped);
+        assert_eq!(
+            grouped[0],
+            "4 files skipped (unsupported format): plastic_openpbr.mtlx, gold_openpbr.mtlx, glass_openpbr.mtlx, bubblegum_openpbr.mtlx"
+        );
+        assert_eq!(
+            grouped[1], "unresolved reference prim </missing> in @/a.usda@",
+            "unrelated messages stay verbatim, after the notice"
+        );
+    }
+
+    // Basenames only: four long absolute paths make the notice unreadable.
+    #[test]
+    fn notice_names_basenames_and_counts_distinct_files() {
+        let errors = vec![
+            unsupported("/deep/a.mtlx"),
+            unsupported("/deep/b.mtlx"),
+            unsupported("/deep/a.mtlx"),
+        ];
+        let grouped = group_composition_errors(errors);
+        assert_eq!(
+            grouped,
+            vec!["2 files skipped (unsupported format): a.mtlx, b.mtlx".to_string()]
+        );
+    }
+
+    // One unreadable file is worth its own message, path included.
+    #[test]
+    fn a_single_unsupported_file_stays_verbatim() {
+        let errors = vec![unsupported("/deep/only.mtlx")];
+        assert_eq!(group_composition_errors(errors.clone()), errors);
+    }
+
+    // The same file reported twice is one file, so nothing is grouped.
+    #[test]
+    fn a_file_reported_twice_is_not_grouped() {
+        let errors = vec![
+            unsupported("/deep/same.mtlx"),
+            unsupported("/deep/same.mtlx"),
+        ];
+        assert_eq!(group_composition_errors(errors.clone()), errors);
+    }
+
+    // Long lists stay readable: six names, then an ellipsis.
+    #[test]
+    fn seven_files_list_six_names_then_an_ellipsis() {
+        let errors: Vec<String> = (1..=7)
+            .map(|i| unsupported(&format!("/deep/{}.mtlx", i)))
+            .collect();
+        let grouped = group_composition_errors(errors);
+        assert_eq!(
+            grouped,
+            vec![
+                "7 files skipped (unsupported format): 1.mtlx, 2.mtlx, 3.mtlx, 4.mtlx, 5.mtlx, 6.mtlx, …"
+                    .to_string()
+            ]
+        );
+    }
+
+    // Unrelated messages keep their exact text and relative order.
+    #[test]
+    fn unrelated_messages_are_untouched_and_keep_their_order() {
+        let errors = vec![
+            "first: no such prim".to_string(),
+            "second: no file format registered for x".to_string(),
+            "third: no such layer".to_string(),
+        ];
+        let grouped = group_composition_errors(errors.clone());
+        assert_eq!(grouped, errors);
     }
 }
