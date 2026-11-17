@@ -7,6 +7,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 import SettingsTab from "./tabs/SettingsTab.svelte";
 import { DEFAULT_KEYBINDINGS, controlsState, resetKeybindings } from "$lib/state/controlsState.svelte";
+import { renderState } from "$lib/render/renderState.svelte";
 
 let instance: ReturnType<typeof mount> | null = null;
 
@@ -14,6 +15,7 @@ afterEach(() => {
   if (instance !== null) unmount(instance);
   instance = null;
   document.body.innerHTML = "";
+  renderState.hasAnimated = false;
 });
 
 function mountTab() {
@@ -69,6 +71,27 @@ describe("SettingsTab keyboard section", () => {
     expect(keyButton("nextFrame").textContent!.trim()).toBe("Arrow Right");
     expect(document.querySelector('[data-action="previousFrame"]')!.textContent).toContain("Previous Frame");
     expect(keyButton("previousFrame").textContent!.trim()).toBe("Arrow Left");
+  });
+
+  it("tags the playback bindings while the scene has no animation", async () => {
+    mountTab();
+    await tick();
+
+    for (const action of ["playPause", "nextFrame", "previousFrame"]) {
+      const tag = document.querySelector(`[data-action="${action}"] .needs-anim`);
+      expect(tag?.textContent?.trim()).toBe("needs animation");
+    }
+    expect(document.querySelector('[data-action="forward"] .needs-anim')).toBeNull();
+    // Rebindable on any scene: the recorder stays live behind the tag.
+    expect(keyButton("nextFrame").disabled).toBe(false);
+  });
+
+  it("drops the tags once an animated scene is loaded", async () => {
+    renderState.hasAnimated = true;
+    mountTab();
+    await tick();
+
+    expect(document.querySelectorAll(".needs-anim").length).toBe(0);
   });
 
   it("resets the keybindings from the Reset keyboard button", async () => {

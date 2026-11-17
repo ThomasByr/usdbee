@@ -1,6 +1,7 @@
 <script lang="ts">
   import { themeState, setThemePreference, type ThemePreference } from "$lib/state/themeState.svelte";
   import { playbackState, setTimelineUnits, type TimelineUnits } from "$lib/state/playbackState.svelte";
+  import { renderState } from "$lib/render/renderState.svelte";
   import { recentFiles } from "$lib/state/recentFiles.svelte";
   import { tabsState } from "$lib/state/tabsState.svelte";
   import { openContainingFolder } from "$lib/utils/reveal";
@@ -32,6 +33,10 @@
     gizmoScale: "Switch to Gizmo Scale",
     commandPalette: "Open the Command Palette",
   };
+
+  // These keys stay bound on any scene but only move something when the stage
+  // has animation data, so the rows say so instead of looking broken.
+  const ANIMATION_ONLY_ACTIONS = new Set(["playPause", "nextFrame", "previousFrame"]);
 
   let {
     showWireframe = $bindable(),
@@ -207,7 +212,12 @@
         data-action={action}
         style="display: flex; align-items: center; justify-content: space-between; font-size: 13px; margin-bottom: 4px;"
       >
-        <span>{KEY_LABELS[action] ?? action}</span>
+        <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+          <span>{KEY_LABELS[action] ?? action}</span>
+          {#if !renderState.hasAnimated && ANIMATION_ONLY_ACTIONS.has(action)}
+            <span class="needs-anim">needs animation</span>
+          {/if}
+        </div>
         <KeyRecorder bind:binding={keybindings[action]} onchange={saveKeybindings} />
       </div>
     {/each}
@@ -289,6 +299,11 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  .needs-anim {
     font-size: 11px;
     color: var(--text-dim);
   }
