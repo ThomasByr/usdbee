@@ -239,7 +239,7 @@
     </div>
   </div>
 
-  <div class="settings-group">
+  <div class="settings-group" id="recent-files">
     <h3>Recent Files</h3>
     {#if recentFiles.entries.length === 0}
       <p style="font-size: 12px; color: var(--text-dim);">No recent files yet.</p>

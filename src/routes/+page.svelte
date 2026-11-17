@@ -5,7 +5,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import ErrorModal from "$lib/components/ErrorModal.svelte";
   import TabBar from "$lib/components/TabBar.svelte";
   import FilesTab from "$lib/components/tabs/FilesTab.svelte";
@@ -57,6 +57,14 @@
   // Light Positioning State (bound into RenderingTab, fed to the Viewport)
   let lightAzimuth = $state<number>(45); // Degrees (-180 to 180)
   let lightElevation = $state<number>(45); // Degrees (0 to 90)
+
+  // The viewport's empty state links here: switching tabs only mounts the
+  // panel, so the scroll waits for the DOM update.
+  async function openSettingsAtRecent(): Promise<void> {
+    activeTab = "settings";
+    await tick();
+    document.getElementById("recent-files")?.scrollIntoView({ block: "start" });
+  }
 
   // The rendering tab's camera picker runs the palette's own two commands.
   function pickRenderingCamera(path: string | null) {
@@ -611,7 +619,7 @@
       bind:gizmoMode
       {lightAzimuth}
       {lightElevation}
-      onOpenSettings={() => (activeTab = "settings")}
+      onOpenSettings={() => void openSettingsAtRecent()}
     />
   </main>
 </div>
