@@ -17,6 +17,7 @@ import {
   renderState,
   snapToTimeCodes,
   snapToPlayableTime,
+  stepFrameTime,
   toAbsoluteTime,
   toPlayheadOffset,
 } from "./renderState.svelte";
@@ -1931,6 +1932,29 @@ describe("snapToTimeCodes", () => {
 
   it("passes the time through unchanged without codes", () => {
     expect(snapToTimeCodes(4.4, [])).toBe(4.4);
+  });
+});
+
+describe("stepFrameTime", () => {
+  it("steps one whole frame forward and backward from an integer time", () => {
+    expect(stepFrameTime(10, 1, 0, 100)).toBe(11);
+    expect(stepFrameTime(10, -1, 0, 100)).toBe(9);
+  });
+
+  it("lands on a new frame when the time is fractional", () => {
+    expect(stepFrameTime(10.4, 1, 0, 100)).toBe(11);
+    expect(stepFrameTime(10.4, -1, 0, 100)).toBe(10);
+  });
+
+  it("clamps to the stage range instead of wrapping", () => {
+    expect(stepFrameTime(0, -1, 0, 100)).toBe(0);
+    expect(stepFrameTime(100, 1, 0, 100)).toBe(100);
+  });
+
+  it("takes a larger signed count and respects a non-zero start", () => {
+    expect(stepFrameTime(20, 10, 0, 100)).toBe(30);
+    expect(stepFrameTime(20, -3, 0, 100)).toBe(17);
+    expect(stepFrameTime(1, -10, 1, 100)).toBe(1);
   });
 });
 

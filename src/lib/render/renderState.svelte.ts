@@ -219,6 +219,13 @@ export function snapToTimeCodes(time: number, codes: number[]): number {
 // (measured), then a jump across it.
 const CODE_HOLD_LIMIT_CODES = 3;
 
+// One manual frame step: a scrub, not a playback tick, so no code snapping.
+// floor/ceil make the first press from a fractional time land on a new frame.
+export function stepFrameTime(time: number, frames: number, start: number, end: number): number {
+  const base = frames >= 0 ? Math.floor(time) : Math.ceil(time);
+  return Math.min(Math.max(base + frames, start), end);
+}
+
 /**
  * The playback driver's query time: the nearest authored code while the
  * playhead sits in a dense run of keys, and the playhead's own time while it
