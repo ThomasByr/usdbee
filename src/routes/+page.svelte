@@ -583,6 +583,7 @@
             bind:activeCameraIndex={viewer.activeCameraIndex}
             bind:omniverseUrl
             usdCameras={viewer.usdCameras}
+            hasAnimation={viewer.hasAnimation}
             triangleCount={viewer.triangleCount}
             {saveControlPreferences}
             keysPressed={viewer.keysPressed}

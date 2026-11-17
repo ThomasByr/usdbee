@@ -1,7 +1,6 @@
 <script lang="ts">
   import { themeState, setThemePreference, type ThemePreference } from "$lib/state/themeState.svelte";
   import { playbackState, setTimelineUnits, type TimelineUnits } from "$lib/state/playbackState.svelte";
-  import { renderState } from "$lib/render/renderState.svelte";
   import { recentFiles } from "$lib/state/recentFiles.svelte";
   import { tabsState } from "$lib/state/tabsState.svelte";
   import { openContainingFolder } from "$lib/utils/reveal";
@@ -39,6 +38,7 @@
   const ANIMATION_ONLY_ACTIONS = new Set(["playPause", "nextFrame", "previousFrame"]);
 
   let {
+    hasAnimation = false,
     showWireframe = $bindable(),
     showGrid = $bindable(),
     showBoundingBox = $bindable(),
@@ -214,7 +214,7 @@
       >
         <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
           <span>{KEY_LABELS[action] ?? action}</span>
-          {#if !renderState.hasAnimated && ANIMATION_ONLY_ACTIONS.has(action)}
+          {#if !hasAnimation && ANIMATION_ONLY_ACTIONS.has(action)}
             <span class="needs-anim">needs animation</span>
           {/if}
         </div>
@@ -304,8 +304,12 @@
   }
 
   .needs-anim {
-    font-size: 11px;
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: var(--control-bg);
     color: var(--text-dim);
+    white-space: nowrap;
   }
 
   .recent-list {

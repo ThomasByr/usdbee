@@ -7,7 +7,6 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 import SettingsTab from "./tabs/SettingsTab.svelte";
 import { DEFAULT_KEYBINDINGS, controlsState, resetKeybindings } from "$lib/state/controlsState.svelte";
-import { renderState } from "$lib/render/renderState.svelte";
 
 let instance: ReturnType<typeof mount> | null = null;
 
@@ -15,10 +14,9 @@ afterEach(() => {
   if (instance !== null) unmount(instance);
   instance = null;
   document.body.innerHTML = "";
-  renderState.hasAnimated = false;
 });
 
-function mountTab() {
+function mountTab(hasAnimation = false) {
   resetKeybindings();
   instance = mount(SettingsTab, {
     target: document.body,
@@ -39,6 +37,7 @@ function mountTab() {
       omniverseUrl: "",
       usdCameras: [],
       triangleCount: 0,
+      hasAnimation,
       saveControlPreferences: () => {},
       updateOmniverseUrl: () => {},
     },
@@ -86,9 +85,8 @@ describe("SettingsTab keyboard section", () => {
     expect(keyButton("nextFrame").disabled).toBe(false);
   });
 
-  it("drops the tags once an animated scene is loaded", async () => {
-    renderState.hasAnimated = true;
-    mountTab();
+  it("drops the tags while an animated scene is loaded", async () => {
+    mountTab(true);
     await tick();
 
     expect(document.querySelectorAll(".needs-anim").length).toBe(0);
