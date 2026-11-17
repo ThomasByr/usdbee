@@ -17,12 +17,18 @@
   // Display names for the binding keys; the keys themselves stay camelCase.
   const KEY_LABELS: Record<string, string> = {
     playPause: "Play / Pause",
-    gizmoTranslate: "Gizmo Translate",
-    gizmoRotate: "Gizmo Rotate",
-    gizmoScale: "Gizmo Scale",
+    forward: "Move Forward",
+    backward: "Move Backward",
+    left: "Strafe Left",
+    right: "Strafe Right",
     turnLeft: "Turn Left",
     turnRight: "Turn Right",
-    commandPalette: "Command Palette",
+    up: "Move Up",
+    down: "Move Down",
+    gizmoTranslate: "Switch to Gizmo Translate",
+    gizmoRotate: "Switch to Gizmo Rotate",
+    gizmoScale: "Switch to Gizmo Scale",
+    commandPalette: "Open the Command Palette",
   };
 
   let {
