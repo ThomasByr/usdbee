@@ -42,9 +42,12 @@ tauri = { version = "2", features = ["test"] }
 [profile.dev]
 incremental = true # Compile your binary in smaller steps.
 
+[profile.dev.package."*"]
+opt-level = 1 # Basic optimizations, still shares monomorphized generic code across crates.
+
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.
 lto = true # Enables link-time-optimizations.
-opt-level = "s" # Prioritizes small binary size. Use `3` if you prefer speed.
+opt-level = "s" # Prioritizes small binary size. Use `2` if you prefer speed.
 panic = "abort" # Higher performance by disabling panic handlers.
 strip = true # Ensures debug symbols are removed.
