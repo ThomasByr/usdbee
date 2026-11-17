@@ -81,7 +81,7 @@
         <path d="M2 12A10 10 0 1 0 22 12 10 10 0 1 0 2 12Z"></path>
         <circle cx="12" cy="12" r="3"></circle>
       </svg>
-      <span>FOV: fov={viewer.fov}°</span>
+      <span>FOV: {viewer.fov.toFixed(2)}°</span>
     </button>
     {#if showFovSlider}
       <div class="slider-dropdown">
