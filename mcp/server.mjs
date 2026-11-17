@@ -4,7 +4,8 @@
 import { spawn as spawnChild } from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import { closeSync, openSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -18,7 +19,7 @@ const DEFAULT_PORT = 9330;
 const CALL_TIMEOUT_MS = 30_000;
 const APP_WAIT_MS = 120_000;
 const APP_POLL_MS = 250;
-const LOG_PATH = "/tmp/usdbee-mcp-dev.log";
+const LOG_PATH = join(tmpdir(), "usdbee-mcp-dev.log");
 
 const vec3 = z.array(z.number()).length(3);
 

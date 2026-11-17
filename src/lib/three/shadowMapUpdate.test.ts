@@ -91,7 +91,7 @@ describe("draw-site discipline", () => {
         if (entry.isDirectory()) walk(path);
         else if (/\.(ts|svelte)$/.test(entry.name) && !entry.name.endsWith(".test.ts")) {
           if (/\.render\s*\(/.test(readFileSync(path, "utf8"))) {
-            offenders.push(path.slice(srcRoot.length));
+            offenders.push(path.slice(srcRoot.length).replace(/\\/g, "/"));
           }
         }
       }
