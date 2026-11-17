@@ -27,6 +27,10 @@
   let cameraSelection = $derived<string>(activeCameraPath ?? "free");
   let cameraError = $state<string | null>(null);
 
+  // The scale spans five decades, so the slider works in log10: a linear track
+  // put the default 1.0 at 0.1% of its width.
+  let logLightScale = $derived(Math.log10(sceneLightScale));
+
   async function onCameraChange(event: Event) {
     const select = event.currentTarget as HTMLSelectElement;
     const value = select.value;
@@ -97,14 +101,15 @@
       </select>
     </label>
     <label style="display:flex; flex-direction:column; align-items:flex-start; gap:4px; width:100%;">
-      Scene Light Scale: {sceneLightScale.toFixed(2)}
+      Scene Light Scale: ×{sceneLightScale.toFixed(2)}
       <input
         type="range"
         class="slider"
-        min="0.01"
-        max="1000"
+        min="-2"
+        max="3"
         step="0.01"
-        bind:value={sceneLightScale}
+        value={logLightScale}
+        oninput={(e) => (sceneLightScale = 10 ** Number(e.currentTarget.value))}
         onchange={saveGraphicsPreferences}
       />
     </label>
