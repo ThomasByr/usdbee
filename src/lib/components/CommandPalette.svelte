@@ -364,7 +364,7 @@
   .palette-list,
   .palette-form {
     overflow-y: auto;
-    padding: 6px 0;
+    padding: 6px 8px;
   }
 
   .row {
@@ -372,9 +372,10 @@
     flex-direction: column;
     gap: 2px;
     width: 100%;
-    padding: 6px 16px;
+    padding: 6px 8px;
     background: transparent;
     border: none;
+    border-radius: 4px;
     text-align: left;
     color: var(--text);
     cursor: pointer;
@@ -395,25 +396,26 @@
   }
 
   .group-label {
-    padding: 10px 16px 4px;
+    padding: 10px 8px 4px;
     color: var(--text-faint);
     font-size: 11px;
     text-transform: uppercase;
   }
 
   .empty {
-    padding: 10px 16px;
+    padding: 10px 8px;
     color: var(--text-dim);
   }
 
   .form-title {
-    padding: 4px 16px 8px;
+    padding: 4px 8px 8px;
     font-weight: 600;
     color: var(--text-strong);
   }
 
   .palette-field {
-    padding: 6px 16px;
+    padding: 6px 8px;
+    border-radius: 4px;
   }
 
   .palette-field.focused {
@@ -440,6 +442,7 @@
 
   .palette-field input {
     width: 100%;
+    box-sizing: border-box;
     padding: 4px 6px;
     background: var(--input-bg-soft);
     border: 1px solid var(--input-border-soft);
@@ -479,7 +482,7 @@
   }
 
   .hint {
-    padding: 6px 16px;
+    padding: 6px 8px;
     color: var(--warning);
     font-size: 12px;
   }
