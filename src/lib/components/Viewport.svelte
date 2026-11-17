@@ -82,7 +82,7 @@
   );
   const timelineCurrent = $derived(
     formatTimeline(
-      viewer.animationProgress + startTimeCode(),
+      (viewer.frozenProgress ?? viewer.animationProgress) + startTimeCode(),
       timeCodesPerSecond,
       playbackState.timelineUnits,
     ).padStart(timelineEnd.length),
@@ -321,7 +321,7 @@
         min="0"
         max={viewer.animationDuration}
         step="0.01"
-        value={viewer.animationProgress}
+        value={viewer.frozenProgress ?? viewer.animationProgress}
         oninput={(e) => {
           viewer.animationProgress = parseFloat(e.currentTarget.value);
           void renderState.setStageTime(

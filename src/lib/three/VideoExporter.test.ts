@@ -104,6 +104,52 @@ describe("runExport canvas reads", () => {
       callbacks,
     );
 
-    expect(log).toEqual(["render", "read", "render", "read"]);
+    expect(log).toEqual(["render", "read", "render", "read", "render"]);
+  });
+
+  it("restores the starting playhead and draws once after it", async () => {
+    const log: string[] = [];
+    const context = makeContext(log);
+    context.animationProgress = 5;
+    const treads: number[] = [];
+    context.onBeforeFrame = (t: number) => {
+      treads.push(t);
+      log.push("before");
+    };
+
+    await runExport(
+      context,
+      { format: "mp4", resolution: { width: 2, height: 2 }, mp4Crop: { start: 0, end: 0.05 } },
+      callbacks,
+    );
+
+    // Two captured frames, then the restore step and its redraw.
+    expect(treads).toEqual([0, 1 / 30, 5]);
+    expect(log.slice(-2)).toEqual(["before", "render"]);
+    expect(log.filter((e) => e === "render")).toHaveLength(3);
+  });
+
+  it("restores the starting playhead on the error path too", async () => {
+    const log: string[] = [];
+    const context = makeContext(log);
+    context.animationProgress = 5;
+    const treads: number[] = [];
+    context.onBeforeFrame = (t: number) => {
+      treads.push(t);
+    };
+    (context.renderer.domElement as unknown as { toDataURL: () => string }).toDataURL = () => {
+      throw new Error("capture failed");
+    };
+    const errors: string[] = [];
+
+    await runExport(
+      context,
+      { format: "png", resolution: { width: 2, height: 2 }, timestamp: 1 },
+      { ...callbacks, onError: (msg) => errors.push(msg) },
+    );
+
+    expect(errors).toHaveLength(1);
+    expect(treads).toEqual([1, 5]);
+    expect(log.filter((e) => e === "render")).toHaveLength(2);
   });
 });

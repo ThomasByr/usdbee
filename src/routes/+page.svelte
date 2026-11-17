@@ -123,45 +123,56 @@
     exportProgress = 0;
     exportStage = "Exporting...";
 
-    await runExport(
-      {
-        renderer: viewer.renderer,
-        scene: viewer.scene!,
-        camera: viewer.camera,
-        animationDuration: viewer.animationDuration,
-        animationProgress: viewer.animationProgress,
-        // Task 6: the exporter steps USD time codes — the rate is
-        // time_codes_per_second and each frame re-fetches animated geometry
-        // through setStageTime.
-        playbackRate: stageState.stageInfo?.time_codes_per_second ?? 24,
-        onBeforeFrame: (t: number) => renderState.setStageTime(toAbsoluteTime(t, startTimeCode())),
-      },
-      detail,
-      {
-        onProgress: (stage, percent) => {
-          exportStage = stage;
-          exportProgress = percent;
-          if (
-            stage.includes("Video") ||
-            stage.includes("Frames") ||
-            stage.includes("Encoding") ||
-            stage.includes("Saving")
-          ) {
-            loadOrchestrator.loadingProgress = { stage, percent };
-          }
+    // The exporter steps the playhead for every frame; freeze what the
+    // timeline shows for the duration, then put the pre-export frame back.
+    viewer.frozenProgress = viewer.animationProgress;
+    const wasPlaying = viewer.isPlayingAnim;
+    const restoreProgress = viewer.animationProgress;
+    try {
+      await runExport(
+        {
+          renderer: viewer.renderer,
+          scene: viewer.scene!,
+          camera: viewer.camera,
+          animationDuration: viewer.animationDuration,
+          animationProgress: viewer.animationProgress,
+          // Task 6: the exporter steps USD time codes — the rate is
+          // time_codes_per_second and each frame re-fetches animated geometry
+          // through setStageTime.
+          playbackRate: stageState.stageInfo?.time_codes_per_second ?? 24,
+          onBeforeFrame: (t: number) => renderState.setStageTime(toAbsoluteTime(t, startTimeCode())),
         },
-        onComplete: () => {
-          showExportModal = false;
-          isExporting = false;
-          loadOrchestrator.loadingProgress = null;
+        detail,
+        {
+          onProgress: (stage, percent) => {
+            exportStage = stage;
+            exportProgress = percent;
+            if (
+              stage.includes("Video") ||
+              stage.includes("Frames") ||
+              stage.includes("Encoding") ||
+              stage.includes("Saving")
+            ) {
+              loadOrchestrator.loadingProgress = { stage, percent };
+            }
+          },
+          onComplete: () => {
+            showExportModal = false;
+            isExporting = false;
+            loadOrchestrator.loadingProgress = null;
+          },
+          onError: (msg) => {
+            loadOrchestrator.openErrorModal(msg);
+            isExporting = false;
+            loadOrchestrator.loadingProgress = null;
+          },
         },
-        onError: (msg) => {
-          loadOrchestrator.openErrorModal(msg);
-          isExporting = false;
-          loadOrchestrator.loadingProgress = null;
-        },
-      },
-    );
+      );
+    } finally {
+      viewer.frozenProgress = null;
+      viewer.animationProgress = restoreProgress;
+      viewer.isPlayingAnim = wasPlaying;
+    }
   }
 
   // Stage messages own their modal state (stageModal/stageModalDismissed) so

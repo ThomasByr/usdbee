@@ -59,6 +59,9 @@ export class RendererKit {
   isPlayingAnim = $state<boolean>(true);
   animationDuration = $state<number>(0);
   animationProgress = $state<number>(0);
+  // The export steps the playhead frame by frame; the timeline UI must not
+  // follow it. null = live, a number pins what the UI shows.
+  frozenProgress = $state<number | null>(null);
   isDraggingAnim = $state<boolean>(false);
 
   triangleCount = $state<number>(0);

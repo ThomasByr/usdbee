@@ -235,5 +235,11 @@ export async function runExport(
     if (onBeforeFrame) {
       await onBeforeFrame(animationProgress);
     }
+
+    // The viewport loop is parked until the modal closes: put the restored
+    // pose on the canvas now. A draw failure must not mask the export result.
+    try {
+      drawFrame();
+    } catch {}
   }
 }
