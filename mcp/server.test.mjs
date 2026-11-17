@@ -25,6 +25,7 @@ const CONTRACT = {
   play: {},
   pause: {},
   set_time: { time: "number" },
+  step_frame: { frames: "integer" },
   get_performance: {},
   box_report: {},
   reset_performance: {},

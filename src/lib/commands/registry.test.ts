@@ -41,7 +41,7 @@ describe("command registry", () => {
     }
   });
 
-  it("exposes the 18 bridge commands the MCP server registers", () => {
+  it("exposes the 19 bridge commands the MCP server registers", () => {
     const bridge = COMMANDS.filter((command) => command.mcp !== false);
     expect(bridge.map((command) => command.name)).toEqual([
       "status",
@@ -54,6 +54,7 @@ describe("command registry", () => {
       "play",
       "pause",
       "set_time",
+      "step_frame",
       "get_performance",
       "box_report",
       "reset_performance",
@@ -63,6 +64,12 @@ describe("command registry", () => {
       "close_app",
       "release_camera",
     ]);
+  });
+
+  it("carries the palette-only frame stepping commands", () => {
+    for (const name of ["next_frame", "previous_frame"]) {
+      expect(COMMANDS).toContainEqual(expect.objectContaining({ name, mcp: false, args: [] }));
+    }
   });
 
   it("carries the palette-only tab commands", () => {

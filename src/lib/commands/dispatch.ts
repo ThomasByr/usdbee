@@ -8,7 +8,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
 import * as THREE from "three";
 import { stageState } from "$lib/stage/stageState.svelte";
-import { renderState } from "$lib/render/renderState.svelte";
+import { renderState, stepFrameTime } from "$lib/render/renderState.svelte";
 import { tabsState } from "$lib/state/tabsState.svelte";
 import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
 import { authorLocalTransform } from "$lib/render/gizmoCommit.svelte";
@@ -499,6 +499,23 @@ export async function dispatchCommand(
       if (time === null) throw new Error("set_time needs a time");
       await renderState.setStageTime(time);
       return { ok: true };
+    }
+    case "step_frame":
+    case "next_frame":
+    case "previous_frame": {
+      const info = stageState.stageInfo;
+      if (!info) throw new Error("no stage loaded");
+      const frames = cmd === "next_frame" ? 1 : cmd === "previous_frame" ? -1 : numberArg(args.frames);
+      if (frames === null) throw new Error("step_frame needs frames");
+      if (viewer) viewer.isPlayingAnim = false;
+      const time = stepFrameTime(
+        renderState.time ?? info.start_time_code,
+        frames,
+        info.start_time_code,
+        info.end_time_code,
+      );
+      await renderState.setStageTime(time);
+      return { ok: true, time };
     }
     case "get_performance":
       return frameDiag.snapshot();

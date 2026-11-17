@@ -23,9 +23,16 @@ vi.mock("$lib/stage/stageState.svelte", () => {
   };
   return { stageState };
 });
-vi.mock("$lib/render/renderState.svelte", () => ({
-  renderState: { time: 5 as number | null, setStageTime: vi.fn(async () => {}) },
-}));
+vi.mock("$lib/render/renderState.svelte", async (importOriginal) => {
+  // The mock owns the playhead, like the real module: setStageTime writes it.
+  const state: { time: number | null; setStageTime: ReturnType<typeof vi.fn> } = {
+    time: 5,
+    setStageTime: vi.fn(async (time: number) => {
+      state.time = time;
+    }),
+  };
+  return { ...(await importOriginal<typeof import("$lib/render/renderState.svelte")>()), renderState: state };
+});
 vi.mock("$lib/state/tabsState.svelte", () => ({
   tabsState: {
     openTab: vi.fn(async () => {}),
@@ -41,6 +48,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { saveWindowState } from "@tauri-apps/plugin-window-state";
 import * as THREE from "three";
 import { stageState } from "$lib/stage/stageState.svelte";
+import { renderState } from "$lib/render/renderState.svelte";
 import { tabsState } from "$lib/state/tabsState.svelte";
 import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
 import { dispatchCommand, fetchManifest, type BridgeViewer } from "./dispatch";
@@ -414,6 +422,34 @@ describe("release_camera", () => {
     expect(await dispatchCommand(view, "release_camera", {})).toMatchObject({ released: false });
     expect(view.camera.position.toArray()).toEqual(pose);
     expect(view.fov).toBeCloseTo(53.13, 2);
+  });
+});
+
+describe("frame stepping", () => {
+  beforeEach(() => {
+    stageState.stageInfo = { start_time_code: 0, end_time_code: 100 } as never;
+    renderState.time = 10;
+  });
+
+  it("steps forward and back by one frame, pausing playback", async () => {
+    const view = viewer();
+    view.isPlayingAnim = true;
+
+    expect(await dispatchCommand(view, "next_frame", {})).toEqual({ ok: true, time: 11 });
+    expect(view.isPlayingAnim).toBe(false);
+    expect(await dispatchCommand(view, "previous_frame", {})).toEqual({ ok: true, time: 10 });
+  });
+
+  it("steps by a signed frame count and clamps to the stage range", async () => {
+    expect(await dispatchCommand(viewer(), "step_frame", { frames: 10 })).toEqual({ ok: true, time: 20 });
+    expect(await dispatchCommand(viewer(), "step_frame", { frames: -100 })).toEqual({ ok: true, time: 0 });
+  });
+
+  it("rejects a step with no stage or no frame count", async () => {
+    stageState.stageInfo = null;
+    await expect(dispatchCommand(viewer(), "step_frame", { frames: 1 })).rejects.toThrow("no stage loaded");
+    stageState.stageInfo = { start_time_code: 0, end_time_code: 100 } as never;
+    await expect(dispatchCommand(viewer(), "step_frame", {})).rejects.toThrow("step_frame needs frames");
   });
 });
 

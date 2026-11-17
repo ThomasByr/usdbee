@@ -89,6 +89,14 @@ export const COMMANDS = [
     args: [{ key: "time", type: "number" }],
   },
   {
+    name: "step_frame",
+    description:
+      "Move the playhead by a signed number of frames (1 = next, -1 = previous), clamped to the stage range.",
+    args: [{ key: "frames", type: "number", int: true }],
+  },
+  { name: "next_frame", description: "Step the playhead one frame forward.", mcp: false, args: [] },
+  { name: "previous_frame", description: "Step the playhead one frame backward.", mcp: false, args: [] },
+  {
     name: "get_performance",
     description: "Frame diagnostics of the render loop, verbatim snapshot.",
     args: [],
