@@ -14,6 +14,17 @@
   import Icon from "$lib/components/icons/Icon.svelte";
   import KeyRecorder from "$lib/components/KeyRecorder.svelte";
 
+  // Display names for the binding keys; the keys themselves stay camelCase.
+  const KEY_LABELS: Record<string, string> = {
+    playPause: "Play / Pause",
+    gizmoTranslate: "Gizmo Translate",
+    gizmoRotate: "Gizmo Rotate",
+    gizmoScale: "Gizmo Scale",
+    turnLeft: "Turn Left",
+    turnRight: "Turn Right",
+    commandPalette: "Command Palette",
+  };
+
   let {
     showWireframe = $bindable(),
     showGrid = $bindable(),
@@ -185,9 +196,10 @@
     </div>
     {#each Object.keys(keybindings) as action}
       <div
+        data-action={action}
         style="display: flex; align-items: center; justify-content: space-between; font-size: 13px; margin-bottom: 4px;"
       >
-        <span style="text-transform: capitalize;">{action}</span>
+        <span>{KEY_LABELS[action] ?? action}</span>
         <KeyRecorder bind:binding={keybindings[action]} onchange={saveKeybindings} />
       </div>
     {/each}

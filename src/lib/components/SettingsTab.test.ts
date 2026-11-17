@@ -43,12 +43,9 @@ function mountTab() {
   });
 }
 
-// The list order follows the binding object, so pick the row by label.
+// The list order follows the binding object, so pick the row by action key.
 function keyButton(action: string) {
-  const row = [...document.querySelectorAll("div")].find(
-    (d) => d.querySelector(".keybtn") && d.firstElementChild?.textContent?.trim() === action,
-  );
-  return row!.querySelector<HTMLButtonElement>(".keybtn")!;
+  return document.querySelector<HTMLButtonElement>(`[data-action="${action}"] .keybtn`)!;
 }
 
 describe("SettingsTab keyboard section", () => {
@@ -59,6 +56,9 @@ describe("SettingsTab keyboard section", () => {
     expect(document.querySelectorAll(".keybtn").length).toBe(Object.keys(DEFAULT_KEYBINDINGS).length);
     const labels = [...document.querySelectorAll(".reset-btn")].map((b) => b.textContent!.trim());
     expect(labels).toContain("Reset keyboard");
+    expect(document.querySelector('[data-action="playPause"] span')!.textContent!.trim()).toBe(
+      "Play / Pause",
+    );
     expect(labels).toContain("Reset controls");
   });
 
