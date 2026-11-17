@@ -78,6 +78,9 @@
   let stageModal = $state<{ notices: string[]; errors: string[] } | null>(null);
   let stageModalDismissed = $state<boolean>(false);
   let showExportModal = $state<boolean>(false);
+  // The export modal previews frames by stepping the stage time, so the
+  // playhead moves as soon as it opens. Snapshot on open, restore on close.
+  let exportView = $state<{ progress: number; playing: boolean } | null>(null);
   let showSaveModal = $state<boolean>(false);
   // Task 5: the OS close request is intercepted while any layer carries
   // unsaved edits; the modal's confirm is the only path that destroys the
@@ -116,6 +119,29 @@
     return stageState.stageInfo?.start_time_code ?? 0;
   }
 
+  // The open snapshot survives the modal's own preview steps: the close
+  // handler is the only place that puts the playhead and the freeze back.
+  function openExport() {
+    if (showExportModal) return;
+    exportView = { progress: viewer.animationProgress, playing: viewer.isPlayingAnim };
+    viewer.frozenProgress = exportView.progress;
+    showExportModal = true;
+  }
+
+  async function closeExport() {
+    const view = exportView;
+    // Clearing first makes a second call (export complete, then the modal's
+    // own close) a no-op instead of a restore of a stale playhead.
+    exportView = null;
+    showExportModal = false;
+    viewer.frozenProgress = null;
+    if (!view) return;
+    viewer.animationProgress = view.progress;
+    viewer.isPlayingAnim = view.playing;
+    // Same absolute-time step the modal's preview and the exporter use.
+    await renderState.setStageTime(toAbsoluteTime(view.progress, startTimeCode()));
+  }
+
   async function handleExport(detail: any) {
     console.log("handleExport called with", detail);
 
@@ -123,11 +149,6 @@
     exportProgress = 0;
     exportStage = "Exporting...";
 
-    // The exporter steps the playhead for every frame; freeze what the
-    // timeline shows for the duration, then put the pre-export frame back.
-    viewer.frozenProgress = viewer.animationProgress;
-    const wasPlaying = viewer.isPlayingAnim;
-    const restoreProgress = viewer.animationProgress;
     try {
       await runExport(
         {
@@ -157,7 +178,6 @@
             }
           },
           onComplete: () => {
-            showExportModal = false;
             isExporting = false;
             loadOrchestrator.loadingProgress = null;
           },
@@ -169,9 +189,9 @@
         },
       );
     } finally {
-      viewer.frozenProgress = null;
-      viewer.animationProgress = restoreProgress;
-      viewer.isPlayingAnim = wasPlaying;
+      // Success, error and throw all leave through the same restore.
+      isExporting = false;
+      void closeExport();
     }
   }
 
@@ -244,7 +264,7 @@
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "e") {
         e.preventDefault();
-        showExportModal = true;
+        openExport();
       }
       // Task 5: undo/redo. Ctrl+Z undoes; Ctrl+Shift+Z / Ctrl+Y redoes.
       // The INPUT/TEXTAREA guard above keeps text-field edits intact.
@@ -303,7 +323,7 @@
     const unlisteners = [
       listen("open-export-modal", () => {
         console.log("RECEIVED open-export-modal from Rust!");
-        showExportModal = true;
+        openExport();
       }),
       listen("open-save-dialog", () => {
         void openSaveDialog();
@@ -449,7 +469,7 @@
           </button>
           <button
             class="primary-btn"
-            onclick={() => (showExportModal = true)}
+            onclick={openExport}
             disabled={loadOrchestrator.loadingProgress !== null || loadOrchestrator.rootFile === null}
             title="Export Scene"
           >
@@ -592,7 +612,7 @@
 
 {#if showExportModal}
   <ExportModal
-    onClose={() => !isExporting && (showExportModal = false)}
+    onClose={() => !isExporting && void closeExport()}
     renderer={viewer.renderer}
     scene={viewer.scene}
     camera={viewer.camera}
