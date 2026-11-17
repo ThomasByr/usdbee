@@ -1,7 +1,7 @@
 {
   "name": "usdbee",
   "version": "0.2.6",
-  "description": "",
+  "description": "Lightweight USD viewer built with Tauri, and Three.js",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
