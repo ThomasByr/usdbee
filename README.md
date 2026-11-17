@@ -4,9 +4,10 @@
   <img src="assets/images/demo.webp" alt="USDBEE Demo" width="480" />
 </p>
 
-> Lightweight (<10 MB) USD viewer built with Rust, Tauri, Svelte, and Three.js.
+> Lightweight USD viewer built with Tauri, and Three.js.
 
 [![Rust](https://img.shields.io/badge/Rust-1.85+-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![OpenUSD](https://img.shields.io/badge/OpenUSD.rs-0.8.0-green?logo=openlayers&logoColor=white)](https://docs.rs/openusd/0.8.0/openusd/)
 [![Tauri](https://img.shields.io/badge/Tauri-2.10+-blue?logo=tauri&logoColor=white)](https://tauri.app/)
 [![Svelte](https://img.shields.io/badge/Svelte-5.50+-ff3e00?logo=svelte&logoColor=white)](https://svelte.dev/)
 [![Three.js](https://img.shields.io/badge/Three.js-0.183+-black?logo=three.js&logoColor=white)](https://threejs.org/)
@@ -15,7 +16,7 @@
 
 1. [Installation](#installation)
 2. [Usage](#usage)
-3. [Limitations](#limitations)
+3. [Notes](#notes)
 
 ## Installation
 
@@ -30,63 +31,23 @@ On MacOS, both Intel and Apple Silicon architectures are supported.
 
 ### Building from source
 
-To build USDBEE from source, make sure you have [Node.js](https://nodejs.org/) (with npm - [fnm](https://github.com/Schniz/fnm) is recommended), [Rust](https://www.rust-lang.org/tools/install) and [Tauri prerequisites](https://tauri.app/start/prerequisites/) installed.
-
-<details><summary>All-in-one setup script (Debian-based Linux)</summary>
-
-```bash
-# tauri prerequisites
-sudo apt update
-sudo apt install libwebkit2gtk-4.1-dev \
-  build-essential \
-  curl \
-  wget \
-  file \
-  libxdo-dev \
-  libssl-dev \
-  libayatana-appindicator3-dev \
-  librsvg2-dev
-# rustup
-curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
-source $HOME/.cargo/env
-# nodejs + npm (using fnm)
-cargo install fnm --locked
-eval "$(fnm env)"
-fnm install --lts
-fnm use --lts
-```
-
-</details>
-
-<details><summary>(Not so) all-in-one setup script (Windows - PowerShell)</summary>
-
-```powershell
-# Install rustup
-Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
-Start-Process -FilePath .\rustup-init.exe -ArgumentList "-y" -NoNewWindow -Wait
-Remove-Item .\rustup-init.exe
-$env:Path += ";$env:USERPROFILE\.cargo\bin"
-# Install fnm (Node.js version manager)
-cargo install fnm --locked
-$env:Path += ";$env:USERPROFILE\.cargo\bin"
-fnm install --lts
-fnm use --lts
-```
-
-</details>
+To build USDBEE from source, make sure you have [Node.js](https://nodejs.org/)
+(with npm - [fnm](https://github.com/Schniz/fnm) is recommended),
+[Rust](https://www.rust-lang.org/tools/install) and
+[Tauri prerequisites](https://tauri.app/start/prerequisites/) installed.
 
 Then, clone the repository and run the following commands in the project directory:
 
-```bash
+```sh
 npm install
-npm run tauri build
+npm run tauri build -- --no-bundle
 ```
 
-This will create the application binaries in the `src-tauri/target/release` directory. Installers are also generated in the `src-tauri/target/release/bundle` directory.
+This will create the application binary in the `src-tauri/target/release` directory.
 
 Run the application with:
 
-```bash
+```sh
 ./src-tauri/target/release/usdbee
 ```
 
@@ -98,19 +59,30 @@ or
 
 You can also run the application in development mode with:
 
-```bash
+```sh
 npm run tauri dev
 ```
 
+### Generating bundles
+
+Bundles are located in `src-tauri/target/release/bundle`. You can bundle a release target with:
+
+```sh
+npm run tauri bundle
+```
+
+or run the plain `npm run tauri build` command to build and bundle in one step.
+
 ## Usage
 
-Run the application and use <kbd><kbd>Ctrl</kbd>+<kbd>O</kbd></kbd> to load a USD file. Press <kbd><kbd>Ctrl</kbd>+<kbd>E</kbd></kbd> to export a render view of the current scene.
+Run the application and use <kbd><kbd>Ctrl</kbd>+<kbd>O</kbd></kbd> to load a USD file.
+Press <kbd><kbd>Ctrl</kbd>+<kbd>E</kbd></kbd> to export a render view of the current scene.
 
 Navigate the 3D view with your keyboard and mouse. Check the "SETTINGS" tab to customize the controls.
 
-You can try to load your own USD files. To get the file used in the demo, you can use the [Carbon Frame Bike](https://github.com/usd-wg/assets/tree/main/full_assets/CarbonFrameBike).
+To get the file used in the demo, you can use the [Carbon Frame Bike](https://github.com/usd-wg/assets/tree/main/full_assets/CarbonFrameBike).
 
-```bash
+```sh
 curl -L -o assets/CarbonFrameBike.usdz https://github.com/usd-wg/assets/raw/refs/heads/main/full_assets/CarbonFrameBike/CarbonFrameBike.usdz
 ```
 
@@ -118,45 +90,54 @@ Then open the `assets/CarbonFrameBike.usdz` file in USDBEE.
 
 ### Command line
 
-```
-usage: usdbee [-h] [-p x,y,z | --camera-position x,y,z] [-t x,y,z | --camera-target x,y,z] [FILE...]
+```txt
+usage: usdbee [-h] [-p x,y,z | --camera-position x,y,z] [-t x,y,z | --camera-target x,y,z] [-f fov | --camera-fov fov] [FILE...]
 ```
 
-Pass one or more USD files to open them as tabs on startup. `-p` / `--camera-position` sets the camera location and `-t` / `--camera-target` sets the point it looks at, in world units. Both take three numbers, written `1,2,3` or `1 2 3`. The view is pinned, so it survives a scene rebuild.
+Pass one or more USD files to open them as tabs on startup.
 
-```bash
+- `-p` / `--camera-position` sets the camera location and
+- `-t` / `--camera-target` sets the point it looks at, in world units.
+- `-f` / `--camera-fov` sets the field of view, in degrees.
+
+Both `-p` and `-t` take three numbers, written `1,2,3` or `1 2 3`.
+
+```sh
 ./usdbee scene.usda
-./usdbee -p 4,3,6 -t 0,0,0 scene.usda other.usdz
+./usdbee -p 4,3,6 -t 0,0,0 -f 90 scene.usda other.usdz
 ./usdbee --camera-position 4 3 6 scene.usda
 ```
 
-`-h` / `--help` prints the usage line. An unknown option or a malformed coordinate triple prints the usage line and exits with status 1.
-
-On Windows release builds the binary uses the GUI subsystem, so nothing attaches a console: `-h` / `--help` prints nothing and a flag error exits with status 1 silently. Opening files and the camera flags work normally; macOS, Linux and dev builds print as described above.
+> [!Warning]
+> On Windows release builds, the binary uses the GUI subsystem.
+> Nothing attaches a console: `-h` / `--help` prints nothing and a flag error exits with status 1 silently.
 
 ### Command palette
 
-<kbd><kbd>Ctrl</kbd>+<kbd>P</kbd></kbd> (<kbd><kbd>Cmd</kbd>+<kbd>P</kbd></kbd> on macOS) opens the command palette. The binding, and whether <kbd>Tab</kbd> runs the highlighted command, are set in SETTINGS under "Keybindings & Control".
+<kbd><kbd>Ctrl</kbd>+<kbd>P</kbd></kbd> (<kbd><kbd>Cmd</kbd>+<kbd>P</kbd></kbd> on macOS) opens the command palette.
+This keybinding, and whether <kbd>Tab</kbd> runs the highlighted command, are set in SETTINGS under "Keybindings & Control".
 
-The palette exposes the same commands as the MCP bridge plus the tab commands (recent, next / previous with wrap-around, swap left / right). Matches on a command name rank above matches on its description.
+## Notes
 
-Commands that take arguments open a form. Path arguments autocomplete: file paths from a directory listing, prim paths from the loaded stage. Optional fields can be left empty, and <kbd>Backspace</kbd> in an empty field returns to the command list.
+<details>
+<summary>USD files</summary>
 
-Read-only commands (status, inspect, performance reports, screenshot) show their result inside the palette instead of closing it.
+USDBEE understands `.usda`, `.usdc`, `.usd` and `.usdz` (unpacked to the temp cache on open). It renders polygon
+meshes, basis and NURBS curves, points, spheres, point instancers, variants, skinning and animation, with PNG/JPEG,
+EXR and GPU-native KTX2 textures and UDIM tiles on the diffuse slot. NURBS surfaces are not drawn, basis-compressed
+KTX2 falls back to the material colour, and `.hdr` files are not sampled.
 
-## Limitations
+Materials are UsdPreviewSurface only. MaterialX and MDL shaders are not read: a scene that references a `.mtlx` file
+still opens, and the skipped files are listed in the Stage messages dialog. UsdLux lights drive the viewport with
+Lighting source when set to Auto or Scene.
 
-[Three.js USD Composer](https://threejs.org/docs/index.html?q=USD#USDComposer) is used as the primary USD parser and renderer. It supports a subset of USD features, and some complex USD files may not render correctly, throw errors, or fail to load. The application is primarily intended for simple USD files (.usdz, .usd, .usda) containing basic geometry and materials.
+</details>
 
-Patches are implemented on a best-effort basis in [usdUtils.ts](src/lib/three/usdUtils.ts).
+<details>
+<summary>Tauri Asset Sandboxing</summary>
 
-### Note on Tauri Asset Sandboxing
+`asset://` reads current through the assetProtocol scope in `tauri.conf.json`.
+`**` covers every path except unix dot-directories (`~/.cache`, `~/.local/share`), which need their own `$LOCAL_DATA/**`-style entry.
+Extraction stays under `std::env::temp_dir()/usdbee/cache`, so it needs nothing extra.
 
-USDZ files are unpacked at runtime into the operating system's native temporary directories. To allow the Three.js `fetch` / `USDLoader` to physically read these extracted geometries, the Tauri `asset://` protocol requires explicit permission scopes.
-
-If you are modifying where files are cached (e.g., in `src-tauri/src/fetcher.rs`), ensure the target directory is whitelisted via `$TEMP/**` or `$LOCAL_DATA/**` in the `assetProtocol.scope` inside `tauri.conf.json` to prevent silent `403 Forbidden` fetches and empty 3D scenes.
-
-Read more:
-[Tauri Asset Protocol Scopes](https://v2.tauri.app/security/scope/),
-[Tauri Asset Protocol Configuration](https://v2.tauri.app/reference/config/#assetprotocol),
-[Tauri Path Variables](https://v2.tauri.app/plugin/file-system/#security)
+</details>
