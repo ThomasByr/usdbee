@@ -20,7 +20,7 @@ jobs:
           - platform: "ubuntu-24.04" # for Tauri v1 you could replace this with ubuntu-20.04.
             args: ""
           - platform: "ubuntu-24.04-arm" # Only available in public repos.
-            args: "
+            args: ""
           - platform: "windows-latest"
             args: ""
 
