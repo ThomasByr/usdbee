@@ -149,7 +149,6 @@ export const COMMANDS = [
     name: "release_camera",
     description:
       "Release a look-through camera: back to the free camera, restoring the field of view and clipping range the first pick replaced. The view stays where the controls left it; not pinned, so no error when nothing is pinned.",
-    mcp: false,
     args: [],
   },
   {
