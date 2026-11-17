@@ -283,7 +283,8 @@
       if (!e.ctrlKey && !e.metaKey && !e.altKey) {
         const key = e.key.toLowerCase();
         const kb = controlsState.keybindings;
-        if (key === kb.gizmoTranslate) gizmoMode = "translate";
+        if (key === kb.playPause) viewer.isPlayingAnim = !viewer.isPlayingAnim;
+        else if (key === kb.gizmoTranslate) gizmoMode = "translate";
         else if (key === kb.gizmoRotate) gizmoMode = "rotate";
         else if (key === kb.gizmoScale) gizmoMode = "scale";
       }

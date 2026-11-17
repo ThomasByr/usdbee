@@ -32,6 +32,10 @@ describe("controlsState keybinding defaults", () => {
     expect(DEFAULT_KEYBINDINGS.commandPalette).toBe("mod+p");
   });
 
+  it("binds play/pause to k by default", () => {
+    expect(controlsState.keybindings.playPause).toBe("k");
+  });
+
   it("reset restores the defaults without letting the state leak into them", () => {
     controlsState.keybindings.forward = "x";
     expect(DEFAULT_KEYBINDINGS.forward).toBe("z");

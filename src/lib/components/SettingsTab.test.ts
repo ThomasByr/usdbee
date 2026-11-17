@@ -43,6 +43,14 @@ function mountTab() {
   });
 }
 
+// The list order follows the binding object, so pick the row by label.
+function keyButton(action: string) {
+  const row = [...document.querySelectorAll("div")].find(
+    (d) => d.querySelector(".keybtn") && d.firstElementChild?.textContent?.trim() === action,
+  );
+  return row!.querySelector<HTMLButtonElement>(".keybtn")!;
+}
+
 describe("SettingsTab keyboard section", () => {
   it("gives every binding a recorder and both reset buttons", async () => {
     mountTab();
@@ -59,7 +67,7 @@ describe("SettingsTab keyboard section", () => {
     mountTab();
     controlsState.keybindings.forward = "x";
     await tick();
-    expect(document.querySelector(".keybtn")!.textContent!.trim()).toBe("X");
+    expect(keyButton("forward").textContent!.trim()).toBe("X");
 
     const button = [...document.querySelectorAll<HTMLButtonElement>(".reset-btn")].find(
       (b) => b.textContent!.trim() === "Reset keyboard",
@@ -68,7 +76,7 @@ describe("SettingsTab keyboard section", () => {
     await tick();
 
     expect(controlsState.keybindings.forward).toBe("z");
-    expect(document.querySelector(".keybtn")!.textContent!.trim()).toBe("Z");
+    expect(keyButton("forward").textContent!.trim()).toBe("Z");
   });
 
   it("persists a captured binding to usdbee_keybindings", async () => {
@@ -76,7 +84,7 @@ describe("SettingsTab keyboard section", () => {
     mountTab();
     await tick();
 
-    document.querySelector<HTMLButtonElement>(".keybtn")!.click();
+    keyButton("forward").click();
     await tick();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "x" }));
     await tick();

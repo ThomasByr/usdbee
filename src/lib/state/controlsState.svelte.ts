@@ -1,4 +1,5 @@
 export const DEFAULT_KEYBINDINGS = {
+  playPause: "k",
   forward: "z",
   backward: "s",
   left: "q",
