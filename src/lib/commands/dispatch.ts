@@ -34,6 +34,10 @@ export interface BridgeViewer {
   controls: { target: THREE.Vector3; update: () => void };
   fov: number;
   pinnedCamera: { position: THREE.Vector3; target: THREE.Vector3 } | null;
+  // F6: the camera prim the view is framed from (free camera = null) and the
+  // lens to restore when the pick is released.
+  pinnedCameraPath: string | null;
+  savedLens: { fov: number; near: number; far: number } | null;
   activeCameraIndex: number;
   usdCameras: THREE.Camera[];
   // F5: the stage's camera prims, as last fetched, plus the re-centring the
@@ -52,6 +56,7 @@ const NEEDS_VIEWER = new Set([
   "select_node",
   "set_camera",
   "look_through_camera",
+  "release_camera",
   "box_report",
 ]);
 const NEEDS_STAGE = new Set(["inspect_scene", "search_objects", "transform_object"]);
@@ -178,6 +183,12 @@ async function transformObject(args: Record<string, unknown>) {
 // Reapplied after every scene rebuild, so a pinned view outlives a reload.
 function pinView(viewer: BridgeViewer) {
   viewer.controls.update();
+  // Only the first pin records the lens: a second pick must not overwrite it,
+  // or releasing would land on the first camera's fov instead of the free one.
+  if (viewer.savedLens === null) {
+    const camera = viewer.camera as THREE.PerspectiveCamera;
+    viewer.savedLens = { fov: viewer.fov, near: camera.near, far: camera.far };
+  }
   viewer.pinnedCamera = {
     position: viewer.camera.position.clone(),
     target: viewer.controls.target.clone(),
@@ -267,6 +278,7 @@ function lookThroughCamera(viewer: BridgeViewer, args: Record<string, unknown>) 
   viewer.camera.position.copy(position);
   viewer.controls.target.copy(position).addScaledVector(forward, distance);
   pinView(viewer);
+  viewer.pinnedCameraPath = info.path;
   applyClippingRange(viewer, info.clipping_range);
 
   // An orthographic camera's lens is not a vertical fov; the viewer's stays.
@@ -284,6 +296,25 @@ function lookThroughCamera(viewer: BridgeViewer, args: Record<string, unknown>) 
   const fov = THREE.MathUtils.radToDeg(2 * Math.atan(info.vertical_aperture / (2 * info.focal_length)));
   applyFov(viewer, fov);
   return { ok: true, path, name: info.name, projection: info.projection, fov };
+}
+
+// F6: back to the free camera. A picker release, not an orbit: the pose stays
+// where the controls left it and only the lens the first pick replaced comes
+// back.
+function releaseCamera(viewer: BridgeViewer) {
+  viewer.pinnedCamera = null;
+  viewer.pinnedCameraPath = null;
+  const lens = viewer.savedLens;
+  viewer.savedLens = null;
+  // No saved lens: nothing to restore, and that is not an error (a second
+  // click on Free camera, or a release after an orbit).
+  if (!lens) return { ok: true, released: false, fov: viewer.fov };
+  applyFov(viewer, lens.fov);
+  const camera = viewer.camera as THREE.PerspectiveCamera;
+  camera.near = lens.near;
+  camera.far = lens.far;
+  camera.updateProjectionMatrix();
+  return { ok: true, released: true, fov: lens.fov };
 }
 
 // Cached vs precise AABB of the selected subtree, plus the meshes that
@@ -460,6 +491,8 @@ export async function dispatchCommand(
       return setCamera(view, args);
     case "look_through_camera":
       return lookThroughCamera(view, args);
+    case "release_camera":
+      return releaseCamera(view);
     case "screenshot":
       return screenshot(view);
     case "close_app":

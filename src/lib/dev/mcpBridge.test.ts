@@ -156,6 +156,8 @@ function viewer(): BridgeViewer {
     controls: { target: new THREE.Vector3(), update: vi.fn() },
     fov: 75,
     pinnedCamera: null,
+    pinnedCameraPath: null,
+    savedLens: null,
     activeCameraIndex: -1,
     usdCameras: [],
   } as unknown as BridgeViewer;

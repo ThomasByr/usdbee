@@ -17,10 +17,61 @@
     lightElevation = $bindable(),
     lightingSource = $bindable(),
     sceneLightScale = $bindable(),
+    cameras = [],
+    activeCameraPath = null,
+    pickCamera = async (_path: string | null) => {},
   } = $props<any>();
+
+  // The select shows what the viewer is framed from, never what was clicked:
+  // an orbit clears the pin, so the value falls back to the free camera.
+  let cameraSelection = $derived<string>(activeCameraPath ?? "free");
+  let cameraError = $state<string | null>(null);
+
+  async function onCameraChange(event: Event) {
+    const select = event.currentTarget as HTMLSelectElement;
+    const value = select.value;
+    cameraError = null;
+    try {
+      await pickCamera(value === "free" ? null : value);
+    } catch (e) {
+      cameraError = e instanceof Error ? e.message : String(e);
+    }
+    // A failed pick leaves the viewer on its camera: put the select back.
+    select.value = cameraSelection;
+  }
 </script>
 
 <div class="settings-panel">
+  <div class="settings-group">
+    <h3>View</h3>
+    <label style="display:flex; flex-direction:column; align-items:flex-start; gap:4px; width:100%;">
+      Camera
+      <select class="dropdown" value={cameraSelection} onchange={onCameraChange}>
+        <option value="free">Free camera</option>
+        {#each cameras as camera (camera.path)}
+          <option value={camera.path}>{camera.name || camera.path}</option>
+        {/each}
+      </select>
+    </label>
+    {#if cameraError}
+      <p style="margin:0; font-size:11px; color:var(--danger);">{cameraError}</p>
+    {/if}
+    {#if cameras.length === 0}
+      <p style="margin:0; font-size:11px; color:var(--text-muted);">This stage has no cameras.</p>
+    {/if}
+    <div
+      style="display: flex; align-items: center; justify-content: space-between; font-size: 13px; margin-top: 4px;"
+    >
+      <span>Background Color</span>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <button class="reset-btn" onclick={() => (backgroundColor = "#1e1e1e")} title="Reset Background"
+          >Reset</button
+        >
+        <input type="color" bind:value={backgroundColor} />
+      </div>
+    </div>
+  </div>
+
   <div class="settings-group">
     <h3>Performance</h3>
     <label style="display:flex; flex-direction:column; align-items:flex-start; gap:4px;">

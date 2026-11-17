@@ -65,6 +65,8 @@ function viewer(): BridgeViewer {
     controls: { target: new THREE.Vector3(), update: vi.fn() },
     fov: 75,
     pinnedCamera: null,
+    pinnedCameraPath: null,
+    savedLens: null,
     activeCameraIndex: -1,
     usdCameras: [],
     stageCameras: [],
@@ -86,7 +88,7 @@ afterEach(() => {
 });
 
 describe("without a viewport", () => {
-  it.each(["play", "pause", "screenshot", "select_node", "set_camera", "box_report"])(
+  it.each(["play", "pause", "screenshot", "select_node", "set_camera", "release_camera", "box_report"])(
     "rejects %s with the viewport message",
     async (cmd) => {
       await expect(dispatchCommand(null, cmd, {})).rejects.toThrow("no viewport available");
@@ -336,6 +338,69 @@ describe("look_through_camera", () => {
     await expect(dispatchCommand(view, "look_through_camera", { path: "/World/Cam_wide" })).rejects.toThrow(
       "no stage cameras loaded yet",
     );
+  });
+});
+
+describe("release_camera", () => {
+  const CAM: CameraInfo = {
+    path: "/World/Cam_wide",
+    name: "Cam_wide",
+    projection: "perspective",
+    focal_length: 24,
+    horizontal_aperture: 36,
+    vertical_aperture: 24,
+    clipping_range: [2, 500],
+    world_transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 2, -5, 1],
+  };
+
+  it("restores the lens and clipping the look-through replaced", async () => {
+    const view = viewer();
+    view.stageCameras = [CAM];
+    view.camera.position.set(0, 0, 10);
+    await dispatchCommand(view, "look_through_camera", { path: CAM.path });
+
+    expect(await dispatchCommand(view, "release_camera", {})).toEqual({ ok: true, released: true, fov: 75 });
+
+    const camera = view.camera as THREE.PerspectiveCamera;
+    expect(view.fov).toBe(75);
+    expect(camera.fov).toBe(75);
+    expect(camera.near).toBe(0.1);
+    expect(camera.far).toBe(1000);
+    expect(view.pinnedCamera).toBeNull();
+    expect(view.pinnedCameraPath).toBeNull();
+  });
+
+  it("keeps the lens from before the FIRST pick across a second one", async () => {
+    const view = viewer();
+    const tele: CameraInfo = { ...CAM, path: "/World/Cam_tele", name: "Cam_tele", focal_length: 200 };
+    view.stageCameras = [CAM, tele];
+    view.camera.position.set(0, 0, 10);
+    await dispatchCommand(view, "look_through_camera", { path: CAM.path });
+    await dispatchCommand(view, "look_through_camera", { path: tele.path });
+    expect(view.fov).toBeCloseTo(6.87, 2);
+
+    await dispatchCommand(view, "release_camera", {});
+
+    // Not the first camera's fov: the state before the first pick.
+    expect(view.fov).toBe(75);
+  });
+
+  it("is not an error when nothing is pinned", async () => {
+    const view = viewer();
+    expect(await dispatchCommand(view, "release_camera", {})).toEqual({ ok: true, released: false, fov: 75 });
+    expect(view.pinnedCamera).toBeNull();
+  });
+
+  it("leaves the fov alone once an orbit cleared the saved lens", async () => {
+    const view = viewer();
+    view.stageCameras = [CAM];
+    view.camera.position.set(0, 0, 10);
+    await dispatchCommand(view, "look_through_camera", { path: CAM.path });
+    // What the controls' start listener does when the user takes the view back.
+    view.savedLens = null;
+
+    expect(await dispatchCommand(view, "release_camera", {})).toMatchObject({ released: false });
+    expect(view.fov).toBeCloseTo(53.13, 2);
   });
 });
 

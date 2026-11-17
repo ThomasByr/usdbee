@@ -43,6 +43,7 @@
   import Viewport from "$lib/components/Viewport.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import { paletteState } from "$lib/state/commandPaletteState.svelte";
+  import { dispatchCommand } from "$lib/commands/dispatch";
   import { matchesBinding } from "$lib/utils/keys";
   import { RendererKit } from "$lib/three/RendererKit.svelte";
 
@@ -56,6 +57,16 @@
   // Light Positioning State (bound into RenderingTab, fed to the Viewport)
   let lightAzimuth = $state<number>(45); // Degrees (-180 to 180)
   let lightElevation = $state<number>(45); // Degrees (0 to 90)
+
+  // The rendering tab's camera picker runs the palette's own two commands.
+  function pickRenderingCamera(path: string | null) {
+    return dispatchCommand(
+      viewer,
+      path === null ? "release_camera" : "look_through_camera",
+      path === null ? {} : { path },
+      { guarded: true },
+    );
+  }
 
   // The active gizmo mode: the Viewport/Toolbar toggle it, the keyboard
   // shortcuts below write it. Owned here so the shortcuts stay page glue.
@@ -508,6 +519,9 @@
             bind:lightElevation
             bind:lightingSource={viewerSettings.lightingSource}
             bind:sceneLightScale={viewerSettings.sceneLightScale}
+            cameras={viewer.stageCameras}
+            activeCameraPath={viewer.pinnedCamera ? viewer.pinnedCameraPath : null}
+            pickCamera={pickRenderingCamera}
           />
         {/if}
         {#if activeTab === "layers"}
@@ -526,7 +540,6 @@
             bind:mouseButtonMiddle={controlsState.mouseButtonMiddle}
             bind:mouseButtonRight={controlsState.mouseButtonRight}
             bind:keybindings={controlsState.keybindings}
-            bind:backgroundColor={viewer.backgroundColor}
             bind:activeCameraIndex={viewer.activeCameraIndex}
             bind:omniverseUrl
             usdCameras={viewer.usdCameras}

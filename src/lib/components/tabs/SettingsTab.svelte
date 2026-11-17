@@ -26,7 +26,6 @@
     mouseButtonMiddle = $bindable(),
     mouseButtonRight = $bindable(),
     keybindings = $bindable(),
-    backgroundColor = $bindable(),
     activeCameraIndex = $bindable(),
     omniverseUrl = $bindable(),
     usdCameras,
@@ -196,18 +195,6 @@
 
   <div class="settings-group">
     <h3>Environment</h3>
-    <div
-      style="display: flex; align-items: center; justify-content: space-between; font-size: 13px; margin-bottom: 8px;"
-    >
-      <span>Background Color</span>
-      <div style="display: flex; gap: 8px; align-items: center;">
-        <button class="reset-btn" onclick={() => (backgroundColor = "#1e1e1e")} title="Reset Background"
-          >Reset</button
-        >
-        <input type="color" bind:value={backgroundColor} />
-      </div>
-    </div>
-
     <div style="font-size: 13px; margin-top: 12px; margin-bottom: 6px;">
       <span>Omniverse Nucleus URL</span>
     </div>
