@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
   import { tabsState } from "$lib/state/tabsState.svelte";
+  import { recentFiles } from "$lib/state/recentFiles.svelte";
   import { stageState } from "$lib/stage/stageState.svelte";
   import {
     renderState,
@@ -47,11 +48,13 @@
     lightAzimuth,
     lightElevation,
     gizmoMode = $bindable(),
+    onOpenSettings,
   }: {
     viewer: RendererKit;
     lightAzimuth: number;
     lightElevation: number;
     gizmoMode: GizmoMode;
+    onOpenSettings?: () => void;
   } = $props();
 
   let canvas: HTMLCanvasElement;
@@ -342,6 +345,19 @@
     <div class="empty-state">
       <p>No USD scene loaded.</p>
       <p class="subtitle">Use File > Open USD... or the button to begin.</p>
+      {#if recentFiles.entries.length > 0}
+        {@const recent = recentFiles.entries[0]}
+        <button
+          class="primary-btn recent-open"
+          title={recent.path}
+          onclick={() => void tabsState.openTab(recent.path)}>Open {recent.name}</button
+        >
+        <p class="subtitle">
+          A fuller history is in the <button class="settings-link" onclick={() => onOpenSettings?.()}
+            >Settings</button
+          > tab.
+        </p>
+      {/if}
     </div>
   {:else if loadOrchestrator.loadingProgress}
     <div class="loading-overlay">
@@ -448,5 +464,19 @@
   .empty-state .subtitle {
     font-size: 13px;
     color: var(--text-muted);
+  }
+
+  .recent-open {
+    margin: 12px auto 0;
+  }
+
+  .settings-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
   }
 </style>

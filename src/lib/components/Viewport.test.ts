@@ -89,7 +89,7 @@ vi.mock("$lib/state/loadOrchestrator.svelte", () => ({
   },
 }));
 vi.mock("$lib/state/tabsState.svelte", () => ({
-  tabsState: { init: () => Promise.resolve(() => {}) },
+  tabsState: { init: () => Promise.resolve(() => {}), openTab: vi.fn() },
 }));
 vi.mock("$lib/state/editState.svelte", () => ({
   editState: { canUndo: false, canRedo: false },
@@ -99,6 +99,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("$lib/commands/launch", () => ({ consumeLaunchOptions: vi.fn(async () => {}) }));
 
 import Viewport from "./Viewport.svelte";
+import { tabsState } from "$lib/state/tabsState.svelte";
+import { recentFiles } from "$lib/state/recentFiles.svelte";
 import { SvelteMap } from "svelte/reactivity";
 import type { RendererKit } from "$lib/three/RendererKit.svelte";
 
@@ -174,6 +176,38 @@ describe("timeline bar", () => {
 
     expect(slider().value).toBe("40");
     expect(readout()).toContain("40");
+  });
+});
+
+describe("empty state recent file", () => {
+  const mountEmpty = (props: Record<string, unknown> = {}) =>
+    mount(Viewport, {
+      target: document.body,
+      props: { viewer: viewer(), lightAzimuth: 0, lightElevation: 0, gizmoMode: "translate", ...props },
+    });
+
+  it("offers the most recent file and links to Settings", async () => {
+    recentFiles.add("/scene/bike.usda");
+    const onOpenSettings = vi.fn();
+    instance = mountEmpty({ onOpenSettings });
+    await tick();
+
+    const open = document.querySelector<HTMLButtonElement>(".empty-state .primary-btn")!;
+    expect(open.textContent).toContain("bike.usda");
+    open.click();
+    expect(tabsState.openTab).toHaveBeenCalledWith("/scene/bike.usda");
+
+    document.querySelector<HTMLButtonElement>(".empty-state .settings-link")!.click();
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    recentFiles.clear();
+  });
+
+  it("shows no recent button without history", async () => {
+    instance = mountEmpty();
+    await tick();
+
+    expect(document.querySelector(".empty-state .primary-btn")).toBeNull();
+    expect(document.querySelector(".empty-state .settings-link")).toBeNull();
   });
 });
 

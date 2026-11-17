@@ -606,7 +606,13 @@
     ></div>
 
     <!-- Main View for 3D Render Surface -->
-    <Viewport {viewer} bind:gizmoMode {lightAzimuth} {lightElevation} />
+    <Viewport
+      {viewer}
+      bind:gizmoMode
+      {lightAzimuth}
+      {lightElevation}
+      onOpenSettings={() => (activeTab = "settings")}
+    />
   </main>
 </div>
 
