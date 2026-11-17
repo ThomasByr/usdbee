@@ -5,6 +5,18 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { renderWithShadowUpdate } from "$lib/three/shadowMapUpdate";
 
+// Video frames: the drawing buffer is not preserved, so the copy must land in
+// the render's task. A 2D canvas owns the copy, so the JPEG encode can be
+// async and no base64 round-trip is needed.
+async function captureJpeg(source: HTMLCanvasElement, scratch: HTMLCanvasElement): Promise<Uint8Array> {
+  const ctx = scratch.getContext("2d");
+  if (!ctx) throw new Error("2D canvas unavailable for frame capture");
+  ctx.drawImage(source, 0, 0);
+  const blob = await new Promise<Blob | null>((resolve) => scratch.toBlob(resolve, "image/jpeg", 0.95));
+  if (!blob) throw new Error("Frame JPEG encoding failed");
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
 export interface ExportContext {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
@@ -48,8 +60,8 @@ export async function runExport(
   const { onProgress, onComplete, onError } = callbacks;
 
   // Save current state
-  const oldWidth = renderer.domElement.width;
-  const oldHeight = renderer.domElement.height;
+  const oldSize = renderer.getSize(new THREE.Vector2());
+  const oldPixelRatio = renderer.getPixelRatio();
   const oldAspect = camera.aspect;
   const oldClearAlpha = renderer.getClearAlpha();
   const oldClearColor = renderer.getClearColor(new THREE.Color());
@@ -60,6 +72,9 @@ export async function runExport(
 
   // Apply export settings
   renderer.domElement.style.display = "none";
+  // One exported pixel is one canvas pixel: the device ratio would otherwise
+  // render (and encode) dpr² times the requested pixel count.
+  renderer.setPixelRatio(1);
   renderer.setSize(resolution.width, resolution.height, false);
   camera.aspect = resolution.width / resolution.height;
   camera.updateProjectionMatrix();
@@ -147,25 +162,24 @@ export async function runExport(
 
         onProgress("Rendering Frames...", 0);
 
+        const scratch = document.createElement("canvas");
+        scratch.width = resolution.width;
+        scratch.height = resolution.height;
+
         for (let i = 0; i < totalFrames; i++) {
           const t = startTime + (i * rate) / fps;
           if (onBeforeFrame) await onBeforeFrame(t);
           drawFrame();
 
-          const dataUrl = renderer.domElement.toDataURL("image/jpeg", 0.95);
-          const base64Data = dataUrl.split(",")[1];
-          const raw = window.atob(base64Data);
-          const array = new Uint8Array(new ArrayBuffer(raw.length));
-          for (let j = 0; j < raw.length; j++) array[j] = raw.charCodeAt(j);
+          // The awaited blob encode turns the event loop, so the Svelte UI
+          // still updates without an extra per-frame timeout.
+          const array = await captureJpeg(renderer.domElement, scratch);
 
           const frameName = `frame_${i.toString().padStart(5, "0")}.jpg`;
           await ffmpeg.writeFile(frameName, array);
 
           const pct = Math.floor((i / totalFrames) * 50);
           onProgress("Rendering Frames...", pct);
-
-          // Yield cleanly to Svelte UI
-          await new Promise((r) => setTimeout(r, 0));
         }
 
         onProgress("Encoding MP4...", 50);
@@ -177,6 +191,8 @@ export async function runExport(
           "frame_%05d.jpg",
           "-c:v",
           "libx264",
+          "-preset",
+          "veryfast",
           "-pix_fmt",
           "yuv420p",
         ];
@@ -216,12 +232,13 @@ export async function runExport(
     onError(e.toString());
   } finally {
     // Restore
+    renderer.setPixelRatio(oldPixelRatio);
     const canvasParent = renderer.domElement.parentElement;
     if (canvasParent) {
       renderer.setSize(canvasParent.clientWidth, canvasParent.clientHeight, false);
       camera.aspect = canvasParent.clientWidth / canvasParent.clientHeight;
     } else {
-      renderer.setSize(oldWidth, oldHeight, false);
+      renderer.setSize(oldSize.x, oldSize.y, false);
       camera.aspect = oldAspect;
     }
     camera.updateProjectionMatrix();

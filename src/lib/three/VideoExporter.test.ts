@@ -1,6 +1,7 @@
 // Canvas-read discipline: the drawing buffer is not preserved, so every
-// toDataURL must be preceded by a render in the same JS task or the capture
-// reads a cleared buffer.
+// capture must be preceded by a render in the same JS task or the capture
+// reads a cleared buffer. Stills read a data URL; video frames are copied into
+// a 2D canvas and JPEG-encoded asynchronously.
 
 // @vitest-environment happy-dom
 import * as THREE from "three";
@@ -24,9 +25,22 @@ vi.mock("@ffmpeg/ffmpeg", () => ({
 
 import { runExport, type ExportContext } from "./VideoExporter";
 
+// happy-dom has no 2D context and no asynchronous JPEG encode: stand in for the
+// copy (which is the canvas read) and hand back a tiny blob.
+let captureLog: string[] = [];
+Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
+  configurable: true,
+  value: () => ({ drawImage: () => captureLog.push("read") }),
+});
+Object.defineProperty(HTMLCanvasElement.prototype, "toBlob", {
+  configurable: true,
+  value: (callback: BlobCallback) => callback(new Blob([new Uint8Array([1, 2, 3])])),
+});
+
 // `log` is the read/write order across one export; a read without an
 // immediately preceding render is the bug this pins.
 function makeContext(log: string[]): ExportContext {
+  captureLog = log;
   const renderer = {
     domElement: {
       style: {},
@@ -42,6 +56,9 @@ function makeContext(log: string[]): ExportContext {
       log.push("render");
     },
     setSize: () => {},
+    getSize: (target: THREE.Vector2) => target.set(1, 1),
+    getPixelRatio: () => 1,
+    setPixelRatio: () => {},
     getClearAlpha: () => 1,
     getClearColor: (target: THREE.Color) => target,
     setClearAlpha: () => {},
@@ -105,6 +122,26 @@ describe("runExport canvas reads", () => {
     );
 
     expect(log).toEqual(["render", "read", "render", "read", "render"]);
+  });
+
+  it("draws one exported pixel per canvas pixel and restores the ratio", async () => {
+    const log: string[] = [];
+    const context = makeContext(log);
+    const ratios: number[] = [];
+    const renderer = context.renderer as unknown as {
+      getPixelRatio: () => number;
+      setPixelRatio: (ratio: number) => void;
+    };
+    renderer.getPixelRatio = () => 2;
+    renderer.setPixelRatio = (ratio: number) => ratios.push(ratio);
+
+    await runExport(
+      context,
+      { format: "mp4", resolution: { width: 2, height: 2 }, mp4Crop: { start: 0, end: 0.05 } },
+      callbacks,
+    );
+
+    expect(ratios).toEqual([1, 2]);
   });
 
   it("restores the starting playhead and draws once after it", async () => {
