@@ -35,9 +35,15 @@ export interface BridgeViewer {
   fov: number;
   pinnedCamera: { position: THREE.Vector3; target: THREE.Vector3 } | null;
   // F6: the camera prim the view is framed from (free camera = null) and the
-  // lens to restore when the pick is released.
+  // whole view to restore when the pick is released.
   pinnedCameraPath: string | null;
-  savedLens: { fov: number; near: number; far: number } | null;
+  savedView: {
+    position: THREE.Vector3;
+    target: THREE.Vector3;
+    fov: number;
+    near: number;
+    far: number;
+  } | null;
   activeCameraIndex: number;
   usdCameras: THREE.Camera[];
   // F5: the stage's camera prims, as last fetched, plus the re-centring the
@@ -180,15 +186,24 @@ async function transformObject(args: Record<string, unknown>) {
   return { ok: true };
 }
 
+// The view to come back to on release: recorded on the first pin only, so a
+// second pick still releases to the state before the first one. Called before
+// the pose moves, or it would record the picked view instead.
+function saveView(viewer: BridgeViewer) {
+  if (viewer.savedView !== null) return;
+  const camera = viewer.camera as THREE.PerspectiveCamera;
+  viewer.savedView = {
+    position: viewer.camera.position.clone(),
+    target: viewer.controls.target.clone(),
+    fov: viewer.fov,
+    near: camera.near,
+    far: camera.far,
+  };
+}
+
 // Reapplied after every scene rebuild, so a pinned view outlives a reload.
 function pinView(viewer: BridgeViewer) {
   viewer.controls.update();
-  // Only the first pin records the lens: a second pick must not overwrite it,
-  // or releasing would land on the first camera's fov instead of the free one.
-  if (viewer.savedLens === null) {
-    const camera = viewer.camera as THREE.PerspectiveCamera;
-    viewer.savedLens = { fov: viewer.fov, near: camera.near, far: camera.far };
-  }
   viewer.pinnedCamera = {
     position: viewer.camera.position.clone(),
     target: viewer.controls.target.clone(),
@@ -211,6 +226,7 @@ function setCamera(viewer: BridgeViewer, args: Record<string, unknown>) {
   if (!position && !target && fov === null) throw new Error("set_camera needs position, target or fov");
 
   if (position || target) {
+    saveView(viewer);
     if (position) viewer.camera.position.fromArray(position);
     if (target) viewer.controls.target.fromArray(target);
     viewer.controls.update();
@@ -275,6 +291,7 @@ function lookThroughCamera(viewer: BridgeViewer, args: Record<string, unknown>) 
   // Keep the framing distance the viewer had, so the look-through lands with
   // comparable context instead of on the camera prim itself.
   const distance = viewer.controls.target.distanceTo(viewer.camera.position) || viewer.sceneSize;
+  saveView(viewer);
   viewer.camera.position.copy(position);
   viewer.controls.target.copy(position).addScaledVector(forward, distance);
   pinView(viewer);
@@ -298,23 +315,26 @@ function lookThroughCamera(viewer: BridgeViewer, args: Record<string, unknown>) 
   return { ok: true, path, name: info.name, projection: info.projection, fov };
 }
 
-// F6: back to the free camera. A picker release, not an orbit: the pose stays
-// where the controls left it and only the lens the first pick replaced comes
-// back.
+// F6: back to the free camera. A picker release puts the whole view back where
+// it was before the first pick: pose, target and lens.
 function releaseCamera(viewer: BridgeViewer) {
   viewer.pinnedCamera = null;
   viewer.pinnedCameraPath = null;
-  const lens = viewer.savedLens;
-  viewer.savedLens = null;
-  // No saved lens: nothing to restore, and that is not an error (a second
+  const saved = viewer.savedView;
+  viewer.savedView = null;
+  // No saved view: nothing to restore, and that is not an error (a second
   // click on Free camera, or a release after an orbit).
-  if (!lens) return { ok: true, released: false, fov: viewer.fov };
-  applyFov(viewer, lens.fov);
+  if (!saved) return { ok: true, released: false, fov: viewer.fov };
+  viewer.camera.position.copy(saved.position);
+  viewer.controls.target.copy(saved.target);
+  viewer.fov = saved.fov;
   const camera = viewer.camera as THREE.PerspectiveCamera;
-  camera.near = lens.near;
-  camera.far = lens.far;
+  camera.fov = saved.fov;
+  camera.near = saved.near;
+  camera.far = saved.far;
   camera.updateProjectionMatrix();
-  return { ok: true, released: true, fov: lens.fov };
+  viewer.controls.update();
+  return { ok: true, released: true, fov: saved.fov };
 }
 
 // Cached vs precise AABB of the selected subtree, plus the meshes that

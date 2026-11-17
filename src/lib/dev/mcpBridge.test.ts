@@ -157,7 +157,7 @@ function viewer(): BridgeViewer {
     fov: 75,
     pinnedCamera: null,
     pinnedCameraPath: null,
-    savedLens: null,
+    savedView: null,
     activeCameraIndex: -1,
     usdCameras: [],
   } as unknown as BridgeViewer;

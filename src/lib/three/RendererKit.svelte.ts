@@ -70,10 +70,16 @@ export class RendererKit {
   // F6: the camera prim the view was framed from, so the rendering tab's picker
   // can show it; null means free camera.
   pinnedCameraPath = $state.raw<string | null>(null);
-  // The lens the viewer had before the first look-through: releasing a stage
+  // The view the viewer had before the first look-through: releasing a stage
   // camera restores it. Kept across a second pick, so release returns to the
-  // lens from before the first one.
-  savedLens = $state.raw<{ fov: number; near: number; far: number } | null>(null);
+  // view from before the first one.
+  savedView = $state.raw<{
+    position: THREE.Vector3;
+    target: THREE.Vector3;
+    fov: number;
+    near: number;
+    far: number;
+  } | null>(null);
 
   // Settings
   showWireframe = $state(false);
@@ -138,11 +144,11 @@ export class RendererKit {
     this.controls.dampingFactor = 0.05;
     // Any user camera move ends a bridge pin, or the next rebuild snaps the
     // view back to where the palette put it. A deliberate orbit also owns the
-    // lens from then on, so a later release keeps the fov the user sees.
+    // view from then on, so a later release keeps the pose the user sees.
     this.controls.addEventListener("start", () => {
       this.pinnedCamera = null;
       this.pinnedCameraPath = null;
-      this.savedLens = null;
+      this.savedView = null;
     });
 
     // Patch controls to handle invert settings reactively
@@ -389,11 +395,11 @@ export class RendererKit {
     if (!this.camera || !this.controls || !this.sceneSize) return;
 
     // Reset View wins over a bridge pin: otherwise the next rebuild puts the
-    // pinned view back and reset() restores it. The saved lens goes too, or a
-    // later release would undo the reset's fov.
+    // pinned view back and reset() restores it. The saved view goes too, or a
+    // later release would undo the reset's framing.
     this.pinnedCamera = null;
     this.pinnedCameraPath = null;
-    this.savedLens = null;
+    this.savedView = null;
     this.controls.reset();
 
     this.fov = 75;
