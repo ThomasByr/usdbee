@@ -468,71 +468,83 @@ fn curve_tessellates_to_six_sided_tube_with_pinned_counts() {
 
     let mesh = tessellate(&stage, "/Scene/Stroke").expect("curve should tessellate");
 
-    // Controller-pinned counts: per curve of n=4 points, segments = 3, and
-    // per segment a 6-sided ring pair (12 vertices, rings duplicated per
-    // segment, not shared between neighbors) of 6 quads = 36 indices.
-    assert_eq!(mesh.positions.len(), 3 * 12);
+    // Controller-pinned counts: one curve of n=4 points welds to 4 rings of
+    // CURVE_SIDES vertices, and 3 quad blocks of 6 quads = 36 indices each.
+    assert_eq!(mesh.positions.len(), 4 * 6);
     assert_eq!(mesh.indices.len(), 3 * 36);
-    assert_eq!(mesh.normals.as_ref().map(|n| n.len()), Some(36));
+    assert_eq!(mesh.normals.as_ref().map(|n| n.len()), Some(24));
 
     // Curves render as tubes with no authored primvars: uvs/colors stay
     // unset (the bound material color applies, controller resolution).
     assert!(mesh.uvs.is_none());
     assert!(mesh.colors.is_none());
 
-    // Winding pinned: first quad of segment 0, and the last indices close
-    // the tube back on k=0.
+    // Winding pinned: first quad of the first block, and the last indices
+    // close the last ring pair back on k=0.
     assert_eq!(&mesh.indices[0..6], &[0u32, 1, 7, 0, 7, 6]);
-    assert_eq!(&mesh.indices[105..108], &[29u32, 30, 35]);
+    assert_eq!(&mesh.indices[105..108], &[17u32, 18, 23]);
 }
 
 #[test]
-fn curve_ring_vertices_sit_at_radius_from_their_segment_endpoints() {
+fn curve_ring_vertices_sit_at_radius_from_their_points() {
     let (stage, _info) = tessellate_stage("curves_points.usda");
 
     let mesh = tessellate(&stage, "/Scene/Stroke").expect("curve should tessellate");
 
     let radius = 0.1f32;
-    let centers = [
+    let points = [
         [0.0f32, 0.0, 0.0],
         [1.0, 0.0, 0.0],
         [1.0, 1.0, 0.0],
         [2.0, 1.0, 0.0],
     ];
     for (vertex, position) in mesh.positions.iter().enumerate() {
-        let segment = vertex / 12;
-        let within = vertex % 12;
-        // Ring A centers the segment's start point, ring B its end point.
-        let center = centers[segment + within / 6];
+        let ring = vertex / 6;
+        let center = points[ring];
+        // The chain's ends keep the plain radius; the two 90 degree corners
+        // are mitred out by 1 / cos(45 deg).
+        let scale = if ring == 0 || ring == points.len() - 1 {
+            1.0
+        } else {
+            2f32.sqrt()
+        };
         let distance_sq = (position[0] - center[0]).powi(2)
             + (position[1] - center[1]).powi(2)
             + (position[2] - center[2]).powi(2);
         assert!(
-            (distance_sq - radius * radius).abs() < 1e-6,
+            (distance_sq - radius * radius * scale * scale).abs() < 1e-6,
             "vertex {vertex} at {position:?} is not at radius from center {center:?}"
         );
     }
 }
 
 #[test]
-fn bent_curve_second_ring_is_perpendicular_to_its_own_tangent() {
+fn bent_curve_rings_are_perpendicular_to_their_frame_tangent() {
     let (stage, _info) = tessellate_stage("curves_points.usda");
     let mesh = tessellate(&stage, "/Scene/Stroke").expect("curve should tessellate");
 
-    // Segment 1 runs from (1,0,0) to (1,1,0): its tangent is +Y, unlike
-    // segment 0's +X. Every radial vector in both of its rings must be
-    // perpendicular to +Y.
-    for (offset, position) in mesh.positions[12..24].iter().enumerate() {
-        let center = if offset < 6 {
-            [1.0, 0.0, 0.0]
-        } else {
-            [1.0, 1.0, 0.0]
-        };
-        let radial_y = position[1] - center[1];
+    // Ring 1 sits on the corner (1,0,0) between +X and +Y, so its plane
+    // faces the bisector (1,1,0)/sqrt(2): every radial vector is
+    // perpendicular to it, and none follows a single segment's tangent.
+    let corner = [1.0f32, 0.0, 0.0];
+    for position in &mesh.positions[6..12] {
+        let radial = [
+            position[0] - corner[0],
+            position[1] - corner[1],
+            position[2] - corner[2],
+        ];
+        let along = (radial[0] + radial[1]) / 2f32.sqrt();
         assert!(
-            radial_y.abs() < 1e-6,
-            "ring vertex {:?} uses the wrong frame",
-            position
+            along.abs() < 1e-5,
+            "ring vertex {position:?} uses the wrong frame (offset {along})"
+        );
+    }
+    // The chain's first ring faces the first segment's tangent +X.
+    for position in &mesh.positions[0..6] {
+        let radial_x = position[0];
+        assert!(
+            radial_x.abs() < 1e-6,
+            "ring vertex {position:?} uses the wrong frame"
         );
     }
 }
@@ -555,6 +567,137 @@ fn curve_tube_normals_are_radial_and_unit_length() {
     for normal in &normals {
         let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
         assert!((length - 1.0).abs() < 1e-5, "not unit: {normal:?}");
+    }
+}
+
+/// Tube cross-section sides (the tessellator's CURVE_SIDES).
+const SIDES: usize = 6;
+
+/// A 3-point polyline: the smallest tube with an interior (welded) ring.
+fn three_point_scene() -> (tempfile::TempDir, openusd::usd::Stage) {
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let stage = open_scene(
+        &dir,
+        "three_points.usda",
+        concat!(
+            "#usda 1.0\n\n",
+            "def Xform \"Scene\"\n{\n",
+            "    def BasisCurves \"Bend\"\n{\n",
+            "        int[] curveVertexCounts = [3]\n",
+            "        point3f[] points = [(0, 0, 0), (0.5, 0, 0), (0.5, 0.5, 0)]\n",
+            "        float[] widths = [0.2]\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+    (dir, stage)
+}
+
+#[test]
+fn curve_tube_welds_one_ring_per_point() {
+    let (_dir, stage) = three_point_scene();
+
+    let mesh = tessellate(&stage, "/Scene/Bend").expect("curve should tessellate");
+
+    // One 6-vertex ring per point: 3 rings, and 2 quad blocks of 6 quads.
+    assert_eq!(mesh.positions.len(), 3 * SIDES);
+    assert_eq!(mesh.indices.len(), 2 * SIDES * 6);
+    assert_eq!(mesh.normals.as_ref().map(|n| n.len()), Some(3 * SIDES));
+    assert_eq!(
+        mesh.indices.iter().max(),
+        Some(&((3 * SIDES - 1) as u32)),
+        "no vertex is duplicated per segment"
+    );
+}
+
+#[test]
+fn curve_tube_shares_the_corner_ring_between_adjacent_quads() {
+    let (_dir, stage) = three_point_scene();
+
+    let mesh = tessellate(&stage, "/Scene/Bend").expect("curve should tessellate");
+
+    let (first, second) = mesh.indices.split_at(SIDES * 6);
+    assert_eq!(
+        first.iter().max(),
+        Some(&((2 * SIDES - 1) as u32)),
+        "the first quad block ends on the corner ring"
+    );
+    assert_eq!(
+        second.iter().min(),
+        Some(&(SIDES as u32)),
+        "the second quad block starts on the same corner ring"
+    );
+}
+
+#[test]
+fn curve_tube_miters_a_ninety_degree_corner_into_one_ring() {
+    // Stroke turns 90 degrees at (1, 0, 0). The corner is ONE ring in the
+    // plane perpendicular to the bisector (1, 1, 0)/sqrt(2), grown by the
+    // miter factor 1/cos(45 deg) so both segments meet on it.
+    let (stage, _info) = tessellate_stage("curves_points.usda");
+    let mesh = tessellate(&stage, "/Scene/Stroke").expect("curve should tessellate");
+
+    let corner = [1.0f32, 0.0, 0.0];
+    let expected = 0.1 * 2f32.sqrt();
+    for position in &mesh.positions[SIDES..2 * SIDES] {
+        let delta = [
+            position[0] - corner[0],
+            position[1] - corner[1],
+            position[2] - corner[2],
+        ];
+        let distance = delta.iter().map(|value| value * value).sum::<f32>().sqrt();
+        assert!(
+            (distance - expected).abs() < 1e-5,
+            "corner vertex {position:?} sits {distance} from the corner, not the mitred {expected}"
+        );
+        let along = (delta[0] + delta[1]) / 2f32.sqrt();
+        assert!(
+            along.abs() < 1e-5,
+            "corner vertex {position:?} left the miter plane (offset {along})"
+        );
+    }
+}
+
+#[test]
+fn curve_tube_miter_scale_is_clamped_on_a_reversal() {
+    // B -> A + tiny offset is a near reversal: 1/cos(half_angle) diverges, so
+    // the miter must stop at 4x instead of shooting a spike (or a NaN).
+    let dir = tempfile::tempdir().expect("temp dir should be created");
+    let stage = open_scene(
+        &dir,
+        "reversal.usda",
+        concat!(
+            "#usda 1.0\n\n",
+            "def Xform \"Scene\"\n{\n",
+            "    def BasisCurves \"Fold\"\n{\n",
+            "        int[] curveVertexCounts = [3]\n",
+            "        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 0.001, 0)]\n",
+            "        float[] widths = [0.2]\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+
+    let mesh = tessellate(&stage, "/Scene/Fold").expect("a reversal must not fail");
+    let points = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.001, 0.0]];
+    let radius = 0.1f32;
+    assert_eq!(mesh.positions.len(), 3 * SIDES);
+    for (vertex, position) in mesh.positions.iter().enumerate() {
+        for axis in 0..3 {
+            assert!(
+                position[axis].is_finite(),
+                "vertex {vertex} is not finite: {position:?}"
+            );
+        }
+        let center = points[vertex / SIDES];
+        let distance = ((position[0] - center[0]).powi(2)
+            + (position[1] - center[1]).powi(2)
+            + (position[2] - center[2]).powi(2))
+        .sqrt();
+        assert!(
+            distance <= radius * 4.0 + 1e-5,
+            "vertex {position:?} sits {distance} from {center:?}, past the 4x miter clamp"
+        );
     }
 }
 
@@ -658,14 +801,12 @@ fn nurbs_curve_bows_off_the_chords_its_basis_counterpart_follows() {
         [-0.7, 0.7, 0.0],
     ];
 
-    // The basis curve stays a chord polygon (Round 1 byte identity): 3
-    // segments, 12 vertices and 36 indices per segment.
-    assert_eq!(basis.positions.len(), 36);
+    // The basis curve stays a chord polygon (Round 1 byte identity): one
+    // welded ring per control point, 3 quad blocks of 36 indices.
+    assert_eq!(basis.positions.len(), 24);
     assert_eq!(basis.indices.len(), 108);
-    // Chords duplicate each shared endpoint: A, B, B, C, C, D.
-    let chords = [
-        control[0], control[1], control[1], control[2], control[2], control[3],
-    ];
+    // One ring per control point, no duplicated shared endpoints.
+    let chords = [control[0], control[1], control[2], control[3]];
     for (center, point) in ring_centers(&basis).iter().zip(chords) {
         for axis in 0..3 {
             assert!(
@@ -749,12 +890,11 @@ fn rational_quadratic_nurbs_samples_stay_on_the_unit_circle() {
     let mesh = tessellate(&stage, "/Scene/Arc").expect("nurbs arc should tessellate");
     let centers = ring_centers(&mesh);
 
-    // One knot span at 8 samples: 9 evaluated points, so 8 tube segments
-    // whose 16 rings duplicate each sample as a segment end and start.
-    assert_eq!(centers.len(), 16);
+    // One knot span at 8 samples: 9 evaluated points, so 9 welded rings.
+    assert_eq!(centers.len(), 9);
     for (center, point) in [
         (centers[0], [1.0f32, 0.0, 0.0]),
-        (centers[15], [0.0, 1.0, 0.0]),
+        (centers[8], [0.0, 1.0, 0.0]),
     ] {
         for axis in 0..3 {
             assert!(
@@ -817,9 +957,9 @@ fn clamped_cubic_nurbs_samples_interpolate_ends_and_leave_the_chords() {
     let centers = ring_centers(&mesh);
 
     // 8 samples per span over 3 spans, plus the domain end: 25 evaluated
-    // points, i.e. 24 tube segments and 48 rings. The sample count grows with
-    // the span count and exceeds the 5 control chords.
-    assert_eq!(centers.len(), 2 * 3 * 8);
+    // points, i.e. 25 welded rings. The sample count grows with the span
+    // count and exceeds the 5 control chords.
+    assert_eq!(centers.len(), 3 * 8 + 1);
     assert!(centers.len() > control.len());
     for (center, point) in [
         (centers[0], control[0]),
@@ -869,10 +1009,10 @@ fn nurbs_curve_with_inconsistent_knots_falls_back_to_its_control_polygon() {
     let mesh = tessellate(&stage, "/Scene/Broken").expect("a broken nurbs prim must not fail");
     let control = [[0.0f32, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]];
 
-    // Two chords, one ring pair each: the control points, duplicated.
-    assert_eq!(mesh.positions.len(), 2 * 12);
+    // Two chords, one welded ring per control point.
+    assert_eq!(mesh.positions.len(), 3 * 6);
     assert_eq!(mesh.indices.len(), 2 * 36);
-    let chords = [control[0], control[1], control[1], control[2]];
+    let chords = [control[0], control[1], control[2]];
     for (center, point) in ring_centers(&mesh).iter().zip(chords) {
         for axis in 0..3 {
             assert!(
@@ -910,18 +1050,18 @@ fn nurbs_range_clips_the_evaluated_knot_domain() {
     let untrimmed =
         ring_centers(&tessellate(&full, "/Scene/Cubic").expect("full cubic should tessellate"));
 
-    // Two clipped spans at 8 samples: 17 evaluated points, 32 rings (the
-    // untrimmed curve keeps its three spans and 48 rings).
-    assert_eq!(untrimmed.len(), 48);
+    // Two clipped spans at 8 samples: 17 evaluated points, 17 welded rings
+    // (the untrimmed curve keeps its three spans and 25 rings).
+    assert_eq!(untrimmed.len(), 25);
     assert_eq!(
         clipped.len(),
-        32,
+        2 * 8 + 1,
         "the range must clip the sampled spans, got {}",
         clipped.len()
     );
     // u = 0.5 and u = 1.5 are interior parameters: the samples no longer
     // interpolate the outer control points.
-    for (center, point) in [(clipped[0], control[0]), (clipped[31], control[5])] {
+    for (center, point) in [(clipped[0], control[0]), (clipped[16], control[5])] {
         let delta = [
             center[0] - point[0],
             center[1] - point[1],
@@ -958,9 +1098,9 @@ fn nurbs_without_order_or_knots_keeps_the_control_polygon() {
     let mesh = tessellate(&stage, "/Scene/Plain").expect("a nurbs prim without order must render");
     let control = [[0.0f32, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]];
 
-    assert_eq!(mesh.positions.len(), 2 * 12);
+    assert_eq!(mesh.positions.len(), 3 * 6);
     assert_eq!(mesh.indices.len(), 2 * 36);
-    let chords = [control[0], control[1], control[1], control[2]];
+    let chords = [control[0], control[1], control[2]];
     for (center, point) in ring_centers(&mesh).iter().zip(chords) {
         for axis in 0..3 {
             assert!(
@@ -997,9 +1137,9 @@ fn nurbs_with_mismatched_point_weights_keeps_the_control_polygon() {
     let mesh = tessellate(&stage, "/Scene/Weighted").expect("a misweighted nurbs prim must render");
     let control = [[0.0f32, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]];
 
-    assert_eq!(mesh.positions.len(), 2 * 12);
+    assert_eq!(mesh.positions.len(), 3 * 6);
     assert_eq!(mesh.indices.len(), 2 * 36);
-    let chords = [control[0], control[1], control[1], control[2]];
+    let chords = [control[0], control[1], control[2]];
     for (center, point) in ring_centers(&mesh).iter().zip(chords) {
         for axis in 0..3 {
             assert!(
@@ -1035,11 +1175,11 @@ fn missing_order_entry_affects_only_its_own_curve() {
 
     let mesh = tessellate(&stage, "/Scene/Pair").expect("the prim must tessellate");
 
-    // Both curves evaluate to 9 samples (8 segments, 16 rings each) because
-    // the defaulted order keeps the knot cursor aligned.
+    // Both curves evaluate to 9 samples (9 welded rings each) because the
+    // defaulted order keeps the knot cursor aligned.
     assert_eq!(
         ring_centers(&mesh).len(),
-        32,
+        18,
         "the second curve must not fall back to its chord"
     );
 }
@@ -1088,7 +1228,7 @@ fn nurbs_with_more_spans_than_the_sample_cap_keeps_the_control_polygon() {
 
     assert_eq!(
         centers.len(),
-        2 * 4999,
+        5000,
         "the control polygon's chords, not samples"
     );
     // f32 keeps ~7 digits: the 1001st point survives to within 1e-4.

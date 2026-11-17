@@ -689,7 +689,8 @@ fn de_boor(
 }
 
 /// Tube stage: open 6-sided tubes (no end caps) through one polyline per
-/// curve, with parallel-transported frames along each curve.
+/// curve, with one ring per used point and minimum-rotation frames along
+/// each curve.
 fn curve_tubes(curves: &[Vec<Vec3f>], radius: f32) -> MeshData {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
@@ -699,8 +700,8 @@ fn curve_tubes(curves: &[Vec<Vec3f>], radius: f32) -> MeshData {
         // A segment contributes only when both endpoints are finite and
         // distinct; a curve with fewer than two usable points contributes
         // nothing (degenerate-face discipline), and the prim never fails.
-        let usable_segments: Vec<usize> = (0..curve.len().saturating_sub(1))
-            .filter(|&i| {
+        let usable: Vec<bool> = (0..curve.len().saturating_sub(1))
+            .map(|i| {
                 let (a, b) = (curve[i], curve[i + 1]);
                 let delta = [b.x - a.x, b.y - a.y, b.z - a.z];
                 is_finite_vec3(a)
@@ -708,73 +709,23 @@ fn curve_tubes(curves: &[Vec<Vec3f>], radius: f32) -> MeshData {
                     && delta.iter().map(|d| d * d).sum::<f32>() > 0.0
             })
             .collect();
-        let Some(&first) = usable_segments.first() else {
-            continue;
-        };
-
-        // Seed a reference frame from the first tangent, then parallel
-        // transport it onto each segment's own tangent.
-        let tangent = normalize3([
-            curve[first + 1].x - curve[first].x,
-            curve[first + 1].y - curve[first].y,
-            curve[first + 1].z - curve[first].z,
-        ]);
-        let helper: [f32; 3] = if tangent[1].abs() > 0.9 {
-            [1.0, 0.0, 0.0]
-        } else {
-            [0.0, 1.0, 0.0]
-        };
-        let mut u = normalize3(cross3(tangent, helper));
-
-        for i in usable_segments {
-            let (a, b) = (curve[i], curve[i + 1]);
-            let tangent = normalize3([b.x - a.x, b.y - a.y, b.z - a.z]);
-            let projection = u[0] * tangent[0] + u[1] * tangent[1] + u[2] * tangent[2];
-            let transported = [
-                u[0] - tangent[0] * projection,
-                u[1] - tangent[1] * projection,
-                u[2] - tangent[2] * projection,
-            ];
-            u = if transported.iter().map(|value| value * value).sum::<f32>() > 1e-12 {
-                normalize3(transported)
-            } else {
-                let helper: [f32; 3] = if tangent[1].abs() > 0.9 {
-                    [1.0, 0.0, 0.0]
-                } else {
-                    [0.0, 1.0, 0.0]
-                };
-                normalize3(cross3(tangent, helper))
+        // Runs of adjacent usable segments are separate tubes: an unusable
+        // point breaks the chain instead of leaving a lone ring behind.
+        let mut start = 0;
+        while start < usable.len() {
+            let Some(offset) = usable[start..].iter().position(|usable| *usable) else {
+                break;
             };
-            let v = cross3(tangent, u);
+            start += offset;
+            let segments = usable[start..].iter().take_while(|usable| **usable).count();
+            let end = start + segments;
+            let (chain_positions, chain_normals, chain_indices) =
+                tube_chain(&curve[start..=end], radius);
             let base = positions.len() as u32;
-            for center in [a, b] {
-                for k in 0..CURVE_SIDES {
-                    let theta = k as f32 * std::f32::consts::TAU / CURVE_SIDES as f32;
-                    let (sin, cos) = (theta.sin(), theta.cos());
-                    let radial = [
-                        u[0] * cos + v[0] * sin,
-                        u[1] * cos + v[1] * sin,
-                        u[2] * cos + v[2] * sin,
-                    ];
-                    positions.push([
-                        center.x + radius * radial[0],
-                        center.y + radius * radial[1],
-                        center.z + radius * radial[2],
-                    ]);
-                    // The normal is radial from the tube center axis per
-                    // ring vertex (the tube shape makes this exact).
-                    normals.push(radial);
-                }
-            }
-            // Ring A first (offsets base..base+6), ring B second; each quad
-            // fans to two outward-facing triangles.
-            for k in 0..CURVE_SIDES {
-                let next = ((k + 1) % CURVE_SIDES) as u32;
-                let sides = CURVE_SIDES as u32;
-                let (a_k, a_next) = (base + k as u32, base + next);
-                let (b_k, b_next) = (base + sides + k as u32, base + sides + next);
-                indices.extend_from_slice(&[a_k, a_next, b_next, a_k, b_next, b_k]);
-            }
+            positions.extend(chain_positions);
+            normals.extend(chain_normals);
+            indices.extend(chain_indices.into_iter().map(|index| index + base));
+            start = end;
         }
     }
 
@@ -793,6 +744,130 @@ fn curve_tubes(curves: &[Vec<Vec3f>], radius: f32) -> MeshData {
         colors: None,
         indices,
     }
+}
+
+/// Miter cap: a near-reversal must not shoot a spike out of the joint.
+const CURVE_MITER_MAX: f32 = 4.0;
+
+/// One continuous tube through `points` (at least two finite, distinct
+/// neighbours): a ring per point, consecutive rings welded by quads.
+fn tube_chain(points: &[Vec3f], radius: f32) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>) {
+    let count = points.len();
+    let segment = |i: usize| {
+        normalize3([
+            points[i + 1].x - points[i].x,
+            points[i + 1].y - points[i].y,
+            points[i + 1].z - points[i].z,
+        ])
+    };
+    // Ring planes: a segment's own direction at an end of the chain, the
+    // bisector of the two adjacent segments inside it, with the miter scale
+    // that makes both segments meet on that one plane.
+    let mut frames: Vec<([f32; 3], f32)> = Vec::with_capacity(count);
+    for i in 0..count {
+        let (tangent, miter) = if i == 0 {
+            (segment(0), 1.0)
+        } else if i == count - 1 {
+            (segment(count - 2), 1.0)
+        } else {
+            let (previous, next) = (segment(i - 1), segment(i));
+            let bisector = [
+                previous[0] + next[0],
+                previous[1] + next[1],
+                previous[2] + next[2],
+            ];
+            if bisector.iter().map(|value| value * value).sum::<f32>() > 1e-12 {
+                (normalize3(bisector), miter_scale(previous, next))
+            } else {
+                // A 180-degree reversal has no bisector: keep one segment's
+                // direction so the frame stays finite.
+                (previous, CURVE_MITER_MAX)
+            }
+        };
+        frames.push((tangent, miter));
+    }
+
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(count * CURVE_SIDES);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(count * CURVE_SIDES);
+    let mut u = seed_frame(frames[0].0);
+    for (i, (tangent, miter)) in frames.iter().enumerate() {
+        if i > 0 {
+            u = rotate_between(u, frames[i - 1].0, *tangent);
+        }
+        let v = cross3(*tangent, u);
+        let center = points[i];
+        let scale = radius * miter;
+        for k in 0..CURVE_SIDES {
+            let theta = k as f32 * std::f32::consts::TAU / CURVE_SIDES as f32;
+            let (sin, cos) = (theta.sin(), theta.cos());
+            let radial = [
+                u[0] * cos + v[0] * sin,
+                u[1] * cos + v[1] * sin,
+                u[2] * cos + v[2] * sin,
+            ];
+            positions.push([
+                center.x + scale * radial[0],
+                center.y + scale * radial[1],
+                center.z + scale * radial[2],
+            ]);
+            // The normal is radial from the tube center axis per ring vertex
+            // (the tube shape makes this exact).
+            normals.push(radial);
+        }
+    }
+
+    // Ring i and ring i+1 share their vertices; each quad fans to two
+    // outward-facing triangles.
+    let mut indices: Vec<u32> = Vec::with_capacity((count - 1) * CURVE_SIDES * 6);
+    for ring in 0..count - 1 {
+        let sides = CURVE_SIDES as u32;
+        let a = ring as u32 * sides;
+        let b = a + sides;
+        for k in 0..sides {
+            let next = (k + 1) % sides;
+            indices.extend_from_slice(&[a + k, a + next, b + next, a + k, b + next, b + k]);
+        }
+    }
+    (positions, normals, indices)
+}
+
+/// Radius multiplier that moves a ring's vertices out to where the two
+/// adjacent segment tubes cross the ring plane: `1 / cos(half the turn)`,
+/// clamped so a near-reversal cannot spike.
+fn miter_scale(previous: [f32; 3], next: [f32; 3]) -> f32 {
+    let turn_cos = previous[0] * next[0] + previous[1] * next[1] + previous[2] * next[2];
+    let half_cos = ((1.0 + turn_cos) * 0.5).max(0.0).sqrt();
+    (1.0 / half_cos).clamp(1.0, CURVE_MITER_MAX)
+}
+
+/// Seed the ring frame perpendicular to `tangent` with the helper-vector rule.
+fn seed_frame(tangent: [f32; 3]) -> [f32; 3] {
+    let helper: [f32; 3] = if tangent[1].abs() > 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    normalize3(cross3(tangent, helper))
+}
+
+/// Transport `vector` by the minimum rotation that takes `from` onto `to`
+/// (Rodrigues). Parallel and reversed tangents keep `vector` as it is: the
+/// rotation axis is undefined there.
+fn rotate_between(vector: [f32; 3], from: [f32; 3], to: [f32; 3]) -> [f32; 3] {
+    let axis = cross3(from, to);
+    let sin = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    if sin < 1e-6 {
+        return vector;
+    }
+    let cos = from[0] * to[0] + from[1] * to[1] + from[2] * to[2];
+    let axis = normalize3(axis);
+    let kxv = cross3(axis, vector);
+    let kdv = axis[0] * vector[0] + axis[1] * vector[1] + axis[2] * vector[2];
+    [
+        vector[0] * cos + kxv[0] * sin + axis[0] * kdv * (1.0 - cos),
+        vector[1] * cos + kxv[1] * sin + axis[1] * kdv * (1.0 - cos),
+        vector[2] * cos + kxv[2] * sin + axis[2] * kdv * (1.0 - cos),
+    ]
 }
 
 fn points_data(
