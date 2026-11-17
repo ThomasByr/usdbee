@@ -62,6 +62,15 @@ describe("SettingsTab keyboard section", () => {
     expect(labels).toContain("Reset controls");
   });
 
+  it("lists frame stepping with their keys", async () => {
+    mountTab();
+    await tick();
+    expect(document.querySelector('[data-action="nextFrame"]')!.textContent).toContain("Next Frame");
+    expect(keyButton("nextFrame").textContent!.trim()).toBe("Arrow Right");
+    expect(document.querySelector('[data-action="previousFrame"]')!.textContent).toContain("Previous Frame");
+    expect(keyButton("previousFrame").textContent!.trim()).toBe("Arrow Left");
+  });
+
   it("resets the keybindings from the Reset keyboard button", async () => {
     resetKeybindings();
     mountTab();

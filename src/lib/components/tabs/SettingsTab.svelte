@@ -17,6 +17,8 @@
   // Display names for the binding keys; the keys themselves stay camelCase.
   const KEY_LABELS: Record<string, string> = {
     playPause: "Play / Pause",
+    nextFrame: "Next Frame",
+    previousFrame: "Previous Frame",
     forward: "Move Forward",
     backward: "Move Backward",
     left: "Strafe Left",

@@ -3,6 +3,7 @@ export function formatKeyName(key: string): string {
   if (key === " ") return "Space";
   if (key === "control") return "Ctrl";
   if (key === "shift") return "Shift";
+  if (key.startsWith("arrow")) return "Arrow " + key.charAt(5).toUpperCase() + key.slice(6);
   return key.charAt(0).toUpperCase() + key.slice(1);
 }
 

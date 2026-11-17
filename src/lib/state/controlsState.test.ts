@@ -36,6 +36,11 @@ describe("controlsState keybinding defaults", () => {
     expect(controlsState.keybindings.playPause).toBe("k");
   });
 
+  it("binds frame stepping to the arrow keys by default", () => {
+    expect(DEFAULT_KEYBINDINGS.nextFrame).toBe("arrowright");
+    expect(DEFAULT_KEYBINDINGS.previousFrame).toBe("arrowleft");
+  });
+
   it("reset restores the defaults without letting the state leak into them", () => {
     controlsState.keybindings.forward = "x";
     expect(DEFAULT_KEYBINDINGS.forward).toBe("z");

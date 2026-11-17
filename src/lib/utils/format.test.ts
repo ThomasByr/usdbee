@@ -13,4 +13,10 @@ describe("formatKeyName", () => {
     expect(formatKeyName("shift")).toBe("Shift");
     expect(formatKeyName("z")).toBe("Z");
   });
+
+  it("spaces the arrow key names", () => {
+    expect(formatKeyName("arrowright")).toBe("Arrow Right");
+    expect(formatKeyName("arrowleft")).toBe("Arrow Left");
+    expect(formatKeyName("arrowup")).toBe("Arrow Up");
+  });
 });

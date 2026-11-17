@@ -283,6 +283,14 @@
       if (!e.ctrlKey && !e.metaKey && !e.altKey) {
         const key = e.key.toLowerCase();
         const kb = controlsState.keybindings;
+        if (key === kb.nextFrame || key === kb.previousFrame) {
+          // Arrows would scroll the page; the dispatcher owns pause and clamping.
+          e.preventDefault();
+          void dispatchCommand(viewer, key === kb.nextFrame ? "next_frame" : "previous_frame", {}).catch(
+            () => {},
+          );
+          return;
+        }
         if (key === kb.playPause) viewer.isPlayingAnim = !viewer.isPlayingAnim;
         else if (key === kb.gizmoTranslate) gizmoMode = "translate";
         else if (key === kb.gizmoRotate) gizmoMode = "rotate";
