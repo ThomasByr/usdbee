@@ -39,7 +39,7 @@
   import { layerTextState } from "$lib/state/layerTextState.svelte";
   import { renderState, toAbsoluteTime } from "$lib/render/renderState.svelte";
   import type { GizmoMode } from "$lib/render/xformOps";
-  import { stageModalErrorLines } from "$lib/stage/modalErrors";
+  import { stageModalContent } from "$lib/stage/modalErrors";
   import Viewport from "$lib/components/Viewport.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import { paletteState } from "$lib/state/commandPaletteState.svelte";
@@ -64,7 +64,7 @@
   // Sidebar resize state
   let sidebarWidth = $state<number>(320);
   let isResizing = $state<boolean>(false);
-  let stageModalLines = $state<string[] | null>(null);
+  let stageModal = $state<{ notices: string[]; errors: string[] } | null>(null);
   let stageModalDismissed = $state<boolean>(false);
   let showExportModal = $state<boolean>(false);
   let showSaveModal = $state<boolean>(false);
@@ -153,20 +153,21 @@
     );
   }
 
-  // Stage errors own their modal state (stageModalLines/stageModalDismissed) so
+  // Stage messages own their modal state (stageModal/stageModalDismissed) so
   // they never read or overwrite modalError — rendering errors (usd-load-error,
   // Three.js catch, export, dependency errors) keep exclusive ownership of it.
-  let prevStageLines: string[] | null = null;
+  let prevStageModalKey: string | null = null;
   $effect(() => {
-    const stageLines = stageModalErrorLines({
+    const stageContent = stageModalContent({
       status: stageState.status,
       error: stageState.error,
       compositionErrors: stageState.stageInfo?.composition_errors ?? [],
+      compositionNotices: stageState.stageInfo?.composition_notices ?? [],
     });
-    const changed = JSON.stringify(prevStageLines) !== JSON.stringify(stageLines);
-    prevStageLines = stageLines;
-    stageModalLines = stageLines;
-    if (changed && stageLines) stageModalDismissed = false;
+    const changed = JSON.stringify(stageContent) !== prevStageModalKey;
+    prevStageModalKey = JSON.stringify(stageContent);
+    stageModal = stageContent;
+    if (changed && stageContent) stageModalDismissed = false;
   });
 
   $effect(() => {
@@ -557,8 +558,8 @@
 
 {#if loadOrchestrator.modalError}
   <ErrorModal error={loadOrchestrator.modalError} onClose={loadOrchestrator.closeErrorModal} />
-{:else if stageModalLines !== null && !stageModalDismissed}
-  <ErrorModal lines={stageModalLines} onClose={closeStageModal} />
+{:else if stageModal !== null && !stageModalDismissed}
+  <ErrorModal notices={stageModal.notices} lines={stageModal.errors} onClose={closeStageModal} />
 {/if}
 
 {#if showSaveModal}

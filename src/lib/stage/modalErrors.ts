@@ -1,18 +1,26 @@
-// Builds the error-modal line list from stage state (Phase 1 task 8).
-// Composition error strings come from openusd via StageInfo and already
-// carry prim-path context — they are passed through verbatim, one per line.
+// Builds the stage-modal content from stage state (Phase 1 task 8).
+// Composition messages come from openusd via StageInfo: notices state a
+// limit the open survived, errors are real composition failures. Both are
+// passed through verbatim, one per line.
 export interface StageErrorInput {
   status: "idle" | "loading" | "ready" | "error";
   error: string | null;
   compositionErrors: string[];
+  compositionNotices?: string[];
 }
 
-export function stageModalErrorLines(input: StageErrorInput): string[] | null {
+export interface StageModalContent {
+  notices: string[];
+  errors: string[];
+}
+
+export function stageModalContent(input: StageErrorInput): StageModalContent | null {
   if (input.status === "error" && input.error) {
-    return ["Failed to open stage: " + input.error];
+    return { notices: [], errors: ["Failed to open stage: " + input.error] };
   }
-  if (input.compositionErrors.length > 0) {
-    return input.compositionErrors;
+  const notices = input.compositionNotices ?? [];
+  if (notices.length === 0 && input.compositionErrors.length === 0) {
+    return null;
   }
-  return null;
+  return { notices, errors: input.compositionErrors };
 }

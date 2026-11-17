@@ -41,6 +41,9 @@ export interface StageInfo {
   start_time_code: number;
   end_time_code: number;
   composition_errors: string[];
+  // Limits the loader reports without failing the open (skipped unsupported
+  // files). Optional: an older backend omits the field.
+  composition_notices?: string[];
   // "Y" or "Z"; the backend defaults anything unreadable to "Y".
   up_axis: string;
 }

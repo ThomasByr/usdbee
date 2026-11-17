@@ -1664,6 +1664,10 @@ pub struct StageInfo {
     pub start_time_code: f64,
     pub end_time_code: f64,
     pub composition_errors: Vec<String>,
+    // Limits the loader reports but which do not fail the open (skipped
+    // unsupported files). The UI shows these neutrally, apart from errors.
+    #[serde(default)]
+    pub composition_notices: Vec<String>,
     // "Y" or "Z"; anything the stage authors or we fail to read falls
     // back to "Y", the USD spec default (fail-soft with a warn).
     #[serde(default)]
@@ -1681,8 +1685,9 @@ pub struct StageSummary {
 }
 
 /// Users read one repeated format error per file as a failed open, and the
-/// scene did open, so unsupported-format reports collapse into one notice.
-fn group_composition_errors(errors: Vec<String>) -> Vec<String> {
+/// scene did open, so unsupported-format reports collapse into one notice
+/// and leave `errors` holding real composition failures only.
+fn split_composition_messages(errors: Vec<String>) -> (Vec<String>, Vec<String>) {
     const MARKER: &str = "no file format registered for ";
     let mut files: Vec<String> = Vec::new();
     for error in &errors {
@@ -1697,7 +1702,7 @@ fn group_composition_errors(errors: Vec<String>) -> Vec<String> {
     // A lone unreadable file keeps its own message: grouping it would add
     // nothing and hide the path that says which file it was.
     if files.len() < 2 {
-        return errors;
+        return (Vec::new(), errors);
     }
     let mut named = files.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
     if files.len() > 6 {
@@ -1708,19 +1713,13 @@ fn group_composition_errors(errors: Vec<String>) -> Vec<String> {
         files.len(),
         named
     );
-    let mut grouped = Vec::with_capacity(errors.len());
-    let mut placed = false;
+    let mut kept = Vec::with_capacity(errors.len());
     for error in errors {
-        if error.contains(MARKER) {
-            if !placed {
-                grouped.push(notice.clone());
-                placed = true;
-            }
-        } else {
-            grouped.push(error);
+        if !error.contains(MARKER) {
+            kept.push(error);
         }
     }
-    grouped
+    (vec![notice], kept)
 }
 
 fn normalized_up_axis(token: &str) -> String {
@@ -1825,19 +1824,21 @@ pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
         );
     }
 
+    let split = split_composition_messages(
+        stage
+            .composition_errors()
+            .into_iter()
+            .map(|e| e.to_string())
+            .collect(),
+    );
     let info = StageInfo {
         stage_id: 0,
         root_layer: stage.root_layer().identifier().to_owned(),
         time_codes_per_second: stage.time_codes_per_second(),
         start_time_code: stage.start_time_code(),
         end_time_code: stage.end_time_code(),
-        composition_errors: group_composition_errors(
-            stage
-                .composition_errors()
-                .into_iter()
-                .map(|e| e.to_string())
-                .collect(),
-        ),
+        composition_errors: split.1,
+        composition_notices: split.0,
         up_axis: stage_up_axis(&stage),
     };
 
@@ -6224,7 +6225,7 @@ mod warmup_budget_tests {
 
 #[cfg(test)]
 mod composition_error_grouping_tests {
-    use super::group_composition_errors;
+    use super::split_composition_messages as split;
 
     fn unsupported(path: &str) -> String {
         format!(
@@ -6253,20 +6254,23 @@ mod composition_error_grouping_tests {
     }
 
     // Four per-file format errors read as a failed open, but the scene
-    // opened; one notice replaces them, in the first one's position.
+    // opened; one notice replaces them, and only real errors stay errors.
     #[test]
     fn four_unsupported_files_collapse_into_one_notice() {
         let mut errors = shader_ball();
         errors.push("unresolved reference prim </missing> in @/a.usda@".to_string());
-        let grouped = group_composition_errors(errors);
-        assert_eq!(grouped.len(), 2, "{:?}", grouped);
+        let (notices, kept) = split(errors);
         assert_eq!(
-            grouped[0],
-            "4 files skipped (unsupported format): plastic_openpbr.mtlx, gold_openpbr.mtlx, glass_openpbr.mtlx, bubblegum_openpbr.mtlx"
+            notices,
+            vec![
+                "4 files skipped (unsupported format): plastic_openpbr.mtlx, gold_openpbr.mtlx, glass_openpbr.mtlx, bubblegum_openpbr.mtlx"
+                    .to_string()
+            ]
         );
         assert_eq!(
-            grouped[1], "unresolved reference prim </missing> in @/a.usda@",
-            "unrelated messages stay verbatim, after the notice"
+            kept,
+            vec!["unresolved reference prim </missing> in @/a.usda@".to_string()],
+            "unrelated messages stay verbatim, in their original order"
         );
     }
 
@@ -6278,18 +6282,22 @@ mod composition_error_grouping_tests {
             unsupported("/deep/b.mtlx"),
             unsupported("/deep/a.mtlx"),
         ];
-        let grouped = group_composition_errors(errors);
+        let (notices, kept) = split(errors);
         assert_eq!(
-            grouped,
+            notices,
             vec!["2 files skipped (unsupported format): a.mtlx, b.mtlx".to_string()]
         );
+        assert!(kept.is_empty(), "{:?}", kept);
     }
 
-    // One unreadable file is worth its own message, path included.
+    // One unreadable file is worth its own message, path included, and it
+    // stays an error rather than a notice.
     #[test]
     fn a_single_unsupported_file_stays_verbatim() {
         let errors = vec![unsupported("/deep/only.mtlx")];
-        assert_eq!(group_composition_errors(errors.clone()), errors);
+        let (notices, kept) = split(errors.clone());
+        assert!(notices.is_empty(), "{:?}", notices);
+        assert_eq!(kept, errors);
     }
 
     // The same file reported twice is one file, so nothing is grouped.
@@ -6299,7 +6307,9 @@ mod composition_error_grouping_tests {
             unsupported("/deep/same.mtlx"),
             unsupported("/deep/same.mtlx"),
         ];
-        assert_eq!(group_composition_errors(errors.clone()), errors);
+        let (notices, kept) = split(errors.clone());
+        assert!(notices.is_empty(), "{:?}", notices);
+        assert_eq!(kept, errors);
     }
 
     // Long lists stay readable: six names, then an ellipsis.
@@ -6308,14 +6318,15 @@ mod composition_error_grouping_tests {
         let errors: Vec<String> = (1..=7)
             .map(|i| unsupported(&format!("/deep/{}.mtlx", i)))
             .collect();
-        let grouped = group_composition_errors(errors);
+        let (notices, kept) = split(errors);
         assert_eq!(
-            grouped,
+            notices,
             vec![
                 "7 files skipped (unsupported format): 1.mtlx, 2.mtlx, 3.mtlx, 4.mtlx, 5.mtlx, 6.mtlx, …"
                     .to_string()
             ]
         );
+        assert!(kept.is_empty(), "{:?}", kept);
     }
 
     // Unrelated messages keep their exact text and relative order.
@@ -6326,7 +6337,8 @@ mod composition_error_grouping_tests {
             "second: no file format registered for x".to_string(),
             "third: no such layer".to_string(),
         ];
-        let grouped = group_composition_errors(errors.clone());
-        assert_eq!(grouped, errors);
+        let (notices, kept) = split(errors.clone());
+        assert!(notices.is_empty(), "{:?}", notices);
+        assert_eq!(kept, errors);
     }
 }
