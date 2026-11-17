@@ -86,6 +86,7 @@ function viewer(): BridgeViewer {
 beforeEach(() => {
   stage.activeStageId = 1;
   stage.stageInfo = { up_axis: "Y" };
+  renderState.time = 5;
   tabs.closeTab.mockReset();
   tabs.closeConfirmed.mockReset();
   orchestrator.modalError = null;
@@ -450,6 +451,12 @@ describe("frame stepping", () => {
     await expect(dispatchCommand(viewer(), "step_frame", { frames: 1 })).rejects.toThrow("no stage loaded");
     stageState.stageInfo = { start_time_code: 0, end_time_code: 100 } as never;
     await expect(dispatchCommand(viewer(), "step_frame", {})).rejects.toThrow("step_frame needs frames");
+  });
+
+  it("rejects a fractional step, as the registry and the bridge do", async () => {
+    await expect(dispatchCommand(viewer(), "step_frame", { frames: 2.5 })).rejects.toThrow(
+      "step_frame needs whole frames",
+    );
   });
 });
 

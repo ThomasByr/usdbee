@@ -507,6 +507,7 @@ export async function dispatchCommand(
       if (!info) throw new Error("no stage loaded");
       const frames = cmd === "next_frame" ? 1 : cmd === "previous_frame" ? -1 : numberArg(args.frames);
       if (frames === null) throw new Error("step_frame needs frames");
+      if (!Number.isInteger(frames)) throw new Error("step_frame needs whole frames");
       if (viewer) viewer.isPlayingAnim = false;
       const time = stepFrameTime(
         renderState.time ?? info.start_time_code,
