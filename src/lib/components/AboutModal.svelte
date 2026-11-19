@@ -1,9 +1,23 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import Modal from "$lib/components/Modal.svelte";
   import { updateState, checkForUpdates, installUpdate } from "$lib/state/updateState.svelte";
+
+  interface BuildInfo {
+    version: string;
+    tauri: string;
+    openusd: string;
+    three_js: string;
+    profile: string;
+    opt_level: string;
+    debug_assertions: boolean;
+    binary: string;
+    resident: string;
+    total_ram: string;
+  }
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -13,11 +27,17 @@
   const isWindows = navigator.userAgent.includes("Windows");
 
   let version = $state("");
+  // Filled once on mount; a failed call hides the build block rather than
+  // printing a row of placeholders.
+  let build = $state<BuildInfo | null>(null);
 
   onMount(() => {
     void getVersion()
       .then((v) => (version = v))
       .catch(() => (version = "unknown"));
+    void invoke<BuildInfo>("app_build_info")
+      .then((info) => (build = info))
+      .catch(() => (build = null));
   });
 
   const busy = $derived(updateState.status === "checking" || updateState.status === "downloading");
@@ -88,6 +108,34 @@
     <span class="about-label">repository</span>
     <button class="about-link" onclick={() => openLink(REPOSITORY_URL)}>github.com/ThomasByr/usdbee</button>
   </div>
+
+  {#if build}
+    <div class="about-section">Build</div>
+    <div class="about-row">
+      <span class="about-label">tauri</span>
+      <span class="about-value">{build.tauri}</span>
+    </div>
+    <div class="about-row">
+      <span class="about-label">openusd binding</span>
+      <span class="about-value">{build.openusd}</span>
+    </div>
+    <div class="about-row">
+      <span class="about-label">three.js</span>
+      <span class="about-value">{build.three_js}</span>
+    </div>
+    <div class="about-row">
+      <span class="about-label">build</span>
+      <span class="about-value">{build.profile}, opt-level {build.opt_level}</span>
+    </div>
+    <div class="about-row">
+      <span class="about-label">binary</span>
+      <span class="about-value">{build.binary}</span>
+    </div>
+    <div class="about-row">
+      <span class="about-label">memory</span>
+      <span class="about-value">{build.resident} of {build.total_ram}</span>
+    </div>
+  {/if}
 
   <div class="about-section">Updates</div>
   <p class="about-status">{line}</p>

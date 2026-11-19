@@ -1,3 +1,4 @@
+mod app_info;
 pub mod cameras;
 mod cli;
 mod commands;
@@ -250,6 +251,7 @@ pub fn run() {
             cli::get_launch_options,
             is_self_update_supported,
             frontend_ready,
+            app_info::app_build_info,
             updater_prefs::get_update_auto_check,
             updater_prefs::set_update_auto_check
         ])
