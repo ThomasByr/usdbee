@@ -43,7 +43,7 @@
   import Viewport from "$lib/components/Viewport.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import AboutModal from "$lib/components/AboutModal.svelte";
-  import { checkForUpdates } from "$lib/state/updateState.svelte";
+  import { checkForUpdates, startupAutoCheck } from "$lib/state/updateState.svelte";
   import { paletteState } from "$lib/state/commandPaletteState.svelte";
   import { dispatchCommand } from "$lib/commands/dispatch";
   import { matchesBinding } from "$lib/utils/keys";
@@ -409,6 +409,10 @@
     void Promise.allSettled(unlisteners)
       .then(() => invoke("frontend_ready"))
       .catch(console.warn);
+
+    // Silent startup check, gated on the persisted preference and delayed past
+    // the first stage load.
+    void startupAutoCheck();
 
     // Cleanup listeners
     return () => {

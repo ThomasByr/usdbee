@@ -21,6 +21,7 @@ async function load() {
     relaunch: vi.mocked(process.relaunch),
     updateState: state.updateState,
     checkForUpdates: state.checkForUpdates,
+    startupAutoCheck: state.startupAutoCheck,
     installUpdate: state.installUpdate,
   };
 }
@@ -135,5 +136,24 @@ describe("updateState", () => {
     expect(updateState.status).toBe("error");
     expect(updateState.progress).toBe(0);
     expect(updateState.message).toBe("disk full");
+  });
+
+  it("checks at startup only when the preference is on", async () => {
+    const { invoke, check, startupAutoCheck } = await load();
+    check.mockResolvedValue(null);
+    vi.useFakeTimers();
+
+    // Preference off: no silent check, no timer.
+    invoke.mockImplementation(async (command: string) => command !== "get_update_auto_check");
+    await startupAutoCheck(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(check).not.toHaveBeenCalled();
+
+    invoke.mockImplementation(async () => true);
+    await startupAutoCheck(1);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(check).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
   });
 });

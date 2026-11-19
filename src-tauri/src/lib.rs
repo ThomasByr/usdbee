@@ -13,12 +13,13 @@ pub mod parser;
 pub mod skinning;
 pub mod stage;
 pub mod tessellation;
+mod updater_prefs;
 pub mod values;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     Manager,
 };
 
@@ -87,10 +88,15 @@ fn build_system_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
 
     let check_updates =
         MenuItemBuilder::with_id("about_check_updates", "Check for Updates...").build(app)?;
+    let auto_check =
+        CheckMenuItemBuilder::with_id("about_auto_check", "Check automatically on startup")
+            .checked(updater_prefs::stored_auto_check(app))
+            .build(app)?;
     let about_info = MenuItemBuilder::with_id("about_info", "About usdbee").build(app)?;
 
     let about_submenu = SubmenuBuilder::new(app, "About")
         .item(&check_updates)
+        .item(&auto_check)
         .separator()
         .item(&about_info)
         .build()?;
@@ -165,6 +171,14 @@ pub fn run() {
                     if let Err(e) = app_handle.emit("open-export-modal", "show") {
                         println!("Failed to emit open-export-modal: {}", e);
                     }
+                } else if event.id() == "about_auto_check" {
+                    // The click already flipped the native tick; persist what it now shows.
+                    let enabled = updater_prefs::auto_check_tick(app_handle)
+                        .and_then(|item| item.is_checked().ok())
+                        .unwrap_or(false);
+                    if let Err(e) = updater_prefs::apply_auto_check(app_handle, enabled) {
+                        eprintln!("Failed to save the startup check preference: {e}");
+                    }
                 } else if event.id() == "about_check_updates" || event.id() == "about_info" {
                     let check = event.id() == "about_check_updates";
                     let state = app_handle.state::<FrontendReady>();
@@ -225,7 +239,9 @@ pub fn run() {
             omniverse::get_omniverse_url,
             cli::get_launch_options,
             is_self_update_supported,
-            frontend_ready
+            frontend_ready,
+            updater_prefs::get_update_auto_check,
+            updater_prefs::set_update_auto_check
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

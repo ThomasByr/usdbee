@@ -86,6 +86,14 @@ async function runCheck(): Promise<void> {
   }
 }
 
+// Startup gate: only a user who ticked the preference gets a silent check, and
+// it waits for the first stage load. A missing or broken preference reads as off.
+export async function startupAutoCheck(delayMs = 3000): Promise<void> {
+  const enabled = await invoke<boolean>("get_update_auto_check").catch(() => false);
+  if (!enabled) return;
+  setTimeout(() => void checkForUpdates({ silent: true }), delayMs);
+}
+
 export async function installUpdate(): Promise<void> {
   const update = found;
   if (!update) return;
