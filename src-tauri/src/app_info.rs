@@ -6,6 +6,7 @@ pub struct BuildInfo {
     pub tauri: String,
     pub openusd: String,
     pub three_js: String,
+    pub svelte: String,
     pub profile: String,
     pub opt_level: String,
     pub debug_assertions: bool,
@@ -71,6 +72,7 @@ pub fn app_build_info() -> Result<BuildInfo, String> {
         tauri: env!("APP_TAURI_VERSION").to_string(),
         openusd: env!("APP_OPENUSD_VERSION").to_string(),
         three_js: env!("APP_THREE_VERSION").to_string(),
+        svelte: env!("APP_SVELTE_VERSION").to_string(),
         profile: env!("APP_PROFILE").to_string(),
         opt_level: env!("APP_OPT_LEVEL").to_string(),
         debug_assertions: cfg!(debug_assertions),
@@ -114,6 +116,7 @@ mod tests {
             ("APP_TAURI_VERSION", env!("APP_TAURI_VERSION")),
             ("APP_OPENUSD_VERSION", env!("APP_OPENUSD_VERSION")),
             ("APP_THREE_VERSION", env!("APP_THREE_VERSION")),
+            ("APP_SVELTE_VERSION", env!("APP_SVELTE_VERSION")),
             ("APP_PROFILE", env!("APP_PROFILE")),
             ("APP_OPT_LEVEL", env!("APP_OPT_LEVEL")),
         ];

@@ -11,6 +11,7 @@
     tauri: string;
     openusd: string;
     three_js: string;
+    svelte: string;
     profile: string;
     opt_level: string;
     debug_assertions: boolean;
@@ -135,6 +136,10 @@
       <div class="about-row">
         <span class="about-label">three.js</span>
         <span class="about-value">{build.three_js}</span>
+      </div>
+      <div class="about-row">
+        <span class="about-label">svelte</span>
+        <span class="about-value">{build.svelte}</span>
       </div>
       <div class="about-row">
         <span class="about-label">build</span>

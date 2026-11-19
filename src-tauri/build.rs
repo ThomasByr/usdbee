@@ -20,11 +20,15 @@ fn json_version(text: &str) -> Option<String> {
 fn main() {
     println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-changed=../node_modules/three/package.json");
+    println!("cargo:rerun-if-changed=../node_modules/svelte/package.json");
 
     let lock = std::fs::read_to_string("Cargo.lock")
         .ok()
         .and_then(|text| text.parse::<toml::Value>().ok());
     let three_version = std::fs::read_to_string("../node_modules/three/package.json")
+        .ok()
+        .and_then(|text| json_version(&text));
+    let svelte_version = std::fs::read_to_string("../node_modules/svelte/package.json")
         .ok()
         .and_then(|text| json_version(&text));
 
@@ -44,6 +48,7 @@ fn main() {
         lock.as_ref().and_then(|l| lock_version(l, "openusd")),
     );
     emit("APP_THREE_VERSION", three_version);
+    emit("APP_SVELTE_VERSION", svelte_version);
     emit("APP_PROFILE", std::env::var("PROFILE").ok());
     emit("APP_OPT_LEVEL", std::env::var("OPT_LEVEL").ok());
 
