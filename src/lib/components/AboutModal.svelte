@@ -37,9 +37,12 @@
     void getVersion()
       .then((v) => (version = v))
       .catch(() => (version = "unknown"));
-    void invoke<BuildInfo>("app_build_info")
-      .then((info) => (build = info))
-      .catch(() => (build = null));
+    // The compact size never renders the build block, so skip the sampling.
+    if (full) {
+      void invoke<BuildInfo>("app_build_info")
+        .then((info) => (build = info))
+        .catch(() => (build = null));
+    }
   });
 
   const busy = $derived(updateState.status === "checking" || updateState.status === "downloading");
