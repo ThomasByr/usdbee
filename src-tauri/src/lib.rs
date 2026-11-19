@@ -173,9 +173,19 @@ pub fn run() {
                     }
                 } else if event.id() == "about_auto_check" {
                     // The click already flipped the native tick; persist what it now shows.
-                    let enabled = updater_prefs::auto_check_tick(app_handle)
-                        .and_then(|item| item.is_checked().ok())
-                        .unwrap_or(false);
+                    // A failed read must not be written back as "off": that would drop the
+                    // user's preference.
+                    let Some(item) = updater_prefs::auto_check_tick(app_handle) else {
+                        eprintln!("Failed to read the startup check preference");
+                        return;
+                    };
+                    let enabled = match item.is_checked() {
+                        Ok(checked) => checked,
+                        Err(e) => {
+                            eprintln!("Failed to read the startup check preference: {e}");
+                            return;
+                        }
+                    };
                     if let Err(e) = updater_prefs::apply_auto_check(app_handle, enabled) {
                         eprintln!("Failed to save the startup check preference: {e}");
                     }

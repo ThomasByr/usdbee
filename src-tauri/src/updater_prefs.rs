@@ -49,7 +49,8 @@ pub(crate) fn auto_check_tick(app: &AppHandle) -> Option<CheckMenuItem<tauri::Wr
         match item {
             MenuItemKind::Check(check) if check.id() == AUTO_CHECK_ID => return Some(check),
             MenuItemKind::Submenu(submenu) => {
-                for child in submenu.items().ok()? {
+                // One unreadable submenu must not hide the item. It lives in About.
+                for child in submenu.items().unwrap_or_default() {
                     if let MenuItemKind::Check(check) = child {
                         if check.id() == AUTO_CHECK_ID {
                             return Some(check);

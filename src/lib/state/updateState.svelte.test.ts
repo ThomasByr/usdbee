@@ -156,4 +156,17 @@ describe("updateState", () => {
     expect(check).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
   });
+
+  it("never starts a check when the preference read fails", async () => {
+    const { invoke, check, startupAutoCheck } = await load();
+    check.mockResolvedValue(null);
+    invoke.mockRejectedValue(new Error("config dir unavailable"));
+    vi.useFakeTimers();
+
+    await expect(startupAutoCheck(1)).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(check).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
 });
