@@ -38,11 +38,17 @@
       .then((v) => (version = v))
       .catch(() => (version = "unknown"));
     // The compact size never renders the build block, so skip the sampling.
-    if (full) {
+    if (!full) return;
+    // Memory changes while the dialog is open, so the block refreshes once a
+    // second. A failed poll keeps the last good reading instead of blanking.
+    const refresh = () => {
       void invoke<BuildInfo>("app_build_info")
         .then((info) => (build = info))
-        .catch(() => (build = null));
-    }
+        .catch(() => {});
+    };
+    refresh();
+    const timer = setInterval(refresh, 1000);
+    return () => clearInterval(timer);
   });
 
   const busy = $derived(updateState.status === "checking" || updateState.status === "downloading");
