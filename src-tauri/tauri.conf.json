@@ -37,6 +37,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -44,5 +45,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlDQjdFQkQ4NkU1MDk0OEMKUldTTWxGQnUyT3Uzbk5GQW5wNWVTWHJjUW9yYnhDTjl5TENmamlxNFI0c3FJdUc4eEE0ZEltU2cK",
+      "endpoints": ["https://github.com/ThomasByr/usdbee/releases/latest/download/latest.json"]
+    }
   }
 }

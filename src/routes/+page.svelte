@@ -42,6 +42,8 @@
   import { stageModalContent } from "$lib/stage/modalErrors";
   import Viewport from "$lib/components/Viewport.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
+  import AboutModal from "$lib/components/AboutModal.svelte";
+  import { checkForUpdates } from "$lib/state/updateState.svelte";
   import { paletteState } from "$lib/state/commandPaletteState.svelte";
   import { dispatchCommand } from "$lib/commands/dispatch";
   import { matchesBinding } from "$lib/utils/keys";
@@ -86,6 +88,7 @@
   let stageModal = $state<{ notices: string[]; errors: string[] } | null>(null);
   let stageModalDismissed = $state<boolean>(false);
   let showExportModal = $state<boolean>(false);
+  let showAboutModal = $state<boolean>(false);
   // The export modal previews frames by stepping the stage time, so the
   // playhead moves as soon as it opens. Snapshot on open, restore on close.
   let exportView = $state<{ progress: number; playing: boolean } | null>(null);
@@ -233,6 +236,10 @@
   });
 
   onMount(() => {
+    // The menu holds its events until the listeners below exist, so a click
+    // that lands during startup opens the dialog instead of vanishing.
+    void invoke("frontend_ready").catch(console.warn);
+
     // Open the confirm-per-save dialog: only its confirm button ever writes
     // USD content to disk. The dialog refreshes the dirty-layer list on open.
     async function openSaveDialog() {
@@ -338,6 +345,10 @@
 
     // Listeners for Rust events
     const unlisteners = [
+      listen<{ check: boolean }>("open-about", (event) => {
+        showAboutModal = true;
+        if (event.payload?.check) void checkForUpdates();
+      }),
       listen("open-export-modal", () => {
         console.log("RECEIVED open-export-modal from Rust!");
         openExport();
@@ -649,6 +660,10 @@
     {exportStage}
     onExport={handleExport}
   />
+{/if}
+
+{#if showAboutModal}
+  <AboutModal onClose={() => (showAboutModal = false)} />
 {/if}
 
 {#if showCloseConfirm}

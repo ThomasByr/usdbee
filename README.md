@@ -29,6 +29,16 @@ Please download the appropriate installer for your operating system, run the ins
 
 On MacOS, both Intel and Apple Silicon architectures are supported.
 
+### Updates
+
+**About → Check for Updates...** downloads and installs the latest release in place. The download is verified
+against the update key in `tauri.conf.json`; a release without a matching signature is refused.
+
+- Windows: an installed copy updates itself. The portable executable is not an installable target: download the
+  new one from the [Releases](https://github.com/ThomasByr/usdbee/releases) page.
+- MacOS: updates work, but the build is not signed or notarized, so Gatekeeper may complain on the first launch.
+- Linux: only the AppImage can update itself. `.deb` and `.rpm` users re-download the package.
+
 ### Building from source
 
 To build USDBEE from source, make sure you have [Node.js](https://nodejs.org/)

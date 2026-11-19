@@ -91,12 +91,32 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v${{ env.VERSION }}
           releaseName: v${{ env.VERSION }}
           releaseBody: "${{ steps.changelog.outputs.changelog }}"
           releaseDraft: false
           prerelease: false
+          # Both an .msi and an NSIS .exe are bundled; the updater must point at
+          # the NSIS one, which is what an installed usdbee knows how to run.
+          updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
           assetNamePattern: "[name]-[version]-[platform]-[arch][setup][ext]"
           uploadPlainBinary: ${{ matrix.plain == true }}
+
+  # latest.json is written by five jobs at once; a missing entry is either a
+  # lost update or a signing secret the action only warned about.
+  verify-release:
+    needs: publish-tauri
+    runs-on: ubuntu-24.04
+    if: github.repository == 'ThomasByr/usdbee'
+    permissions:
+      contents: read
+    steps:
+      - name: latest.json lists every platform
+        run: |
+          for key in darwin-aarch64 darwin-x86_64 linux-x86_64 linux-aarch64 windows-x86_64; do
+            curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/latest.json" | grep -q "\"$key\"" || { echo "missing $key"; exit 1; }
+          done

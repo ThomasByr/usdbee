@@ -15,11 +15,34 @@ pub mod stage;
 pub mod tessellation;
 pub mod values;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     Manager,
 };
+
+// The menu emits events the page listens for, so a click that lands before the
+// page mounts would be lost. The page calls `frontend_ready` once its listeners
+// are registered and every menu emit waits for that flag.
+struct FrontendReady(AtomicBool);
+
+fn self_update_supported(os: &str, appimage: Option<&str>) -> bool {
+    os != "linux" || appimage.is_some()
+}
+
+#[tauri::command]
+fn is_self_update_supported() -> bool {
+    self_update_supported(
+        std::env::consts::OS,
+        std::env::var("APPIMAGE").ok().as_deref(),
+    )
+}
+
+#[tauri::command]
+fn frontend_ready(state: tauri::State<'_, FrontendReady>) {
+    state.0.store(true, Ordering::SeqCst);
+}
 
 fn build_system_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let open_item = MenuItemBuilder::with_id("file_open", "Open USD File...")
@@ -40,7 +63,20 @@ fn build_system_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
         .item(&export_item)
         .build()?;
 
-    MenuBuilder::new(app).item(&file_submenu).build()
+    let check_updates =
+        MenuItemBuilder::with_id("about_check_updates", "Check for Updates...").build(app)?;
+    let about_info = MenuItemBuilder::with_id("about_info", "About usdbee").build(app)?;
+
+    let about_submenu = SubmenuBuilder::new(app, "About")
+        .item(&check_updates)
+        .separator()
+        .item(&about_info)
+        .build()?;
+
+    MenuBuilder::new(app)
+        .item(&file_submenu)
+        .item(&about_submenu)
+        .build()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -62,9 +98,12 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(move |app| {
             app.manage(launch_options);
             app.manage(LoadGate::default());
+            app.manage(FrontendReady(AtomicBool::new(false)));
             let handle = app.handle().clone();
             app.manage(stage::StageState::new(std::sync::Arc::new(
                 move |stage_id: u64, paths: &[String]| {
@@ -100,6 +139,17 @@ pub fn run() {
                     println!("Emitting open-export-modal to frontend...");
                     if let Err(e) = app_handle.emit("open-export-modal", "show") {
                         println!("Failed to emit open-export-modal: {}", e);
+                    }
+                } else if event.id() == "about_check_updates" || event.id() == "about_info" {
+                    let ready = app_handle.state::<FrontendReady>();
+                    if !ready.0.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let check = event.id() == "about_check_updates";
+                    if let Err(e) =
+                        app_handle.emit("open-about", serde_json::json!({ "check": check }))
+                    {
+                        eprintln!("Failed to emit open-about: {}", e);
                     }
                 }
             });
@@ -146,8 +196,27 @@ pub fn run() {
             stage::list_stage_layers,
             omniverse::set_omniverse_url,
             omniverse::get_omniverse_url,
-            cli::get_launch_options
+            cli::get_launch_options,
+            is_self_update_supported,
+            frontend_ready
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod updater_support_tests {
+    use super::self_update_supported;
+
+    #[test]
+    fn windows_and_macos_always_support_self_update() {
+        assert!(self_update_supported("windows", None));
+        assert!(self_update_supported("macos", None));
+    }
+
+    #[test]
+    fn linux_supports_self_update_only_inside_appimage() {
+        assert!(!self_update_supported("linux", None));
+        assert!(self_update_supported("linux", Some("/tmp/usdbee.AppImage")));
+    }
 }
