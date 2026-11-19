@@ -23,6 +23,7 @@ jobs:
             args: ""
           - platform: "windows-latest"
             args: ""
+            plain: true
 
     runs-on: ${{ matrix.platform }}
     if: github.repository == 'ThomasByr/usdbee'
@@ -98,3 +99,4 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
           assetNamePattern: "[name]-[version]-[platform]-[arch][setup][ext]"
+          uploadPlainBinary: ${{ matrix.plain == true }}
