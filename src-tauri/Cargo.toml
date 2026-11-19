@@ -40,6 +40,8 @@ sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Only the app_info test reads Cargo.lock; already built for the build script.
+toml = "0.8"
 # The "test" feature unlocks tauri::test (mock runtime) for the command
 # orchestration tests; it changes nothing in the shipped binary.
 tauri = { version = "2", features = ["test"] }

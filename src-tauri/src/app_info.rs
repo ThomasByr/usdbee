@@ -29,6 +29,15 @@ pub fn format_bytes(bytes: u64) -> String {
     format!("{value:.1} {unit}")
 }
 
+// A failed or zero-size probe prints as "unknown": a formatted zero would look
+// like a real reading.
+fn size_or_unknown(bytes: Option<u64>) -> String {
+    match bytes {
+        Some(bytes) if bytes > 0 => format_bytes(bytes),
+        _ => "unknown".to_string(),
+    }
+}
+
 fn binary_bytes() -> u64 {
     std::env::current_exe()
         .ok()
@@ -37,23 +46,20 @@ fn binary_bytes() -> u64 {
         .unwrap_or(0)
 }
 
-fn memory_bytes() -> (u64, u64) {
+fn memory_bytes() -> (Option<u64>, Option<u64>) {
     let Ok(mut sys) = System::new() else {
-        return (0, 0);
+        return (None, None);
     };
     sys.refresh_memory();
-    let total_ram_bytes = sys.total_memory();
-    let resident_bytes = sysinfo::get_current_pid()
-        .ok()
-        .and_then(|pid| {
-            sys.refresh_processes_specifics(
-                ProcessesToUpdate::Some(&[pid]),
-                true,
-                ProcessRefreshKind::nothing().with_memory(),
-            );
-            sys.process(pid).map(|p| p.memory())
-        })
-        .unwrap_or(0);
+    let total_ram_bytes = Some(sys.total_memory());
+    let resident_bytes = sysinfo::get_current_pid().ok().and_then(|pid| {
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+        sys.process(pid).map(|p| p.memory())
+    });
     (resident_bytes, total_ram_bytes)
 }
 
@@ -68,15 +74,15 @@ pub fn app_build_info() -> Result<BuildInfo, String> {
         profile: env!("APP_PROFILE").to_string(),
         opt_level: env!("APP_OPT_LEVEL").to_string(),
         debug_assertions: cfg!(debug_assertions),
-        binary: format_bytes(binary_bytes()),
-        resident: format_bytes(resident_bytes),
-        total_ram: format_bytes(total_ram_bytes),
+        binary: size_or_unknown(Some(binary_bytes())),
+        resident: size_or_unknown(resident_bytes),
+        total_ram: size_or_unknown(total_ram_bytes),
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::format_bytes;
+    use super::{format_bytes, size_or_unknown};
 
     #[test]
     fn formats_mebibytes_with_one_decimal() {
@@ -87,11 +93,44 @@ mod tests {
     #[test]
     fn formats_kibibytes_below_one_mebibyte() {
         assert_eq!(format_bytes(2_048), "2.0 KiB");
+        assert_eq!(format_bytes(0), "0.0 KiB");
+    }
+
+    #[test]
+    fn formats_gibibytes_above_one_gibibyte() {
+        assert_eq!(format_bytes(1_610_612_736), "1.5 GiB");
+    }
+
+    #[test]
+    fn failed_probes_print_unknown() {
+        assert_eq!(size_or_unknown(None), "unknown");
+        assert_eq!(size_or_unknown(Some(0)), "unknown");
+        assert_eq!(size_or_unknown(Some(2_048)), "2.0 KiB");
     }
 
     #[test]
     fn build_constants_are_populated() {
-        assert!(!env!("APP_TAURI_VERSION").is_empty());
-        assert!(!env!("APP_OPT_LEVEL").is_empty());
+        let constants = [
+            ("APP_TAURI_VERSION", env!("APP_TAURI_VERSION")),
+            ("APP_OPENUSD_VERSION", env!("APP_OPENUSD_VERSION")),
+            ("APP_THREE_VERSION", env!("APP_THREE_VERSION")),
+            ("APP_PROFILE", env!("APP_PROFILE")),
+            ("APP_OPT_LEVEL", env!("APP_OPT_LEVEL")),
+        ];
+        for (name, value) in constants {
+            assert_ne!(value, "unknown", "{name} fell back to the placeholder");
+        }
+
+        let lock_text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock"))
+            .expect("read Cargo.lock");
+        let lock: toml::Value = lock_text.parse().expect("parse Cargo.lock");
+        let locked = lock["package"]
+            .as_array()
+            .expect("Cargo.lock has packages")
+            .iter()
+            .find(|pkg| pkg["name"].as_str() == Some("tauri"))
+            .and_then(|pkg| pkg["version"].as_str())
+            .expect("Cargo.lock pins tauri");
+        assert_eq!(env!("APP_TAURI_VERSION"), locked);
     }
 }

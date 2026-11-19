@@ -20,7 +20,6 @@ fn json_version(text: &str) -> Option<String> {
 fn main() {
     println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-changed=../node_modules/three/package.json");
-    println!("cargo:rerun-if-changed=../package.json");
 
     let lock = std::fs::read_to_string("Cargo.lock")
         .ok()
