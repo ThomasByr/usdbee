@@ -14,6 +14,7 @@
     svelte: string;
     profile: string;
     opt_level: string;
+    deps_opt_level: string;
     debug_assertions: boolean;
     binary: string;
     resident: string;
@@ -143,7 +144,11 @@
       </div>
       <div class="about-row">
         <span class="about-label">build</span>
-        <span class="about-value">{build.profile}, opt-level {build.opt_level}</span>
+        <span class="about-value"
+          >{build.profile}, opt-level {build.opt_level}{build.deps_opt_level
+            ? ` (deps: ${build.deps_opt_level})`
+            : ""}</span
+        >
       </div>
       <div class="about-row">
         <span class="about-label">binary</span>

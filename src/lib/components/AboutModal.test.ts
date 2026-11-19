@@ -47,6 +47,47 @@ describe("AboutModal", () => {
     expect(text).toContain("Updates");
   });
 
+  it("build row notes a dependency opt-level that differs from the app", async () => {
+    const calls = vi.mocked(invoke);
+    calls.mockResolvedValue({
+      version: "1.2.3",
+      tauri: "2",
+      openusd: "0.8",
+      three_js: "0.183",
+      svelte: "5.57",
+      profile: "debug",
+      opt_level: "0",
+      deps_opt_level: "1",
+      debug_assertions: true,
+      binary: "1.0 MiB",
+      resident: "1.0 MiB",
+      total_ram: "8.0 GiB",
+    });
+    const text = await open(true);
+    expect(text).toContain("opt-level 0 (deps: 1)");
+    expect(text).toContain("svelte");
+
+    calls.mockResolvedValue({
+      version: "1.2.3",
+      tauri: "2",
+      openusd: "0.8",
+      three_js: "0.183",
+      svelte: "5.57",
+      profile: "release",
+      opt_level: "s",
+      deps_opt_level: "",
+      debug_assertions: false,
+      binary: "1.0 MiB",
+      resident: "1.0 MiB",
+      total_ram: "8.0 GiB",
+    });
+    if (instance !== null) unmount(instance);
+    instance = null;
+    const same = await open(true);
+    expect(same).toContain("opt-level s");
+    expect(same).not.toContain("deps:");
+  });
+
   it("full dialog samples memory once a second while open", async () => {
     vi.useFakeTimers();
     try {

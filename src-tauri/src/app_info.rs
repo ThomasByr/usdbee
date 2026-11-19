@@ -9,6 +9,8 @@ pub struct BuildInfo {
     pub svelte: String,
     pub profile: String,
     pub opt_level: String,
+    // Empty when dependencies share the app's opt-level.
+    pub deps_opt_level: String,
     pub debug_assertions: bool,
     pub binary: String,
     pub resident: String,
@@ -75,6 +77,7 @@ pub fn app_build_info() -> Result<BuildInfo, String> {
         svelte: env!("APP_SVELTE_VERSION").to_string(),
         profile: env!("APP_PROFILE").to_string(),
         opt_level: env!("APP_OPT_LEVEL").to_string(),
+        deps_opt_level: env!("APP_DEPS_OPT_LEVEL").to_string(),
         debug_assertions: cfg!(debug_assertions),
         binary: size_or_unknown(Some(binary_bytes())),
         resident: size_or_unknown(resident_bytes),
