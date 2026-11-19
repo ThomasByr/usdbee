@@ -51,9 +51,21 @@ describe("updateState", () => {
 
     await checkForUpdates({ silent: true });
 
+    // The page opens About on "available" only: a silent failure stays quiet.
+    expect(updateState.status).not.toBe("available");
     expect(updateState.status).toBe("idle");
     expect(updateState.message).toBe("");
     expect(check).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports available from a silent check so the page can announce it", async () => {
+    const { check, updateState, checkForUpdates } = await load();
+    check.mockResolvedValue(fakeUpdate() as never);
+
+    await checkForUpdates({ silent: true });
+
+    expect(updateState.status).toBe("available");
+    expect(updateState.message).toBe("");
   });
 
   it("runs only one check while one is in flight", async () => {

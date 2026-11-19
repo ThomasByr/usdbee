@@ -50,7 +50,7 @@
         return "usdbee is up to date.";
       case "available":
         return isWindows
-          ? `Version ${updateState.version} is available. This installs usdbee as an installed app; the portable executable you are running stays as-is.`
+          ? `Version ${updateState.version} is available. The update installs usdbee as an installed app on this system.`
           : `Version ${updateState.version} is available.`;
       case "downloading":
         return `Downloading... ${Math.round(updateState.progress * 100)}%`;

@@ -43,7 +43,7 @@
   import Viewport from "$lib/components/Viewport.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import AboutModal from "$lib/components/AboutModal.svelte";
-  import { checkForUpdates, startupAutoCheck } from "$lib/state/updateState.svelte";
+  import { updateState, checkForUpdates, startupAutoCheck } from "$lib/state/updateState.svelte";
   import { paletteState } from "$lib/state/commandPaletteState.svelte";
   import { dispatchCommand } from "$lib/commands/dispatch";
   import { matchesBinding } from "$lib/utils/keys";
@@ -233,6 +233,13 @@
   $effect(() => {
     if (viewer.isPlayingAnim) return;
     untrack(() => stageState.onPlaybackPaused());
+  });
+
+  // The startup auto-check is silent and no dialog is open when it runs, so a
+  // hit would otherwise stay invisible. Opening About is its only notice; a
+  // silent failure leaves the status at "idle" and opens nothing.
+  $effect(() => {
+    if (updateState.status === "available") showAboutModal = true;
   });
 
   onMount(() => {
