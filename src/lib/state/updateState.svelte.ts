@@ -20,8 +20,10 @@ export const updateState = $state({
 // the process runs.
 let supported: Promise<boolean> | null = null;
 // Concurrent callers (menu click plus the startup check) share one check: a
-// second request while the first is in flight joins it.
+// second request while the first is in flight joins it. Visibility is sticky:
+// once any joiner is not silent, the shared check reports its failures.
 let inFlight: Promise<void> | null = null;
+let silentRun = true;
 // The update the last check found; `installUpdate` needs that handle.
 let found: Update | null = null;
 
@@ -35,13 +37,22 @@ export function selfUpdateSupported(): Promise<boolean> {
 }
 
 export function checkForUpdates(opts: { silent?: boolean } = {}): Promise<void> {
-  inFlight ??= runCheck(opts.silent === true).finally(() => {
+  // A check during a download would close the update being installed.
+  if (updateState.status === "downloading") return Promise.resolve();
+
+  if (inFlight) {
+    if (opts.silent !== true) silentRun = false;
+    return inFlight;
+  }
+
+  silentRun = opts.silent === true;
+  inFlight = runCheck().finally(() => {
     inFlight = null;
   });
   return inFlight;
 }
 
-async function runCheck(silent: boolean): Promise<void> {
+async function runCheck(): Promise<void> {
   if (!(await selfUpdateSupported())) {
     updateState.status = "unsupported";
     updateState.message = "";
@@ -65,8 +76,8 @@ async function runCheck(silent: boolean): Promise<void> {
     updateState.status = "available";
   } catch (e) {
     // The startup check is silent: an offline launch must not surface an error
-    // the user never asked for.
-    if (silent) {
+    // the user never asked for. A user who joined it reports the failure.
+    if (silentRun) {
       updateState.status = "idle";
       return;
     }
@@ -98,11 +109,19 @@ export async function installUpdate(): Promise<void> {
       }
       updateState.progress = 1;
     });
-    // Windows runs the installer and exits on its own; macOS and Linux need
-    // the relaunch. A relaunch that loses the race is not an error.
-    await relaunch().catch(() => {});
   } catch (e) {
     updateState.status = "error";
+    updateState.progress = 0;
     updateState.message = errorMessage(e);
+    return;
+  }
+
+  // Windows runs the installer and exits on its own; macOS and Linux need the
+  // relaunch. A failed relaunch must not leave the dialog stuck on downloading.
+  try {
+    await relaunch();
+  } catch (e) {
+    updateState.status = "error";
+    updateState.message = `Downloaded, but usdbee could not restart: ${errorMessage(e)}`;
   }
 }

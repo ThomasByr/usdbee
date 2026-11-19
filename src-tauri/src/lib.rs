@@ -24,8 +24,18 @@ use tauri::{
 
 // The menu emits events the page listens for, so a click that lands before the
 // page mounts would be lost. The page calls `frontend_ready` once its listeners
-// are registered and every menu emit waits for that flag.
-struct FrontendReady(AtomicBool);
+// are registered. A click that arrives before that is held in `pending_about`
+// (the last one wins) and flushed by that call.
+struct FrontendReady {
+    ready: AtomicBool,
+    pending_about: std::sync::Mutex<Option<bool>>,
+}
+
+fn emit_open_about(app: &tauri::AppHandle, check: bool) {
+    if let Err(e) = app.emit("open-about", serde_json::json!({ "check": check })) {
+        eprintln!("Failed to emit open-about: {}", e);
+    }
+}
 
 fn self_update_supported(os: &str, appimage: Option<&str>) -> bool {
     os != "linux" || appimage.is_some()
@@ -40,8 +50,20 @@ fn is_self_update_supported() -> bool {
 }
 
 #[tauri::command]
-fn frontend_ready(state: tauri::State<'_, FrontendReady>) {
-    state.0.store(true, Ordering::SeqCst);
+fn frontend_ready(app: tauri::AppHandle, state: tauri::State<'_, FrontendReady>) {
+    // Flag and flush under one lock: a click landing between the two lands in
+    // `pending_about` before the take, or sees the flag after it.
+    let pending = {
+        let mut pending_about = state
+            .pending_about
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        state.ready.store(true, Ordering::SeqCst);
+        pending_about.take()
+    };
+    if let Some(check) = pending {
+        emit_open_about(&app, check);
+    }
 }
 
 fn build_system_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
@@ -103,7 +125,10 @@ pub fn run() {
         .setup(move |app| {
             app.manage(launch_options);
             app.manage(LoadGate::default());
-            app.manage(FrontendReady(AtomicBool::new(false)));
+            app.manage(FrontendReady {
+                ready: AtomicBool::new(false),
+                pending_about: std::sync::Mutex::new(None),
+            });
             let handle = app.handle().clone();
             app.manage(stage::StageState::new(std::sync::Arc::new(
                 move |stage_id: u64, paths: &[String]| {
@@ -141,16 +166,18 @@ pub fn run() {
                         println!("Failed to emit open-export-modal: {}", e);
                     }
                 } else if event.id() == "about_check_updates" || event.id() == "about_info" {
-                    let ready = app_handle.state::<FrontendReady>();
-                    if !ready.0.load(Ordering::SeqCst) {
+                    let check = event.id() == "about_check_updates";
+                    let state = app_handle.state::<FrontendReady>();
+                    let mut pending_about = state
+                        .pending_about
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if !state.ready.load(Ordering::SeqCst) {
+                        *pending_about = Some(check);
                         return;
                     }
-                    let check = event.id() == "about_check_updates";
-                    if let Err(e) =
-                        app_handle.emit("open-about", serde_json::json!({ "check": check }))
-                    {
-                        eprintln!("Failed to emit open-about: {}", e);
-                    }
+                    drop(pending_about);
+                    emit_open_about(app_handle, check);
                 }
             });
 

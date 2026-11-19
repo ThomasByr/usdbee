@@ -236,10 +236,6 @@
   });
 
   onMount(() => {
-    // The menu holds its events until the listeners below exist, so a click
-    // that lands during startup opens the dialog instead of vanishing.
-    void invoke("frontend_ready").catch(console.warn);
-
     // Open the confirm-per-save dialog: only its confirm button ever writes
     // USD content to disk. The dialog refreshes the dirty-layer list on open.
     async function openSaveDialog() {
@@ -407,6 +403,12 @@
         })();
       }),
     );
+
+    // Register first, then tell Rust the page is ready: a menu click that lands
+    // in between is held in Rust and flushed by this call.
+    void Promise.allSettled(unlisteners)
+      .then(() => invoke("frontend_ready"))
+      .catch(console.warn);
 
     // Cleanup listeners
     return () => {
