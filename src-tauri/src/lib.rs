@@ -30,11 +30,19 @@ use tauri::{
 // (the last one wins) and flushed by that call.
 struct FrontendReady {
     ready: AtomicBool,
-    pending_about: std::sync::Mutex<Option<bool>>,
+    pending_about: std::sync::Mutex<Option<AboutRequest>>,
 }
 
-fn emit_open_about(app: &tauri::AppHandle, check: bool) {
-    if let Err(e) = app.emit("open-about", serde_json::json!({ "check": check })) {
+// `check` starts an update check; `full` picks the About dialog over the
+// compact update one.
+#[derive(Clone, Copy, serde::Serialize)]
+struct AboutRequest {
+    check: bool,
+    full: bool,
+}
+
+fn emit_open_about(app: &tauri::AppHandle, request: AboutRequest) {
+    if let Err(e) = app.emit("open-about", request) {
         eprintln!("Failed to emit open-about: {}", e);
     }
 }
@@ -63,8 +71,8 @@ fn frontend_ready(app: tauri::AppHandle, state: tauri::State<'_, FrontendReady>)
         state.ready.store(true, Ordering::SeqCst);
         pending_about.take()
     };
-    if let Some(check) = pending {
-        emit_open_about(&app, check);
+    if let Some(request) = pending {
+        emit_open_about(&app, request);
     }
 }
 
@@ -191,18 +199,21 @@ pub fn run() {
                         eprintln!("Failed to save the startup check preference: {e}");
                     }
                 } else if event.id() == "about_check_updates" || event.id() == "about_info" {
-                    let check = event.id() == "about_check_updates";
+                    let request = AboutRequest {
+                        check: event.id() == "about_check_updates",
+                        full: event.id() == "about_info",
+                    };
                     let state = app_handle.state::<FrontendReady>();
                     let mut pending_about = state
                         .pending_about
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
                     if !state.ready.load(Ordering::SeqCst) {
-                        *pending_about = Some(check);
+                        *pending_about = Some(request);
                         return;
                     }
                     drop(pending_about);
-                    emit_open_about(app_handle, check);
+                    emit_open_about(app_handle, request);
                 }
             });
 

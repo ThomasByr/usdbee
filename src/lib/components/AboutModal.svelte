@@ -19,7 +19,9 @@
     total_ram: string;
   }
 
-  let { onClose }: { onClose: () => void } = $props();
+  // The compact size (menu "Check for Updates..." and the startup hit) shows
+  // the version and the update section only; the full About adds the rest.
+  let { onClose, full }: { onClose: () => void; full: boolean } = $props();
 
   const LICENSE_URL = "https://github.com/ThomasByr/usdbee/blob/main/LICENSE";
   const REPOSITORY_URL = "https://github.com/ThomasByr/usdbee";
@@ -91,50 +93,53 @@
   }
 </script>
 
-<Modal title="About usdbee" contentClass="about-modal" {onClose}>
+<Modal title={full ? "About usdbee" : "Update usdbee"} contentClass="about-modal" {onClose}>
   <div class="about-row">
     <span class="about-label">version</span>
     <span class="about-value">{version || "..."}</span>
   </div>
-  <div class="about-row">
-    <span class="about-label">author</span>
-    <span class="about-value">ThomasByr</span>
-  </div>
-  <div class="about-row">
-    <span class="about-label">license</span>
-    <button class="about-link" onclick={() => openLink(LICENSE_URL)}>MIT</button>
-  </div>
-  <div class="about-row">
-    <span class="about-label">repository</span>
-    <button class="about-link" onclick={() => openLink(REPOSITORY_URL)}>github.com/ThomasByr/usdbee</button>
-  </div>
 
-  {#if build}
-    <div class="about-section">Build</div>
+  {#if full}
     <div class="about-row">
-      <span class="about-label">tauri</span>
-      <span class="about-value">{build.tauri}</span>
+      <span class="about-label">author</span>
+      <span class="about-value">ThomasByr</span>
     </div>
     <div class="about-row">
-      <span class="about-label">openusd binding</span>
-      <span class="about-value">{build.openusd}</span>
+      <span class="about-label">license</span>
+      <button class="about-link" onclick={() => openLink(LICENSE_URL)}>MIT</button>
     </div>
     <div class="about-row">
-      <span class="about-label">three.js</span>
-      <span class="about-value">{build.three_js}</span>
+      <span class="about-label">repository</span>
+      <button class="about-link" onclick={() => openLink(REPOSITORY_URL)}>github.com/ThomasByr/usdbee</button>
     </div>
-    <div class="about-row">
-      <span class="about-label">build</span>
-      <span class="about-value">{build.profile}, opt-level {build.opt_level}</span>
-    </div>
-    <div class="about-row">
-      <span class="about-label">binary</span>
-      <span class="about-value">{build.binary}</span>
-    </div>
-    <div class="about-row">
-      <span class="about-label">memory</span>
-      <span class="about-value">{build.resident} of {build.total_ram}</span>
-    </div>
+
+    {#if build}
+      <div class="about-section">Build</div>
+      <div class="about-row">
+        <span class="about-label">tauri</span>
+        <span class="about-value">{build.tauri}</span>
+      </div>
+      <div class="about-row">
+        <span class="about-label">openusd binding</span>
+        <span class="about-value">{build.openusd}</span>
+      </div>
+      <div class="about-row">
+        <span class="about-label">three.js</span>
+        <span class="about-value">{build.three_js}</span>
+      </div>
+      <div class="about-row">
+        <span class="about-label">build</span>
+        <span class="about-value">{build.profile}, opt-level {build.opt_level}</span>
+      </div>
+      <div class="about-row">
+        <span class="about-label">binary</span>
+        <span class="about-value">{build.binary}</span>
+      </div>
+      <div class="about-row">
+        <span class="about-label">memory</span>
+        <span class="about-value">{build.resident} of {build.total_ram}</span>
+      </div>
+    {/if}
   {/if}
 
   <div class="about-section">Updates</div>

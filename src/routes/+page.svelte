@@ -89,6 +89,9 @@
   let stageModalDismissed = $state<boolean>(false);
   let showExportModal = $state<boolean>(false);
   let showAboutModal = $state<boolean>(false);
+  // Which size the About dialog opens at: the compact one carries the version
+  // and the update section only.
+  let aboutFull = $state<boolean>(false);
   // The export modal previews frames by stepping the stage time, so the
   // playhead moves as soon as it opens. Snapshot on open, restore on close.
   let exportView = $state<{ progress: number; playing: boolean } | null>(null);
@@ -239,7 +242,10 @@
   // hit would otherwise stay invisible. Opening About is its only notice; a
   // silent failure leaves the status at "idle" and opens nothing.
   $effect(() => {
-    if (updateState.status === "available") showAboutModal = true;
+    if (updateState.status === "available") {
+      aboutFull = false;
+      showAboutModal = true;
+    }
   });
 
   onMount(() => {
@@ -348,7 +354,8 @@
 
     // Listeners for Rust events
     const unlisteners = [
-      listen<{ check: boolean }>("open-about", (event) => {
+      listen<{ check: boolean; full: boolean }>("open-about", (event) => {
+        aboutFull = event.payload?.full === true;
         showAboutModal = true;
         if (event.payload?.check) void checkForUpdates();
       }),
@@ -676,7 +683,7 @@
 {/if}
 
 {#if showAboutModal}
-  <AboutModal onClose={() => (showAboutModal = false)} />
+  <AboutModal full={aboutFull} onClose={() => (showAboutModal = false)} />
 {/if}
 
 {#if showCloseConfirm}
