@@ -49,8 +49,8 @@ describe("controlsState keybinding defaults", () => {
     expect(DEFAULT_KEYBINDINGS.nextTab).toBe("mod+tab");
     expect(DEFAULT_KEYBINDINGS.previousTab).toBe("mod+shift+tab");
     expect(DEFAULT_KEYBINDINGS.closeTab).toBe("mod+w");
-    expect(DEFAULT_KEYBINDINGS.swapTabNext).toBe("mod+pageup");
-    expect(DEFAULT_KEYBINDINGS.swapTabPrevious).toBe("mod+pagedown");
+    expect(DEFAULT_KEYBINDINGS.swapTabNext).toBe("mod+pagedown");
+    expect(DEFAULT_KEYBINDINGS.swapTabPrevious).toBe("mod+pageup");
   });
 
   it("drops a stored binding whose action no longer exists", () => {

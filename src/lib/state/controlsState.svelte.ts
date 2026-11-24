@@ -18,8 +18,8 @@ export const DEFAULT_KEYBINDINGS = {
   nextTab: "mod+tab",
   previousTab: "mod+shift+tab",
   closeTab: "mod+w",
-  swapTabNext: "mod+pageup",
-  swapTabPrevious: "mod+pagedown",
+  swapTabNext: "mod+pagedown",
+  swapTabPrevious: "mod+pageup",
 };
 
 const CONTROL_DEFAULTS = {
