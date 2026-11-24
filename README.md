@@ -75,7 +75,7 @@ npm run tauri dev
 
 ### Generating bundles
 
-Bundles are located in `src-tauri/target/release/bundle`. You can bundle a release target with:
+Bundles are located in `src-tauri/target/release/bundle`. You can bundle an existing release target with:
 
 ```sh
 npm run tauri bundle
