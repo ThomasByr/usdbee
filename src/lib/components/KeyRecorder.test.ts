@@ -168,6 +168,17 @@ describe("KeyRecorder", () => {
     expect(wire.binding).toBe("mod+shift+tab");
   });
 
+  it("records Ctrl+Shift+Tab when WebKit reports Unidentified", async () => {
+    const { wire } = mountRecorder("z");
+    await tick();
+    await startRecording();
+
+    press({ key: "Unidentified", code: "Tab", ctrlKey: true, shiftKey: true });
+    await tick();
+
+    expect(wire.binding).toBe("mod+shift+tab");
+  });
+
   it("records ctrl+pagedown as mod+pagedown", async () => {
     const { wire } = mountRecorder("z");
     await tick();

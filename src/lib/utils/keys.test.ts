@@ -57,6 +57,14 @@ describe("matchesBinding", () => {
     expect(matchesBinding(key({ key: "Tab", ctrlKey: true }), "mod+shift+tab")).toBe(false);
   });
 
+  it("reads the physical code when WebKit reports Unidentified", () => {
+    // Ctrl+Shift+Tab arrives as key "Unidentified" with code "Tab" on WebKitGTK.
+    const e = key({ key: "Unidentified", code: "Tab", ctrlKey: true, shiftKey: true });
+    expect(matchesBinding(e, "mod+shift+tab")).toBe(true);
+    expect(matchesBinding(e, "mod+tab")).toBe(false);
+    expect(matchesBinding(key({ key: "Unidentified", code: "KeyA", ctrlKey: true }), "mod+a")).toBe(true);
+  });
+
   it("matches mod+pagedown and mod+pageup", () => {
     expect(matchesBinding(key({ key: "PageDown", ctrlKey: true }), "mod+pagedown")).toBe(true);
     expect(matchesBinding(key({ key: "PageUp", metaKey: true }), "mod+pageup")).toBe(true);

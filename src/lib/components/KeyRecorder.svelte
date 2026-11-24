@@ -1,5 +1,6 @@
 <script lang="ts">
   import { formatKeyName } from "$lib/utils/format";
+  import { keyToken } from "$lib/utils/keys";
 
   let {
     binding = $bindable(),
@@ -16,7 +17,7 @@
   let pending: string | null = null;
 
   function toBinding(e: KeyboardEvent): string {
-    const key = e.key.toLowerCase();
+    const key = keyToken(e);
     const mod = e.ctrlKey || e.metaKey ? "mod+" : "";
     // A named key is unambiguous, so shift belongs in its binding: Ctrl+Tab and
     // Ctrl+Shift+Tab are different actions. A printable key drops it, so
