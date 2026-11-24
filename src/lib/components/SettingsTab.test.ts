@@ -83,8 +83,8 @@ describe("SettingsTab keyboard section", () => {
       ["nextTab", "Next Tab", "Ctrl+Tab"],
       ["previousTab", "Previous Tab", "Ctrl+Shift+Tab"],
       ["closeTab", "Close Tab", "Ctrl+W"],
-      ["switchTabRight", "Switch Tab Right", "Ctrl+Page Down"],
-      ["switchTabLeft", "Switch Tab Left", "Ctrl+Page Up"],
+      ["swapTabNext", "Swap With Next Tab", "Ctrl+Page Up"],
+      ["swapTabPrevious", "Swap With Previous Tab", "Ctrl+Page Down"],
     ];
     for (const [action, label, keys] of rows) {
       expect(document.querySelector(`[data-action="${action}"] span`)!.textContent!.trim()).toBe(label);

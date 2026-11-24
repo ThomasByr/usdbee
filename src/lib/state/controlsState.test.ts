@@ -49,8 +49,20 @@ describe("controlsState keybinding defaults", () => {
     expect(DEFAULT_KEYBINDINGS.nextTab).toBe("mod+tab");
     expect(DEFAULT_KEYBINDINGS.previousTab).toBe("mod+shift+tab");
     expect(DEFAULT_KEYBINDINGS.closeTab).toBe("mod+w");
-    expect(DEFAULT_KEYBINDINGS.switchTabRight).toBe("mod+pagedown");
-    expect(DEFAULT_KEYBINDINGS.switchTabLeft).toBe("mod+pageup");
+    expect(DEFAULT_KEYBINDINGS.swapTabNext).toBe("mod+pageup");
+    expect(DEFAULT_KEYBINDINGS.swapTabPrevious).toBe("mod+pagedown");
+  });
+
+  it("drops a stored binding whose action no longer exists", () => {
+    localStorage.setItem(
+      "usdbee_keybindings",
+      JSON.stringify({ nextTab: "mod+shift+tab", switchTabRight: "mod+pagedown" }),
+    );
+
+    loadControlPreferences();
+
+    expect(controlsState.keybindings.nextTab).toBe("mod+shift+tab");
+    expect("switchTabRight" in controlsState.keybindings).toBe(false);
   });
 
   it("reset restores the defaults without letting the state leak into them", () => {

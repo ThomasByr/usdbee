@@ -289,16 +289,29 @@
       // Ctrl+W would otherwise reach the webview. They also drop keys held from
       // before the chord, so a held Shift cannot keep descending mid-switch.
       const kb = controlsState.keybindings;
-      if (matchesBinding(e, kb.nextTab) || matchesBinding(e, kb.switchTabRight)) {
+      if (matchesBinding(e, kb.nextTab)) {
         e.preventDefault();
         viewer.keysPressed.clear();
         void tabsState.cycleTab(1);
         return;
       }
-      if (matchesBinding(e, kb.previousTab) || matchesBinding(e, kb.switchTabLeft)) {
+      if (matchesBinding(e, kb.previousTab)) {
         e.preventDefault();
         viewer.keysPressed.clear();
         void tabsState.cycleTab(-1);
+        return;
+      }
+      // Page keys reorder the active tab instead of switching to a neighbour.
+      if (matchesBinding(e, kb.swapTabNext)) {
+        e.preventDefault();
+        viewer.keysPressed.clear();
+        tabsState.swapTab(1);
+        return;
+      }
+      if (matchesBinding(e, kb.swapTabPrevious)) {
+        e.preventDefault();
+        viewer.keysPressed.clear();
+        tabsState.swapTab(-1);
         return;
       }
       if (matchesBinding(e, kb.closeTab)) {

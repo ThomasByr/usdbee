@@ -18,8 +18,8 @@ export const DEFAULT_KEYBINDINGS = {
   nextTab: "mod+tab",
   previousTab: "mod+shift+tab",
   closeTab: "mod+w",
-  switchTabRight: "mod+pagedown",
-  switchTabLeft: "mod+pageup",
+  swapTabNext: "mod+pageup",
+  swapTabPrevious: "mod+pagedown",
 };
 
 const CONTROL_DEFAULTS = {
@@ -91,7 +91,13 @@ export function loadControlPreferences() {
   const savedKeys = localStorage.getItem("usdbee_keybindings");
   if (savedKeys) {
     try {
-      controlsState.keybindings = { ...controlsState.keybindings, ...JSON.parse(savedKeys) };
+      const parsed = JSON.parse(savedKeys);
+      // Known actions only: a renamed binding left in an old blob must not
+      // become a row of its own.
+      const known = controlsState.keybindings as Record<string, string>;
+      for (const action of Object.keys(known)) {
+        if (typeof parsed[action] === "string") known[action] = parsed[action];
+      }
     } catch (e) {
       console.warn("Failed to load keybindings", e);
     }

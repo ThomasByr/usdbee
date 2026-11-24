@@ -35,8 +35,8 @@
     nextTab: "Next Tab",
     previousTab: "Previous Tab",
     closeTab: "Close Tab",
-    switchTabRight: "Switch Tab Right",
-    switchTabLeft: "Switch Tab Left",
+    swapTabNext: "Swap With Next Tab",
+    swapTabPrevious: "Swap With Previous Tab",
   };
 
   // These keys stay bound on any scene but only move something when the stage
