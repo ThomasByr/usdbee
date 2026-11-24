@@ -1,6 +1,6 @@
 [package]
 name = "usdbee"
-version = "1.0.0"
+version = "1.1.0"
 description = "Lightweight USD viewer built with Tauri, and Three.js"
 authors = ["ThomasByr"]
 edition = "2021"
