@@ -40,18 +40,6 @@ describe("CameraNotice", () => {
     expect(card.getAttribute("aria-live")).toBe("polite");
   });
 
-  it("only lifts above the timeline when asked", () => {
-    showCameraNotice("Camera: Cam_wide");
-    flushSync();
-    expect(host.querySelector(".camera-notice")!.classList.contains("above-timeline")).toBe(false);
-
-    unmount(component);
-    component = mount(CameraNotice, { target: host, props: { aboveTimeline: true } });
-    flushSync();
-
-    expect(host.querySelector(".camera-notice")!.classList.contains("above-timeline")).toBe(true);
-  });
-
   it("remounts the card so a second camera restarts the fade", () => {
     showCameraNotice("Camera: Cam_wide");
     flushSync();

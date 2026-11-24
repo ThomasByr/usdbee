@@ -39,6 +39,7 @@
   import { formatTimeline, formatTimelineEnd, playbackState } from "$lib/state/playbackState.svelte";
   import * as THREE from "three";
   import Toolbar from "./Toolbar.svelte";
+  import CameraNotice from "./CameraNotice.svelte";
 
   // The page owns the RendererKit instance and the sidebar-facing bindings
   // (SettingsTab / RenderingTab / ExportModal read it); the viewport wires
@@ -293,6 +294,8 @@
     attachable={gizmoGate.attachable}
     disabled={!loadOrchestrator.rootFile}
   />
+
+  <CameraNotice />
 
   <canvas bind:this={canvas} class="webgl-canvas" class:visible={!!loadOrchestrator.rootFile}></canvas>
 

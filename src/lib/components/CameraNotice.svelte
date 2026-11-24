@@ -1,20 +1,10 @@
 <script lang="ts">
   import { CAMERA_NOTICE_MS, cameraNotice } from "$lib/state/cameraNotice.svelte";
-
-  // The viewport's timeline overlay has its own band, so the card clears it
-  // only when the stage actually shows one.
-  let { aboveTimeline = false }: { aboveTimeline?: boolean } = $props();
 </script>
 
 {#if cameraNotice.text !== null}
   {#key cameraNotice.seq}
-    <div
-      class="camera-notice"
-      class:above-timeline={aboveTimeline}
-      role="status"
-      aria-live="polite"
-      style="--notice-ms: {CAMERA_NOTICE_MS}ms"
-    >
+    <div class="camera-notice" role="status" aria-live="polite" style="--notice-ms: {CAMERA_NOTICE_MS}ms">
       {cameraNotice.text}
     </div>
   {/key}
@@ -24,11 +14,13 @@
   /* The fade-out is part of the run, not a transition: the state drops the
      text, so the element unmounts instead of animating out. */
   .camera-notice {
-    position: fixed;
+    /* Absolute inside the viewport section, so the card centres on the view and
+       not on the window: the sidebar would otherwise pull it off centre. */
+    position: absolute;
     left: 50%;
-    /* 24px with nothing under it; the raised band clears the viewport
-       timeline, which sits 20px from the bottom and is about 46px tall. */
-    bottom: 24px;
+    /* Clear of the viewport toolbar: 10px top, 6px padding, a ~28px button
+       row and a 6px padding, plus a 12px gap. */
+    top: 62px;
     transform: translateX(-50%);
     z-index: 20;
     pointer-events: none;
@@ -42,14 +34,10 @@
     animation: camera-notice var(--notice-ms) ease-out both;
   }
 
-  .camera-notice.above-timeline {
-    bottom: 80px;
-  }
-
   @keyframes camera-notice {
     0% {
       opacity: 0;
-      transform: translateX(-50%) translateY(4px);
+      transform: translateX(-50%) translateY(-4px);
     }
     8% {
       opacity: 1;

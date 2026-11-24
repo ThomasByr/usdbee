@@ -41,7 +41,6 @@
   import type { GizmoMode } from "$lib/render/xformOps";
   import { stageModalContent } from "$lib/stage/modalErrors";
   import Viewport from "$lib/components/Viewport.svelte";
-  import CameraNotice from "$lib/components/CameraNotice.svelte";
   import { clearCameraNotice } from "$lib/state/cameraNotice.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import AboutModal from "$lib/components/AboutModal.svelte";
@@ -663,7 +662,6 @@
       {lightElevation}
       onOpenSettings={() => void openSettingsAtRecent()}
     />
-    <CameraNotice aboveTimeline={viewer.hasAnimation} />
   </main>
 </div>
 
