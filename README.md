@@ -31,13 +31,13 @@ On MacOS, both Intel and Apple Silicon architectures are supported.
 
 ### Updates
 
-**About → Check for Updates...** downloads and installs the latest release in place. The download is verified
-against the update key in `tauri.conf.json`; a release without a matching signature is refused.
+**About → Check for Updates...** downloads and installs the latest release in place.
+The download is verified against the public update key in `tauri.conf.json`.
 
 - Windows: an installed copy updates itself. The portable executable is not an installable target: download the
   new one from the [Releases](https://github.com/ThomasByr/usdbee/releases) page.
-- MacOS: updates work, but the build is not signed or notarized, so Gatekeeper may complain on the first launch.
-- Linux: only the AppImage can update itself. `.deb` and `.rpm` users re-download the package.
+- MacOS: the build is not signed or notarized, so Gatekeeper may complain on the first launch.
+- Linux: only the AppImage can update itself. Using `.deb` or `.rpm`? Re-download the package.
 
 ### Building from source
 
