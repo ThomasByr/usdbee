@@ -153,6 +153,32 @@ describe("KeyRecorder", () => {
     expect(onchange).toHaveBeenCalledWith("1");
   });
 
+  it("records ctrl+shift+tab as mod+shift+tab", async () => {
+    // A named key carries shift into the binding: Ctrl+Tab and Ctrl+Shift+Tab
+    // are different actions.
+    const { wire } = mountRecorder("z");
+    await tick();
+    await startRecording();
+
+    press({ key: "Control" });
+    press({ key: "Shift" });
+    press({ key: "Tab", ctrlKey: true, shiftKey: true });
+    await tick();
+
+    expect(wire.binding).toBe("mod+shift+tab");
+  });
+
+  it("records ctrl+pagedown as mod+pagedown", async () => {
+    const { wire } = mountRecorder("z");
+    await tick();
+    await startRecording();
+
+    press({ key: "PageDown", ctrlKey: true });
+    await tick();
+
+    expect(wire.binding).toBe("mod+pagedown");
+  });
+
   it("cancels on Escape without changing the binding", async () => {
     const { onchange, wire } = mountRecorder("z");
     await tick();

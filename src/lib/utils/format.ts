@@ -1,9 +1,13 @@
+const NAMED_KEYS: Record<string, string> = { tab: "Tab", pageup: "Page Up", pagedown: "Page Down" };
+
 export function formatKeyName(key: string): string {
+  if (key.startsWith("shift+")) return "Shift+" + formatKeyName(key.slice(6));
   if (key.startsWith("mod+")) return "Ctrl+" + formatKeyName(key.slice(4));
   if (key === " ") return "Space";
   if (key === "control") return "Ctrl";
   if (key === "shift") return "Shift";
   if (key.startsWith("arrow")) return "Arrow " + key.charAt(5).toUpperCase() + key.slice(6);
+  if (NAMED_KEYS[key]) return NAMED_KEYS[key];
   return key.charAt(0).toUpperCase() + key.slice(1);
 }
 

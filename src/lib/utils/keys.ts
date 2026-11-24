@@ -1,12 +1,20 @@
 // Keyboard binding matching for the configurable shortcuts. A binding is a
-// single key ("z", " ", "shift") or "mod+<key>", where mod is the platform's
-// command modifier.
+// single key ("z", " ", "shift") or an optional "mod+" prefix followed by an
+// optional "shift+", where mod is the platform's command modifier.
 
 export function matchesBinding(e: KeyboardEvent, binding: string): boolean {
-  // Space is a binding in its own right (camera up), so it survives the trim.
-  const combo = binding === " " ? " " : binding.trim().toLowerCase();
+  // Not trimmed: space is a token of its own (camera up, and Shift+Space in a
+  // chord), and a trim would turn the token after a prefix into nothing.
+  const combo = binding.toLowerCase();
   if (!combo) return false;
-  const key = e.key.toLowerCase();
-  if (combo.startsWith("mod+")) return (e.ctrlKey || e.metaKey) && key === combo.slice(4);
-  return key === combo && !e.ctrlKey && !e.metaKey && !e.altKey;
+  let token = combo;
+  const mod = token.startsWith("mod+");
+  if (mod) token = token.slice(4);
+  const shift = token.startsWith("shift+");
+  if (shift) token = token.slice(6);
+  if (!token) return false;
+  const sameKey = e.key.toLowerCase() === token;
+  if (mod) return sameKey && (e.ctrlKey || e.metaKey) && !e.altKey && e.shiftKey === shift;
+  // A plain binding ignores shift unless it names it, so Shift+1 still fires "1".
+  return sameKey && !e.ctrlKey && !e.metaKey && !e.altKey && (!shift || e.shiftKey);
 }

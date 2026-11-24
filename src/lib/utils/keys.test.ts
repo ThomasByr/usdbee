@@ -46,4 +46,38 @@ describe("matchesBinding", () => {
   it("matches nothing for an empty binding", () => {
     expect(matchesBinding(key({ key: "p" }), "")).toBe(false);
   });
+
+  it("matches mod+tab and rejects it while shift is held", () => {
+    expect(matchesBinding(key({ key: "Tab", ctrlKey: true }), "mod+tab")).toBe(true);
+    expect(matchesBinding(key({ key: "Tab", ctrlKey: true, shiftKey: true }), "mod+tab")).toBe(false);
+  });
+
+  it("matches mod+shift+tab only with shift", () => {
+    expect(matchesBinding(key({ key: "Tab", ctrlKey: true, shiftKey: true }), "mod+shift+tab")).toBe(true);
+    expect(matchesBinding(key({ key: "Tab", ctrlKey: true }), "mod+shift+tab")).toBe(false);
+  });
+
+  it("matches mod+pagedown and mod+pageup", () => {
+    expect(matchesBinding(key({ key: "PageDown", ctrlKey: true }), "mod+pagedown")).toBe(true);
+    expect(matchesBinding(key({ key: "PageUp", metaKey: true }), "mod+pageup")).toBe(true);
+    expect(matchesBinding(key({ key: "PageDown" }), "mod+pagedown")).toBe(false);
+  });
+
+  it("rejects extra modifiers on a mod chord", () => {
+    expect(matchesBinding(key({ key: "w", ctrlKey: true, shiftKey: true }), "mod+w")).toBe(false);
+    expect(matchesBinding(key({ key: "w", ctrlKey: true, altKey: true }), "mod+w")).toBe(false);
+  });
+
+  it("keeps ignoring shift on a plain key binding", () => {
+    expect(matchesBinding(key({ key: "1", shiftKey: true }), "1")).toBe(true);
+  });
+
+  it("matches a space token inside a chord", () => {
+    expect(matchesBinding(key({ key: " ", ctrlKey: true, shiftKey: true }), "mod+shift+ ")).toBe(true);
+  });
+
+  it("rejects a trailing modifier prefix", () => {
+    expect(matchesBinding(key({ key: "Tab", ctrlKey: true }), "mod+")).toBe(false);
+    expect(matchesBinding(key({ key: "Tab", shiftKey: true }), "shift+")).toBe(false);
+  });
 });

@@ -17,7 +17,13 @@
 
   function toBinding(e: KeyboardEvent): string {
     const key = e.key.toLowerCase();
-    return e.ctrlKey || e.metaKey ? `mod+${key}` : key;
+    const mod = e.ctrlKey || e.metaKey ? "mod+" : "";
+    // A named key is unambiguous, so shift belongs in its binding: Ctrl+Tab and
+    // Ctrl+Shift+Tab are different actions. A printable key drops it, so
+    // Ctrl+Shift+P records mod+p and Shift+1 on a French layout records 1.
+    const named = key.length > 1 || key === " ";
+    const shift = e.shiftKey && named && !MODIFIERS.includes(key) ? "shift+" : "";
+    return `${mod}${shift}${key}`;
   }
 
   // A binding string cannot carry alt next to another key, and matchesBinding

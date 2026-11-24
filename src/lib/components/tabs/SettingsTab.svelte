@@ -32,6 +32,11 @@
     gizmoScale: "Switch to Gizmo Scale",
     cycleCamera: "Cycle Through Cameras",
     commandPalette: "Open the Command Palette",
+    nextTab: "Next Tab",
+    previousTab: "Previous Tab",
+    closeTab: "Close Tab",
+    switchTabRight: "Switch Tab Right",
+    switchTabLeft: "Switch Tab Left",
   };
 
   // These keys stay bound on any scene but only move something when the stage

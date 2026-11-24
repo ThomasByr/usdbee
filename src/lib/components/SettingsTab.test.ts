@@ -75,6 +75,23 @@ describe("SettingsTab keyboard section", () => {
     expect(keyButton("previousFrame").textContent!.trim()).toBe("Arrow Left");
   });
 
+  it("lists the tab shortcuts with their labels and keys", async () => {
+    mountTab();
+    await tick();
+
+    const rows: [string, string, string][] = [
+      ["nextTab", "Next Tab", "Ctrl+Tab"],
+      ["previousTab", "Previous Tab", "Ctrl+Shift+Tab"],
+      ["closeTab", "Close Tab", "Ctrl+W"],
+      ["switchTabRight", "Switch Tab Right", "Ctrl+Page Down"],
+      ["switchTabLeft", "Switch Tab Left", "Ctrl+Page Up"],
+    ];
+    for (const [action, label, keys] of rows) {
+      expect(document.querySelector(`[data-action="${action}"] span`)!.textContent!.trim()).toBe(label);
+      expect(keyButton(action).textContent!.trim()).toBe(keys);
+    }
+  });
+
   it("tags the playback bindings while the scene has no animation", async () => {
     mountTab();
     await tick();

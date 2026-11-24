@@ -15,6 +15,11 @@ export const DEFAULT_KEYBINDINGS = {
   gizmoScale: "3",
   cycleCamera: "c",
   commandPalette: "mod+p",
+  nextTab: "mod+tab",
+  previousTab: "mod+shift+tab",
+  closeTab: "mod+w",
+  switchTabRight: "mod+pagedown",
+  switchTabLeft: "mod+pageup",
 };
 
 const CONTROL_DEFAULTS = {

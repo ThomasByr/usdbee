@@ -45,6 +45,14 @@ describe("controlsState keybinding defaults", () => {
     expect(DEFAULT_KEYBINDINGS.previousFrame).toBe("arrowleft");
   });
 
+  it("binds tab navigation to the mod chords by default", () => {
+    expect(DEFAULT_KEYBINDINGS.nextTab).toBe("mod+tab");
+    expect(DEFAULT_KEYBINDINGS.previousTab).toBe("mod+shift+tab");
+    expect(DEFAULT_KEYBINDINGS.closeTab).toBe("mod+w");
+    expect(DEFAULT_KEYBINDINGS.switchTabRight).toBe("mod+pagedown");
+    expect(DEFAULT_KEYBINDINGS.switchTabLeft).toBe("mod+pageup");
+  });
+
   it("reset restores the defaults without letting the state leak into them", () => {
     controlsState.keybindings.forward = "x";
     expect(DEFAULT_KEYBINDINGS.forward).toBe("z");
