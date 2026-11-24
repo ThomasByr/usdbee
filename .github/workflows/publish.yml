@@ -103,7 +103,7 @@ jobs:
           # the NSIS one, which is what an installed usdbee knows how to run.
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
-          assetNamePattern: "[name]-[version]-[platform]-[arch][setup][ext]"
+          assetNamePattern: "[mainBinaryName]-[version]-[platform]-[arch][setup][ext]"
           uploadPlainBinary: ${{ matrix.plain == true }}
 
   # latest.json is written by five jobs at once; a missing entry is either a
