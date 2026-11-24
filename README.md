@@ -29,7 +29,7 @@ Please download the appropriate installer for your operating system, run the ins
 
 On MacOS, both Intel and Apple Silicon architectures are supported.
 
-### Updates
+### Updates (from v1.1.0 onwards)
 
 **About → Check for Updates...** downloads and installs the latest release in place.
 The download is verified against the public update key in `tauri.conf.json`.
