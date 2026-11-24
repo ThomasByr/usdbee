@@ -104,11 +104,11 @@ Then open the `assets/CarbonFrameBike.usdz` file in USDBEE.
 usage: usdbee [-h] [-p x,y,z | --camera-position x,y,z] [-t x,y,z | --camera-target x,y,z] [-f fov | --camera-fov fov] [FILE...]
 ```
 
-Pass one or more USD files to open them as tabs on startup.
+Pass one or more USD files to open them as tabs on startup. The following options act on the free camera:
 
-- `-p` / `--camera-position` sets the camera location and
-- `-t` / `--camera-target` sets the point it looks at, in world units.
-- `-f` / `--camera-fov` sets the field of view, in degrees.
+- `-p` / `--camera-position` sets the camera location
+- `-t` / `--camera-target` sets the point it looks at, in world units
+- `-f` / `--camera-fov` sets the field of view, in degrees
 
 Both `-p` and `-t` take three numbers, written `1,2,3` or `1 2 3`.
 
