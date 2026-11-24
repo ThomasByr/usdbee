@@ -60,6 +60,9 @@ describe("SettingsTab keyboard section", () => {
     expect(document.querySelector('[data-action="playPause"] span')!.textContent!.trim()).toBe(
       "Play / Pause",
     );
+    expect(document.querySelector('[data-action="cycleCamera"] span')!.textContent!.trim()).toBe(
+      "Cycle Through Cameras",
+    );
     expect(labels).toContain("Reset controls");
   });
 

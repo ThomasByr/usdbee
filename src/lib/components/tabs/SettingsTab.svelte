@@ -30,6 +30,7 @@
     gizmoTranslate: "Switch to Gizmo Translate",
     gizmoRotate: "Switch to Gizmo Rotate",
     gizmoScale: "Switch to Gizmo Scale",
+    cycleCamera: "Cycle Through Cameras",
     commandPalette: "Open the Command Palette",
   };
 

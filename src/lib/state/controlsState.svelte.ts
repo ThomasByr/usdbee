@@ -13,6 +13,7 @@ export const DEFAULT_KEYBINDINGS = {
   gizmoTranslate: "1",
   gizmoRotate: "2",
   gizmoScale: "3",
+  cycleCamera: "c",
   commandPalette: "mod+p",
 };
 

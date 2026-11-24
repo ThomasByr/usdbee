@@ -41,6 +41,7 @@
   import type { GizmoMode } from "$lib/render/xformOps";
   import { stageModalContent } from "$lib/stage/modalErrors";
   import Viewport from "$lib/components/Viewport.svelte";
+  import CameraNotice from "$lib/components/CameraNotice.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import AboutModal from "$lib/components/AboutModal.svelte";
   import { updateState, checkForUpdates, startupAutoCheck } from "$lib/state/updateState.svelte";
@@ -319,6 +320,8 @@
         else if (key === kb.gizmoTranslate) gizmoMode = "translate";
         else if (key === kb.gizmoRotate) gizmoMode = "rotate";
         else if (key === kb.gizmoScale) gizmoMode = "scale";
+        // The dispatcher raises the notice; a second call here would show it twice.
+        else if (key === kb.cycleCamera) void dispatchCommand(viewer, "cycle_camera", {}).catch(() => {});
       }
     };
     const handleGlobalKeyup = (e: KeyboardEvent) => {
@@ -652,6 +655,7 @@
       {lightElevation}
       onOpenSettings={() => void openSettingsAtRecent()}
     />
+    <CameraNotice />
   </main>
 </div>
 

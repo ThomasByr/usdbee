@@ -32,6 +32,10 @@ describe("controlsState keybinding defaults", () => {
     expect(DEFAULT_KEYBINDINGS.commandPalette).toBe("mod+p");
   });
 
+  it("binds camera cycling to c by default", () => {
+    expect(DEFAULT_KEYBINDINGS.cycleCamera).toBe("c");
+  });
+
   it("binds play/pause to k by default", () => {
     expect(controlsState.keybindings.playPause).toBe("k");
   });
