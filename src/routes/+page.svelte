@@ -42,6 +42,7 @@
   import { stageModalContent } from "$lib/stage/modalErrors";
   import Viewport from "$lib/components/Viewport.svelte";
   import CameraNotice from "$lib/components/CameraNotice.svelte";
+  import { clearCameraNotice } from "$lib/state/cameraNotice.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import AboutModal from "$lib/components/AboutModal.svelte";
   import { updateState, checkForUpdates, startupAutoCheck } from "$lib/state/updateState.svelte";
@@ -247,6 +248,13 @@
       aboutFull = false;
       showAboutModal = true;
     }
+  });
+
+  // A stage switch replaces the cameras, so a card naming the old one would
+  // outlive its stage for the rest of the fade.
+  $effect(() => {
+    void stageState.activeStageId;
+    clearCameraNotice();
   });
 
   onMount(() => {
@@ -655,7 +663,7 @@
       {lightElevation}
       onOpenSettings={() => void openSettingsAtRecent()}
     />
-    <CameraNotice />
+    <CameraNotice aboveTimeline={viewer.hasAnimation} />
   </main>
 </div>
 
