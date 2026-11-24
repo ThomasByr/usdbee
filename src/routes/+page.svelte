@@ -285,7 +285,29 @@
       }
       if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA")
         return;
-      viewer.keysPressed.add(e.key.toLowerCase());
+      // Tab shortcuts come before the plain-key map: Tab would move focus and
+      // Ctrl+W would otherwise reach the webview. They also drop keys held from
+      // before the chord, so a held Shift cannot keep descending mid-switch.
+      const kb = controlsState.keybindings;
+      if (matchesBinding(e, kb.nextTab) || matchesBinding(e, kb.switchTabRight)) {
+        e.preventDefault();
+        viewer.keysPressed.clear();
+        void tabsState.cycleTab(1);
+        return;
+      }
+      if (matchesBinding(e, kb.previousTab) || matchesBinding(e, kb.switchTabLeft)) {
+        e.preventDefault();
+        viewer.keysPressed.clear();
+        void tabsState.cycleTab(-1);
+        return;
+      }
+      if (matchesBinding(e, kb.closeTab)) {
+        e.preventDefault();
+        viewer.keysPressed.clear();
+        void tabsState.closeTab(tabsState.activeId);
+        return;
+      }
+      // The mod file and undo chords: the only mod actions past the tab block.
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
         e.preventDefault();
         void loadOrchestrator.openUsdFile();
@@ -311,25 +333,26 @@
         e.preventDefault();
         void editState.redo();
       }
+      // The chords above are the only mod actions: no bare key below may see a
+      // held modifier, or Ctrl+Shift+Tab would also descend.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      viewer.keysPressed.add(e.key.toLowerCase());
       // Configurable gizmo mode shortcuts (Settings > Keyboard; defaults 1/2/3).
-      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
-        const key = e.key.toLowerCase();
-        const kb = controlsState.keybindings;
-        if (key === kb.nextFrame || key === kb.previousFrame) {
-          // Arrows would scroll the page; the dispatcher owns pause and clamping.
-          e.preventDefault();
-          void dispatchCommand(viewer, key === kb.nextFrame ? "next_frame" : "previous_frame", {}).catch(
-            () => {},
-          );
-          return;
-        }
-        if (key === kb.playPause) viewer.isPlayingAnim = !viewer.isPlayingAnim;
-        else if (key === kb.gizmoTranslate) gizmoMode = "translate";
-        else if (key === kb.gizmoRotate) gizmoMode = "rotate";
-        else if (key === kb.gizmoScale) gizmoMode = "scale";
-        // The dispatcher raises the notice; a second call here would show it twice.
-        else if (key === kb.cycleCamera) void dispatchCommand(viewer, "cycle_camera", {}).catch(() => {});
+      const key = e.key.toLowerCase();
+      if (key === kb.nextFrame || key === kb.previousFrame) {
+        // Arrows would scroll the page; the dispatcher owns pause and clamping.
+        e.preventDefault();
+        void dispatchCommand(viewer, key === kb.nextFrame ? "next_frame" : "previous_frame", {}).catch(
+          () => {},
+        );
+        return;
       }
+      if (key === kb.playPause) viewer.isPlayingAnim = !viewer.isPlayingAnim;
+      else if (key === kb.gizmoTranslate) gizmoMode = "translate";
+      else if (key === kb.gizmoRotate) gizmoMode = "rotate";
+      else if (key === kb.gizmoScale) gizmoMode = "scale";
+      // The dispatcher raises the notice; a second call here would show it twice.
+      else if (key === kb.cycleCamera) void dispatchCommand(viewer, "cycle_camera", {}).catch(() => {});
     };
     const handleGlobalKeyup = (e: KeyboardEvent) => {
       viewer.keysPressed.delete(e.key.toLowerCase());
