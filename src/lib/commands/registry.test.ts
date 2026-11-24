@@ -72,6 +72,16 @@ describe("command registry", () => {
     }
   });
 
+  it("carries the palette-only camera cycle", () => {
+    expect(COMMANDS).toContainEqual({
+      name: "cycle_camera",
+      description:
+        "Advance the viewport's camera to the next one in the cycle (free camera, then each stage camera, wrapping).",
+      mcp: false,
+      args: [],
+    });
+  });
+
   it("carries the palette-only tab commands", () => {
     for (const [name, description] of Object.entries(TAB_COMMANDS)) {
       expect(COMMANDS).toContainEqual({ name, description, mcp: false, args: [] });

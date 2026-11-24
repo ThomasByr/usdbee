@@ -160,6 +160,13 @@ export const COMMANDS = [
     args: [],
   },
   {
+    name: "cycle_camera",
+    description:
+      "Advance the viewport's camera to the next one in the cycle (free camera, then each stage camera, wrapping).",
+    mcp: false,
+    args: [],
+  },
+  {
     name: "recent_tab",
     description: "Activate the tab you were on before the current one.",
     mcp: false,

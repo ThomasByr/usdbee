@@ -43,6 +43,13 @@ vi.mock("$lib/state/tabsState.svelte", () => ({
 vi.mock("$lib/state/loadOrchestrator.svelte", () => ({
   loadOrchestrator: { modalError: null as string | null },
 }));
+vi.mock("$lib/state/cameraNotice.svelte", () => ({
+  CAMERA_NOTICE_MS: 2000,
+  cameraNotice: { text: null as string | null, seq: 0 },
+  showCameraNotice: vi.fn(),
+  clearCameraNotice: vi.fn(),
+  resetCameraNoticeTimer: vi.fn(),
+}));
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { saveWindowState } from "@tauri-apps/plugin-window-state";
@@ -51,6 +58,7 @@ import { stageState } from "$lib/stage/stageState.svelte";
 import { renderState } from "$lib/render/renderState.svelte";
 import { tabsState } from "$lib/state/tabsState.svelte";
 import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
+import { showCameraNotice } from "$lib/state/cameraNotice.svelte";
 import { dispatchCommand, fetchManifest, type BridgeViewer } from "./dispatch";
 import type { CameraInfo } from "$lib/stage/types";
 
@@ -63,6 +71,7 @@ const tabs = tabsState as unknown as {
   closeConfirmed: ReturnType<typeof vi.fn>;
 };
 const orchestrator = loadOrchestrator as unknown as { modalError: string | null };
+const notice = vi.mocked(showCameraNotice);
 
 function viewer(): BridgeViewer {
   return {
@@ -90,6 +99,7 @@ beforeEach(() => {
   tabs.closeTab.mockReset();
   tabs.closeConfirmed.mockReset();
   orchestrator.modalError = null;
+  notice.mockReset();
 });
 
 afterEach(() => {
@@ -97,12 +107,18 @@ afterEach(() => {
 });
 
 describe("without a viewport", () => {
-  it.each(["play", "pause", "screenshot", "select_node", "set_camera", "release_camera", "box_report"])(
-    "rejects %s with the viewport message",
-    async (cmd) => {
-      await expect(dispatchCommand(null, cmd, {})).rejects.toThrow("no viewport available");
-    },
-  );
+  it.each([
+    "play",
+    "pause",
+    "screenshot",
+    "select_node",
+    "set_camera",
+    "release_camera",
+    "box_report",
+    "cycle_camera",
+  ])("rejects %s with the viewport message", async (cmd) => {
+    await expect(dispatchCommand(null, cmd, {})).rejects.toThrow("no viewport available");
+  });
 
   it("still answers status, reporting playback off", async () => {
     expect(await dispatchCommand(null, "status", {})).toEqual({
@@ -423,6 +439,86 @@ describe("release_camera", () => {
     expect(await dispatchCommand(view, "release_camera", {})).toMatchObject({ released: false });
     expect(view.camera.position.toArray()).toEqual(pose);
     expect(view.fov).toBeCloseTo(53.13, 2);
+  });
+});
+
+describe("cycle_camera", () => {
+  const CAM: CameraInfo = {
+    path: "/World/Cam_wide",
+    name: "Cam_wide",
+    projection: "perspective",
+    focal_length: 24,
+    horizontal_aperture: 36,
+    vertical_aperture: 24,
+    clipping_range: null,
+    world_transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 2, -5, 1],
+  };
+  const TELE: CameraInfo = { ...CAM, path: "/World/Cam_tele", name: "Cam_tele" };
+
+  function freeView() {
+    const view = viewer();
+    view.camera.position.set(0, 0, 10);
+    view.stageCameras = [CAM, TELE];
+    return view;
+  }
+
+  it("looks through the first camera from the free camera, and names it", async () => {
+    const view = freeView();
+
+    expect(await dispatchCommand(view, "cycle_camera", {})).toEqual({
+      ok: true,
+      changed: true,
+      path: "/World/Cam_wide",
+    });
+    expect(view.pinnedCameraPath).toBe("/World/Cam_wide");
+    expect(notice).toHaveBeenCalledWith("Camera: Cam_wide");
+  });
+
+  it("advances to the next camera", async () => {
+    const view = freeView();
+    await dispatchCommand(view, "cycle_camera", {});
+
+    expect(await dispatchCommand(view, "cycle_camera", {})).toEqual({
+      ok: true,
+      changed: true,
+      path: "/World/Cam_tele",
+    });
+    expect(notice).toHaveBeenLastCalledWith("Camera: Cam_tele");
+  });
+
+  it("wraps from the last camera back to the free camera", async () => {
+    const view = freeView();
+    await dispatchCommand(view, "cycle_camera", {});
+    await dispatchCommand(view, "cycle_camera", {});
+
+    expect(await dispatchCommand(view, "cycle_camera", {})).toEqual({ ok: true, changed: true, path: null });
+    expect(view.pinnedCameraPath).toBeNull();
+    expect(view.camera.position.toArray()).toEqual([0, 0, 10]);
+    expect(notice).toHaveBeenLastCalledWith("Camera: Free");
+  });
+
+  it("picks the first camera when the pinned path is no longer on the stage", async () => {
+    const view = freeView();
+    view.pinnedCameraPath = "/World/Gone";
+
+    expect(await dispatchCommand(view, "cycle_camera", {})).toMatchObject({ path: "/World/Cam_wide" });
+    expect(notice).toHaveBeenCalledWith("Camera: Cam_wide");
+  });
+
+  it("says so when the stage has no cameras, and changes nothing", async () => {
+    const view = freeView();
+    view.stageCameras = [];
+
+    expect(await dispatchCommand(view, "cycle_camera", {})).toEqual({ ok: true, changed: false });
+    expect(view.pinnedCameraPath).toBeNull();
+    expect(notice).toHaveBeenCalledWith("This stage has no cameras");
+  });
+
+  it("is a silent no-op without a stage", async () => {
+    stage.activeStageId = 0;
+
+    expect(await dispatchCommand(freeView(), "cycle_camera", {})).toEqual({ ok: true, changed: false });
+    expect(notice).not.toHaveBeenCalled();
   });
 });
 

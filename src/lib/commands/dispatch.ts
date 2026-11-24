@@ -16,6 +16,8 @@ import { bindSelectionBox } from "$lib/render/sceneIntegration";
 import * as frameDiag from "$lib/perf/frameDiag";
 import { renderWithShadowUpdate } from "$lib/three/shadowMapUpdate";
 import { upAxisRotation } from "$lib/stage/upAxis";
+import { nextCameraChoice } from "$lib/stage/cameraCycle";
+import { showCameraNotice } from "$lib/state/cameraNotice.svelte";
 import type { CameraInfo, PrimDetails, RenderNode } from "$lib/stage/types";
 
 const NODE_CAP = 200;
@@ -63,6 +65,7 @@ const NEEDS_VIEWER = new Set([
   "set_camera",
   "look_through_camera",
   "release_camera",
+  "cycle_camera",
   "box_report",
 ]);
 const NEEDS_STAGE = new Set(["inspect_scene", "search_objects", "transform_object"]);
@@ -337,6 +340,27 @@ function releaseCamera(viewer: BridgeViewer) {
   return { ok: true, released: true, fov: saved.fov };
 }
 
+// The palette command behind the cycle key: one press moves the view to the
+// next entry, free camera included, so a pin is always one press from release.
+function cycleCamera(viewer: BridgeViewer) {
+  if (!stageState.activeStageId) return { ok: true, changed: false };
+  const choice = nextCameraChoice(viewer.stageCameras, viewer.pinnedCameraPath);
+  if (viewer.stageCameras.length === 0) {
+    showCameraNotice("This stage has no cameras");
+    return { ok: true, changed: false };
+  }
+  if (choice.kind === "free") {
+    const wasPinned = viewer.pinnedCamera !== null;
+    releaseCamera(viewer);
+    if (wasPinned) showCameraNotice("Camera: Free");
+    return { ok: true, changed: wasPinned, path: null };
+  }
+  const info = viewer.stageCameras.find((camera) => camera.path === choice.path);
+  lookThroughCamera(viewer, { path: choice.path });
+  showCameraNotice(`Camera: ${info?.name || choice.path}`);
+  return { ok: true, changed: true, path: choice.path };
+}
+
 // Cached vs precise AABB of the selected subtree, plus the meshes that
 // contribute the most extent. A box that reaches past the visible geometry
 // is either a hidden prim or a stale per-geometry bound; the rows say which.
@@ -531,6 +555,8 @@ export async function dispatchCommand(
       return lookThroughCamera(view, args);
     case "release_camera":
       return releaseCamera(view);
+    case "cycle_camera":
+      return cycleCamera(view);
     case "screenshot":
       return screenshot(view);
     case "close_app":
