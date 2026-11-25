@@ -115,8 +115,35 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: latest.json lists every platform
+      # Every bundle tauri signs gets its own platform key, so latest.json is the
+      # cheapest full inventory. The trailing colon keeps "linux-x86_64" from
+      # matching "linux-x86_64-deb".
+      - name: latest.json lists every bundle
         run: |
-          for key in darwin-aarch64 darwin-x86_64 linux-x86_64 linux-aarch64 windows-x86_64; do
-            curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/latest.json" | grep -q "\"$key\"" || { echo "missing $key"; exit 1; }
+          base="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
+          for attempt in 1 2 3; do
+            curl -fsSL "$base/latest.json" -o latest.json && break
+            sleep 10
           done
+          test -s latest.json || { echo "cannot fetch latest.json"; exit 1; }
+          missing=0
+          for key in \
+            darwin-aarch64 darwin-aarch64-app darwin-x86_64 darwin-x86_64-app \
+            linux-aarch64 linux-aarch64-appimage linux-aarch64-deb linux-aarch64-rpm \
+            linux-x86_64 linux-x86_64-appimage linux-x86_64-deb linux-x86_64-rpm \
+            windows-x86_64 windows-x86_64-nsis windows-x86_64-msi; do
+            grep -q "\"$key\":" latest.json || { echo "missing $key"; missing=1; }
+          done
+          exit $missing
+
+      # The dmg and the portable exe carry no updater signature, so latest.json
+      # never lists them and they need their own check.
+      - name: dmg and portable exe uploaded
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "${{ github.ref_name }}" --json assets -q '.assets[].name' > assets.txt
+          dmg=$(grep -c 'darwin-.*\.dmg$' assets.txt || true)
+          test "$dmg" = 2 || { echo "expected 2 dmg, got $dmg"; exit 1; }
+          portable=$(grep 'windows-.*\.exe$' assets.txt | grep -vc 'setup\.exe$' || true)
+          test "$portable" = 1 || { echo "expected 1 portable exe, got $portable"; exit 1; }
