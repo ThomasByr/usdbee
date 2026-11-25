@@ -298,6 +298,7 @@ describe("buildScene", () => {
     const getMaterialBatch = vi.fn(async (slice: string[]) =>
       slice.map(() => ({ name: "Red", surface: null })),
     );
+    const getMaterial = vi.fn(async () => ({ name: "PerBinding", surface: null }));
     const [twoSided, oneSided] = await buildMeshes(
       [
         node({
@@ -315,11 +316,12 @@ describe("buildScene", () => {
           material: shared,
         }),
       ],
-      { getMaterialBatch },
+      { getMaterialBatch, getMaterial },
     );
 
     // Both prims read the same prefilled MaterialInfo; the side still differs.
     expect(getMaterialBatch).toHaveBeenCalledWith([shared]);
+    expect(getMaterial, "the prefill served both prims").not.toHaveBeenCalled();
     expect(twoSided.material.side).toBe(THREE.DoubleSide);
     expect(oneSided.material.side).toBe(THREE.FrontSide);
   });

@@ -897,6 +897,7 @@ struct PoseNode {
     geometry_animated: bool,
     animated: bool,
     is_points: bool,
+    double_sided: bool,
     visible: bool,
     material: Option<String>,
     matrix: [f32; 16],
@@ -919,6 +920,7 @@ const POSE_FLAG_GEOMETRY_ANIMATED: u8 = 1 << 1;
 const POSE_FLAG_INSTANCES: u8 = 1 << 2;
 const POSE_FLAG_IS_POINTS: u8 = 1 << 3;
 const POSE_FLAG_ANIMATED: u8 = 1 << 4;
+const POSE_FLAG_DOUBLE_SIDED: u8 = 1 << 5;
 
 fn take_u32(bytes: &[u8], at: &mut usize) -> u32 {
     let value = u32::from_le_bytes(bytes[*at..*at + 4].try_into().unwrap());
@@ -993,6 +995,7 @@ fn decode_pose(frame: &[u8]) -> DecodedPose<'_> {
             geometry_animated: flags & POSE_FLAG_GEOMETRY_ANIMATED != 0,
             animated: flags & POSE_FLAG_ANIMATED != 0,
             is_points: flags & POSE_FLAG_IS_POINTS != 0,
+            double_sided: flags & POSE_FLAG_DOUBLE_SIDED != 0,
             material: if material_id == POSE_NO_MATERIAL as usize {
                 None
             } else {
@@ -1109,6 +1112,11 @@ fn assert_pose_matches(nodes: &[RenderNode], trees: &[PoseTree], where_: &str) {
             node.type_name == "Points",
             tree.node.is_points,
             "{}: is_points follows type_name",
+            node.path
+        );
+        assert_eq!(
+            node.double_sided, tree.node.double_sided,
+            "{}: double_sided",
             node.path
         );
         assert_eq!(node.material, tree.node.material, "{}: material", node.path);

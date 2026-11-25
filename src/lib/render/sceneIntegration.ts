@@ -83,6 +83,12 @@ export function resetLoadedScene(viewer: RendererKit) {
   viewer.stageCameras = [];
 }
 
+// A zero-thickness surface sits at its own shadow-map depth, so the texel size,
+// not the flat bias, is what keeps a double-sided plane off itself.
+function shadowNormalBias(reach: number, mapSize: number): number {
+  return ((2 * reach) / mapSize) * 1.5;
+}
+
 // Camera fit / grid / light framing for the rust scene (no skinned
 // meshes, no USD cameras).
 export function integrateScene(viewer: RendererKit, group: THREE.Group) {
@@ -177,6 +183,7 @@ export function integrateScene(viewer: RendererKit, group: THREE.Group) {
     viewer.dirLight.shadow.camera.near = 0.1;
     viewer.dirLight.shadow.camera.far = size * 4;
     viewer.dirLight.shadow.camera.updateProjectionMatrix();
+    viewer.dirLight.shadow.normalBias = shadowNormalBias(d, viewer.dirLight.shadow.mapSize.width);
   }
 
   viewer.scene!.add(group);
@@ -453,6 +460,7 @@ export function syncGraphicsSettings(viewer: RendererKit) {
   if (viewer.dirLight && viewer.dirLight.shadow.mapSize.width !== sMapSize) {
     viewer.dirLight.shadow.mapSize.width = sMapSize;
     viewer.dirLight.shadow.mapSize.height = sMapSize;
+    viewer.dirLight.shadow.normalBias = shadowNormalBias(viewer.sceneSize * 1.2, sMapSize);
     if (viewer.dirLight.shadow.map) {
       viewer.dirLight.shadow.map.dispose();
       viewer.dirLight.shadow.map = null as any;
@@ -693,6 +701,7 @@ function buildSceneLight(
     shadow.mapSize.height = settings.shadowMapSize;
     shadow.bias = -0.0001;
     const reach = viewer.sceneSize * 1.2;
+    shadow.normalBias = shadowNormalBias(reach, settings.shadowMapSize);
     if ((light as THREE.DirectionalLight).isDirectionalLight) {
       // The default ortho bounds cover 5 units: the stage's own extent decides.
       shadow.camera.left = -reach;

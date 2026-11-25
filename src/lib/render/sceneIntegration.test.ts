@@ -970,6 +970,7 @@ describe("syncGraphicsSettings shadow triggers", () => {
         capabilities: { getMaxAnisotropy: () => 16 },
       },
       scene: null,
+      sceneSize: 10,
       dirLight: null,
       loadedGroup: null,
     } as unknown as RendererKit;
@@ -1012,6 +1013,9 @@ describe("syncGraphicsSettings shadow triggers", () => {
     syncGraphicsSettings(kit);
 
     expect(kit.dirLight!.shadow.mapSize.width).toBe(4096);
+    // The rig's directional light shadows the same double-sided geometry, so
+    // its normal bias follows the new map size too.
+    expect(kit.dirLight!.shadow.normalBias).toBeCloseTo(((2 * (kit.sceneSize * 1.2)) / 4096) * 1.5, 10);
     expect(consumeShadowUpdate()).toBe(true);
   });
 
@@ -1266,6 +1270,10 @@ describe("syncSceneLights", () => {
     expect(light!.shadow.mapSize.width).toBe(4096);
     expect(light!.shadow.mapSize.height).toBe(4096);
     expect(light!.shadow.bias).toBeCloseTo(-0.0001, 10);
+    // A double-sided zero-thickness prim sits at its own shadow-map depth: the
+    // texel size is what keeps it off itself, so the normal bias tracks both.
+    const texel = (2 * (kit.sceneSize! * 1.2)) / 4096;
+    expect(light!.shadow.normalBias).toBeCloseTo(texel * 1.5, 10);
   });
 
   it("disposes a removed light's shadow map, which Light.dispose() does not", () => {

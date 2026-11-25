@@ -323,6 +323,7 @@ function asFixture(nodes: RenderNode[]): PoseFixtureNode[] {
     geometry_animated: node.geometry_animated,
     animated: node.animated,
     type_name: node.type_name,
+    double_sided: node.double_sided,
     material: node.material,
     instances: node.instances,
   }));
