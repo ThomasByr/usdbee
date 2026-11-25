@@ -37,8 +37,10 @@ const GPRIM_TYPES = new Set([
   "Cube",
   "Plane",
   "Cylinder",
+  "Cylinder_1",
   "Cone",
   "Capsule",
+  "Capsule_1",
 ]);
 
 export function isGprim(node: PrimNode): boolean {

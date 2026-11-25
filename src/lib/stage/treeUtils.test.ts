@@ -83,12 +83,14 @@ describe("isGprim", () => {
         "Cube",
         "Plane",
         "Cylinder",
+        "Cylinder_1",
         "Cone",
         "Capsule",
+        "Capsule_1",
       ]
         .map((type) => leaf("/A", type, type))
         .map(isGprim),
-    ).toEqual([true, true, true, true, true, true, true, true, true, true]);
+    ).toEqual([true, true, true, true, true, true, true, true, true, true, true, true]);
     expect(
       ["Xform", "Scope", "Material", "PointInstancer", ""].map((type) => leaf("/A", type, type)).map(isGprim),
     ).toEqual([false, false, false, false, false]);

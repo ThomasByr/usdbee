@@ -1491,6 +1491,97 @@ fn capsule_extends_height_plus_two_radii_on_its_axis() {
         .all(|n| n.iter().all(|v| v.is_finite())));
 }
 
+#[test]
+fn cylinder_1_tapers_between_its_radii() {
+    let (stage, _info) = open_stage(&fixture("gprims.usda")).expect("gprims stage should open");
+
+    let frustum = tessellate(&stage, "/World/Frustum").expect("Frustum should tessellate");
+
+    // The default axis is Z, so the radial plane is (x, y).
+    let widest = |z: f32| {
+        frustum
+            .positions
+            .iter()
+            .filter(|p| p[2] == z)
+            .map(|p| (p[0] * p[0] + p[1] * p[1]).sqrt())
+            .fold(0.0_f32, f32::max)
+    };
+    assert!(
+        (widest(-1.0) - 1.0).abs() < 1e-5,
+        "radiusBottom at -height/2"
+    );
+    assert!(widest(1.0) <= 0.2001, "radiusTop caps the top ring");
+    assert!(frustum
+        .normals
+        .expect("frustum carries normals")
+        .iter()
+        .all(|n| n.iter().all(|v| v.is_finite())));
+}
+
+#[test]
+fn cylinder_1_with_zero_radii_collapses_onto_its_axis() {
+    let (stage, _info) = open_stage(&fixture("gprims.usda")).expect("gprims stage should open");
+
+    let needle = tessellate(&stage, "/World/Needle").expect("Needle should tessellate");
+
+    assert!(needle
+        .positions
+        .iter()
+        .all(|p| p.iter().all(|v| v.is_finite())));
+    assert!(needle
+        .normals
+        .expect("needle carries normals")
+        .iter()
+        .all(|n| n.iter().all(|v| v.is_finite())));
+    let widest = needle
+        .positions
+        .iter()
+        .map(|p| (p[0] * p[0] + p[1] * p[1]).sqrt())
+        .fold(0.0_f32, f32::max);
+    assert_eq!(widest, 0.0, "a zero radius collapses to the axis");
+}
+
+#[test]
+fn capsule_1_caps_carry_their_own_radii() {
+    let (stage, _info) = open_stage(&fixture("gprims.usda")).expect("gprims stage should open");
+
+    let pill = tessellate(&stage, "/World/FrustumPill").expect("FrustumPill should tessellate");
+
+    let zs: Vec<f32> = pill.positions.iter().map(|p| p[2]).collect();
+    assert_eq!(
+        zs.iter().cloned().fold(f32::MAX, f32::min),
+        -2.0,
+        "bottom pole at -height/2 - radiusBottom"
+    );
+    assert_eq!(
+        zs.iter().cloned().fold(f32::MIN, f32::max),
+        1.5,
+        "top pole at +height/2 + radiusTop"
+    );
+    // The default axis is Z, so the radial plane is (x, y). The equator rows sit
+    // a float rounding away from ±height/2, hence the tolerance.
+    let widest_near = |z: f32| {
+        pill.positions
+            .iter()
+            .filter(|p| (p[2] - z).abs() < 1e-5)
+            .map(|p| (p[0] * p[0] + p[1] * p[1]).sqrt())
+            .fold(0.0_f32, f32::max)
+    };
+    assert!(
+        (widest_near(-1.0) - 1.0).abs() < 1e-5,
+        "radiusBottom at -height/2"
+    );
+    assert!(
+        (widest_near(1.0) - 0.5).abs() < 1e-5,
+        "radiusTop at +height/2"
+    );
+    assert!(pill
+        .normals
+        .expect("capsule carries normals")
+        .iter()
+        .all(|n| n.iter().all(|v| v.is_finite())));
+}
+
 fn count_geometry(nodes: &[RenderNode]) -> usize {
     nodes
         .iter()

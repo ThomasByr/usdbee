@@ -11,8 +11,10 @@
 //! `Points` prims tessellate to a point cloud (indices empty); `Sphere` prims
 //! tessellate analytically at a fixed 24×12 density, `Cube` prims to six
 //! flat quads with per-face UVs, `Plane` prims to a single quad on the
-//! axes their `axis` names, `Cylinder` prims to a revolved surface with
-//! closed caps, and `Cone` prims to a revolved cone on a closed base.
+//! axes their `axis` names, `Cylinder` and `Cylinder_1` prims to a revolved
+//! surface with closed caps, `Cone` prims to a revolved cone on a closed base,
+//! and `Capsule` and `Capsule_1` prims to a cylinder section capped by two half
+//! spheres.
 //! Authored `normals`, `primvars:st` and `primvars:displayColor` are read
 //! at the queried time code; for meshes unauthored normals are generated
 //! as per-vertex area-weighted face-normal averages.
@@ -21,9 +23,9 @@ use openusd::gf::{Vec2f, Vec3f};
 use openusd::sdf;
 use openusd::usd::{Prim, SchemaBase, TimeCode};
 use openusd_schemas::geom::{
-    AttributeMetadata, Axis, Capsule, CapsuleSchema, Cone, ConeSchema, Cube, CubeSchema, Curves,
-    CurvesSchema, Cylinder, CylinderSchema, Interpolation, Mesh, NurbsCurves, NurbsCurvesSchema,
-    Plane, PlaneSchema, Points, Primvar,
+    AttributeMetadata, Axis, Capsule, CapsuleSchema, Capsule_1, Capsule_1Schema, Cone, ConeSchema,
+    Cube, CubeSchema, Curves, CurvesSchema, Cylinder, CylinderSchema, Cylinder_1, Cylinder_1Schema,
+    Interpolation, Mesh, NurbsCurves, NurbsCurvesSchema, Plane, PlaneSchema, Points, Primvar,
 };
 use openusd_schemas::geom::{MeshSchema, PointBasedSchema};
 use openusd_schemas::SchemaError;
@@ -106,7 +108,7 @@ fn context(path: &str, error: impl std::fmt::Display) -> String {
 
 /// Tessellate one composed prim. `Ok(None)` for anything that is not
 /// renderable geometry (Mesh, BasisCurves, NurbsCurves, Points, Sphere, Cube,
-/// Plane, Cylinder, Cone, Capsule);
+/// Plane, Cylinder, Cylinder_1, Cone, Capsule, Capsule_1);
 /// `Err` names the prim path when the geometry itself cannot be tessellated.
 /// `time: Some(t)`
 /// reads time-sampled attributes at `t`; `None` reads the default-time
@@ -130,8 +132,10 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
         Some("Cube") => cube_data(prim, time_code, &path),
         Some("Plane") => plane_data(prim, time_code, &path),
         Some("Cylinder") => cylinder_data(prim, time_code, &path),
+        Some("Cylinder_1") => cylinder_data(prim, time_code, &path),
         Some("Cone") => cone_data(prim, time_code, &path),
         Some("Capsule") => capsule_data(prim, time_code, &path),
+        Some("Capsule_1") => capsule_data(prim, time_code, &path),
         _ => Ok(None),
     }
 }
@@ -540,7 +544,8 @@ fn revolved(
 
 /// A cylinder about the origin: radius 1 and height 2 by default, its `axis`
 /// naming the height's direction. The profile's on-axis endpoints are the cap
-/// centres, so both caps come out as fans with the axis normal.
+/// centres, so both caps come out as fans with the axis normal. `Cylinder_1`
+/// authors the two rim radii separately instead of one `radius`.
 fn cylinder_data(
     prim: &Prim,
     time_code: Option<TimeCode>,
@@ -557,12 +562,32 @@ fn cylinder_data(
         .filter(|height| height.is_finite() && *height >= 0.0)
         .unwrap_or(2.0)
         .max(1e-4);
-    let radius = finite_positive(
-        cylinder
-            .radius_at(time_code)
-            .map_err(|e| context(path, e))?,
-        1.0,
-    );
+    // A zero radius is legal too: `revolved()` collapses it to the axis.
+    let (radius_bottom, radius_top) = if tapered(prim, "Cylinder_1", path)? {
+        let cylinder = Cylinder_1::from_prim_unchecked(prim.clone());
+        (
+            finite_non_negative(
+                cylinder
+                    .radius_bottom_at(time_code)
+                    .map_err(|e| context(path, e))?,
+                1.0,
+            ),
+            finite_non_negative(
+                cylinder
+                    .radius_top_at(time_code)
+                    .map_err(|e| context(path, e))?,
+                1.0,
+            ),
+        )
+    } else {
+        let radius = finite_non_negative(
+            cylinder
+                .radius_at(time_code)
+                .map_err(|e| context(path, e))?,
+            1.0,
+        );
+        (radius, radius)
+    };
     // `axis` is uniform, so it takes no time code.
     let axis = cylinder
         .axis()
@@ -573,10 +598,10 @@ fn cylinder_data(
     // side wall distinct normal rows, so the rim stays hard.
     let profile = [
         (0.0, -half),
-        (radius, -half),
-        (radius, -half),
-        (radius, half),
-        (radius, half),
+        (radius_bottom, -half),
+        (radius_bottom, -half),
+        (radius_top, half),
+        (radius_top, half),
         (0.0, half),
     ];
     Ok(Some(revolved(prim, time_code, path, &profile, axis)?))
@@ -599,7 +624,7 @@ fn cone_data(
         .filter(|height| height.is_finite() && *height >= 0.0)
         .unwrap_or(2.0)
         .max(1e-4);
-    let radius = finite_positive(
+    let radius = finite_non_negative(
         cone.radius_at(time_code).map_err(|e| context(path, e))?,
         1.0,
     );
@@ -623,7 +648,8 @@ const CAP_ROWS: usize = 6;
 
 /// A capsule about the origin: a `height`-long cylinder along `axis`, capped by
 /// two half spheres of `radius`. Defaults are height 1 and radius 0.5, so the
-/// total length on the axis is `height + 2 * radius`.
+/// total length on the axis is `height + 2 * radius`. `Capsule_1` sizes each cap
+/// with its own radius, and the section between the caps tapers between them.
 fn capsule_data(
     prim: &Prim,
     time_code: Option<TimeCode>,
@@ -638,10 +664,29 @@ fn capsule_data(
         .filter(|height| height.is_finite() && *height >= 0.0)
         .unwrap_or(1.0)
         .max(1e-4);
-    let radius = finite_positive(
-        capsule.radius_at(time_code).map_err(|e| context(path, e))?,
-        0.5,
-    );
+    let (radius_bottom, radius_top) = if tapered(prim, "Capsule_1", path)? {
+        let capsule = Capsule_1::from_prim_unchecked(prim.clone());
+        (
+            finite_non_negative(
+                capsule
+                    .radius_bottom_at(time_code)
+                    .map_err(|e| context(path, e))?,
+                0.5,
+            ),
+            finite_non_negative(
+                capsule
+                    .radius_top_at(time_code)
+                    .map_err(|e| context(path, e))?,
+                0.5,
+            ),
+        )
+    } else {
+        let radius = finite_non_negative(
+            capsule.radius_at(time_code).map_err(|e| context(path, e))?,
+            0.5,
+        );
+        (radius, radius)
+    };
     // `axis` is uniform, so it takes no time code. `CapsuleSchema` hands back
     // the token, not the enum, like `ConeSchema`.
     let axis = capsule
@@ -653,20 +698,44 @@ fn capsule_data(
     // A capsule has no hard edge: every row meets the next tangentially, so no
     // point is duplicated and the normals stay smooth across the hemisphere
     // joins. Each cap is measured from its pole, where the angle is exactly 0
-    // and the row collapses to one on-axis vertex.
+    // and the row collapses to one on-axis vertex. The section between the two
+    // equators tapers from one authored radius to the other, so nothing ever
+    // divides by their difference.
     let mut profile: Vec<(f32, f32)> = Vec::with_capacity(2 * (CAP_ROWS + 1) + 1);
     for row in 0..=CAP_ROWS {
         let angle = std::f32::consts::FRAC_PI_2 * row as f32 / CAP_ROWS as f32;
         let (sin, cos) = angle.sin_cos();
-        profile.push((radius * sin, -half - radius * cos));
+        profile.push((radius_bottom * sin, -half - radius_bottom * cos));
     }
-    profile.push((radius, half));
+    profile.push((radius_top, half));
     for row in (0..CAP_ROWS).rev() {
         let angle = std::f32::consts::FRAC_PI_2 * row as f32 / CAP_ROWS as f32;
         let (sin, cos) = angle.sin_cos();
-        profile.push((radius * sin, half + radius * cos));
+        profile.push((radius_top * sin, half + radius_top * cos));
     }
     Ok(Some(revolved(prim, time_code, path, &profile, axis)?))
+}
+
+/// Whether `prim` is the two-radius variant of a shape. Such a prim carries the
+/// plain prim's `height` and `axis` names, so only the radii need the other
+/// schema view.
+fn tapered(prim: &Prim, type_name: &str, path: &str) -> Result<bool, String> {
+    Ok(prim
+        .type_name()
+        .map_err(|e| context(path, e))?
+        .map(|name| name.to_string())
+        .as_deref()
+        == Some(type_name))
+}
+
+/// An authored radius of exactly 0 has meaning — the profile collapses to the
+/// axis — so unlike `finite_positive` it keeps that value; a non-finite or
+/// negative radius falls back like an unauthored one.
+fn finite_non_negative(value: Option<f64>, fallback: f32) -> f32 {
+    value
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(fallback)
 }
 
 /// An authored size that is non-finite or non-positive has no meaning, so it
