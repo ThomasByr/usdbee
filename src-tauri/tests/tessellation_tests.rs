@@ -1399,7 +1399,7 @@ fn cylinder_with_zero_height_stays_finite() {
     let widest = pancake
         .positions
         .iter()
-        .map(|p| (p[0] * p[0] + p[2] * p[2]).sqrt())
+        .map(|p| (p[0] * p[0] + p[1] * p[1]).sqrt())
         .fold(0.0_f32, f32::max);
     assert!((widest - 1.0).abs() < 1e-5, "the authored radius survives");
 }
