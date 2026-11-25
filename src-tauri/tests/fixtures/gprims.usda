@@ -59,6 +59,15 @@ def Xform "World"
         double height = 2
     }
 
+    def Cylinder "Riser"
+    {
+        double radius = 0.5
+        double height.timeSamples = {
+            1: 2,
+            10: 4,
+        }
+    }
+
     def Cone "Spike"
     {
         double height = 3

@@ -3077,7 +3077,8 @@ fn stage_err(error: openusd::Error) -> String {
 /// via the schemas `ImageableExt` walk) is `proxy` or `guide` are excluded;
 /// `visible` is the computed visibility (an `invisible` opinion on the prim
 /// or any imageable ancestor clears it, re-authoring `inherited` stops the
-/// walk); geometry nodes (Mesh/BasisCurves/NurbsCurves/Points/Sphere/Cube) carry
+/// walk); geometry nodes (Mesh/BasisCurves/NurbsCurves/Points/Sphere/Cube/
+/// Plane/Cylinder/Cylinder_1/Cone/Capsule/Capsule_1) carry
 /// their direct `material:binding` target path;
 /// PointInstancer nodes carry one synthetic child per prototype with the
 /// per-prototype instance matrices (see `prototype_children`).
@@ -3306,8 +3307,14 @@ fn build_facts(
             ),
         ),
     };
-    let (self_moves, self_deforms, self_visibility_animated) =
-        samples_scene_motion(prim, renders, imageable, skel_memo, sampled_attrs)?;
+    let (self_moves, self_deforms, self_visibility_animated) = samples_scene_motion(
+        prim,
+        &type_name,
+        renders,
+        imageable,
+        skel_memo,
+        sampled_attrs,
+    )?;
     // The walk threads this down as its `vis` force; the excluded lift and
     // the prototype expansions decide it their own way, so it is recorded
     // here as the union over the whole render path.
@@ -3454,6 +3461,25 @@ fn renders_geometry(type_name: &str) -> bool {
     )
 }
 
+/// The sizing attributes each gprim builder reads at the requested time, so a
+/// sample resizes rendered vertices. A custom attribute that happens to carry
+/// one of these names on another type (`custom double size` on a Sphere) never
+/// reaches a vertex and stays unrendered data.
+fn sizes_geometry(type_name: &str, name: &str) -> bool {
+    matches!(
+        (type_name, name),
+        ("Cube", "size")
+            | ("Plane", "width")
+            | ("Plane", "length")
+            | (
+                "Cylinder" | "Cylinder_1" | "Cone" | "Capsule" | "Capsule_1",
+                "height"
+            )
+            | ("Cylinder_1" | "Capsule_1", "radiusTop")
+            | ("Cylinder_1" | "Capsule_1", "radiusBottom")
+    )
+}
+
 /// One attribute pass over a prim for every animated signal at once:
 /// `(moves transform, deforms geometry, visibility samples)` — the
 /// manifest walk previously enumerated the composed attribute list twice
@@ -3466,12 +3492,14 @@ fn renders_geometry(type_name: &str) -> bool {
 /// is never computed per call).
 /// Geometry deformation covers points/normals/widths and primvars
 /// (Task 6 ruling 1a) plus the topology attrs tessellation reads at the
-/// requested time (faceVertexCounts/faceVertexIndices/curveVertexCounts); transform motion covers xformOps, the
+/// requested time (faceVertexCounts/faceVertexIndices/curveVertexCounts) and
+/// the sizing attrs each gprim builder reads (`sizes_geometry`); transform motion covers xformOps, the
 /// PointInstancer's per-instance arrays, and — third flag — overall
 /// `visibility` time samples (compute_visibility stays per-call). Attributes outside any
 /// family skip the time-sample query.
 fn samples_scene_motion(
     prim: &openusd::usd::Prim,
+    type_name: &str,
     renders_geometry: bool,
     imageable: bool,
     skel_memo: &mut SkelAnimMemo,
@@ -3518,7 +3546,8 @@ fn samples_scene_motion(
                     | "faceVertexCounts"
                     | "faceVertexIndices"
                     | "curveVertexCounts"
-            ) || name.starts_with("primvars:"));
+            ) || name.starts_with("primvars:")
+                || sizes_geometry(type_name, name));
         let visibility_samples = imageable && name == "visibility";
         if !moves_transform && !deforms_geometry && !visibility_samples {
             continue;

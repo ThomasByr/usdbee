@@ -1263,6 +1263,41 @@ fn cube_uses_size_and_spans_its_bounds() {
         Some(vec![[1.0, 0.0, 0.0]; 24]),
         "constant displayColor replicates"
     );
+
+    // Counter-clockwise seen from outside: every triangle's geometric normal
+    // agrees with its vertex normals. The symmetric extents above cannot catch
+    // a sign slip in the hand-built index order; this can.
+    let normals = cube.normals.as_deref().expect("cube carries normals");
+    for triangle in cube.indices.chunks_exact(3) {
+        let [a, b, c] = [0, 1, 2].map(|i| cube.positions[triangle[i] as usize]);
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let normal = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        for corner in [0, 1, 2].map(|i| triangle[i] as usize) {
+            let vertex = normals[corner];
+            let alignment = normal[0] * vertex[0] + normal[1] * vertex[1] + normal[2] * vertex[2];
+            assert!(
+                alignment > 0.0,
+                "triangle {triangle:?} faces away from its vertex normal"
+            );
+        }
+    }
+    // All six axis-aligned outward normals are authored, four vertices each.
+    for axis in 0..3 {
+        for sign in [-1.0f32, 1.0] {
+            let mut expected = [0.0f32; 3];
+            expected[axis] = sign;
+            assert_eq!(
+                normals.iter().filter(|normal| **normal == expected).count(),
+                4,
+                "four vertices carry the {expected:?} face normal"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1322,6 +1357,23 @@ fn plane_axis_maps_width_and_length_to_the_perpendicular_axes() {
     assert_eq!(extent(&ceiling, 1), (-1.0, 1.0), "length on y");
     assert_eq!(extent(&ceiling, 2), (0.0, 0.0), "flat in z");
     assert_eq!(ceiling.normals, Some(vec![[0.0, 0.0, 1.0]; 4]));
+
+    // The default axis picks the one winding with `length_sign` 1.0; a slip
+    // there faces the plane away from +Z and three.js culls it from above.
+    for triangle in ceiling.indices.chunks_exact(3) {
+        let [a, b, c] = [0, 1, 2].map(|i| ceiling.positions[triangle[i] as usize]);
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let normal = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        assert!(
+            normal[2] > 0.0,
+            "triangle {triangle:?} must face along +Z, got {normal:?}"
+        );
+    }
 }
 
 #[test]
@@ -1515,6 +1567,11 @@ fn capsule_extends_height_plus_two_radii_on_its_axis() {
         "hemispheres span the radius"
     );
     assert_eq!(extent(&capsule, 2), (-0.5, 0.5));
+    assert_eq!(
+        capsule.positions.len(),
+        302,
+        "12 rings of 25 vertices around two single-vertex poles"
+    );
     assert!(capsule
         .normals
         .expect("capsule carries normals")

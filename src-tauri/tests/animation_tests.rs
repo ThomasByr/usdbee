@@ -464,6 +464,21 @@ fn manifest_flags_sampled_topology_under_transform_motion() {
 }
 
 #[test]
+fn manifest_flags_sampled_gprim_sizing_as_geometry_animation() {
+    // A `height` sample resizes the shape itself, so the playback step must
+    // refetch it: the sizing attributes are geometry-defining, not unrendered
+    // data like a custom attribute.
+    let nodes = manifest_from("gprims.usda", Some(1.0));
+
+    let riser = expect(&nodes, "/World/Riser");
+    assert!(riser.has_geometry, "a Cylinder renders geometry");
+    assert!(
+        riser.geometry_animated,
+        "time-sampled height implies geometry_animated"
+    );
+}
+
+#[test]
 fn manifest_flags_children_of_an_animated_xform() {
     let nodes = manifest_at(Some(0.0));
 
