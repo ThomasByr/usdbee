@@ -74,10 +74,21 @@ describe("collectPaths", () => {
 describe("isGprim", () => {
   it("classifies exactly the families the render manifest tessellates", () => {
     expect(
-      ["Mesh", "BasisCurves", "NurbsCurves", "Points", "Sphere", "Cube", "Plane", "Cylinder", "Cone"]
+      [
+        "Mesh",
+        "BasisCurves",
+        "NurbsCurves",
+        "Points",
+        "Sphere",
+        "Cube",
+        "Plane",
+        "Cylinder",
+        "Cone",
+        "Capsule",
+      ]
         .map((type) => leaf("/A", type, type))
         .map(isGprim),
-    ).toEqual([true, true, true, true, true, true, true, true, true]);
+    ).toEqual([true, true, true, true, true, true, true, true, true, true]);
     expect(
       ["Xform", "Scope", "Material", "PointInstancer", ""].map((type) => leaf("/A", type, type)).map(isGprim),
     ).toEqual([false, false, false, false, false]);

@@ -58,4 +58,11 @@ def Xform "World"
         double height = 3
         double radius = 1
     }
+
+    def Capsule "Pill"
+    {
+        double height = 2
+        double radius = 0.5
+        uniform token axis = "X"
+    }
 }

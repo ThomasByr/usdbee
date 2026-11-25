@@ -1463,6 +1463,34 @@ fn cone_apex_points_along_positive_axis() {
     assert_eq!(rows, (25, 25), "the base rim carries two normal rows");
 }
 
+#[test]
+fn capsule_extends_height_plus_two_radii_on_its_axis() {
+    let (stage, _info) = open_stage(&fixture("gprims.usda")).expect("gprims stage should open");
+
+    let capsule = tessellate(&stage, "/World/Pill").expect("Pill should tessellate");
+
+    let extent = |mesh: &MeshData, axis: usize| {
+        let values: Vec<f32> = mesh.positions.iter().map(|p| p[axis]).collect();
+        (
+            values.iter().cloned().fold(f32::MAX, f32::min),
+            values.iter().cloned().fold(f32::MIN, f32::max),
+        )
+    };
+    // height 2 is the cylinder section only; the two hemispheres add radius 0.5 each.
+    assert_eq!(extent(&capsule, 0), (-1.5, 1.5), "on axis X");
+    assert_eq!(
+        extent(&capsule, 1),
+        (-0.5, 0.5),
+        "hemispheres span the radius"
+    );
+    assert_eq!(extent(&capsule, 2), (-0.5, 0.5));
+    assert!(capsule
+        .normals
+        .expect("capsule carries normals")
+        .iter()
+        .all(|n| n.iter().all(|v| v.is_finite())));
+}
+
 fn count_geometry(nodes: &[RenderNode]) -> usize {
     nodes
         .iter()

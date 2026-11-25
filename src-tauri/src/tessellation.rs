@@ -21,9 +21,9 @@ use openusd::gf::{Vec2f, Vec3f};
 use openusd::sdf;
 use openusd::usd::{Prim, SchemaBase, TimeCode};
 use openusd_schemas::geom::{
-    AttributeMetadata, Axis, Cone, ConeSchema, Cube, CubeSchema, Curves, CurvesSchema, Cylinder,
-    CylinderSchema, Interpolation, Mesh, NurbsCurves, NurbsCurvesSchema, Plane, PlaneSchema,
-    Points, Primvar,
+    AttributeMetadata, Axis, Capsule, CapsuleSchema, Cone, ConeSchema, Cube, CubeSchema, Curves,
+    CurvesSchema, Cylinder, CylinderSchema, Interpolation, Mesh, NurbsCurves, NurbsCurvesSchema,
+    Plane, PlaneSchema, Points, Primvar,
 };
 use openusd_schemas::geom::{MeshSchema, PointBasedSchema};
 use openusd_schemas::SchemaError;
@@ -106,7 +106,7 @@ fn context(path: &str, error: impl std::fmt::Display) -> String {
 
 /// Tessellate one composed prim. `Ok(None)` for anything that is not
 /// renderable geometry (Mesh, BasisCurves, NurbsCurves, Points, Sphere, Cube,
-/// Plane, Cylinder);
+/// Plane, Cylinder, Cone, Capsule);
 /// `Err` names the prim path when the geometry itself cannot be tessellated.
 /// `time: Some(t)`
 /// reads time-sampled attributes at `t`; `None` reads the default-time
@@ -131,6 +131,7 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
         Some("Plane") => plane_data(prim, time_code, &path),
         Some("Cylinder") => cylinder_data(prim, time_code, &path),
         Some("Cone") => cone_data(prim, time_code, &path),
+        Some("Capsule") => capsule_data(prim, time_code, &path),
         _ => Ok(None),
     }
 }
@@ -614,6 +615,57 @@ fn cone_data(
     // on the axial normal and the wall on the slant normal. The apex is one
     // on-axis vertex, so it needs no duplicate.
     let profile = [(0.0, -half), (radius, -half), (radius, -half), (0.0, half)];
+    Ok(Some(revolved(prim, time_code, path, &profile, axis)?))
+}
+
+/// Rows per hemisphere cap.
+const CAP_ROWS: usize = 6;
+
+/// A capsule about the origin: a `height`-long cylinder along `axis`, capped by
+/// two half spheres of `radius`. Defaults are height 1 and radius 0.5, so the
+/// total length on the axis is `height + 2 * radius`.
+fn capsule_data(
+    prim: &Prim,
+    time_code: Option<TimeCode>,
+    path: &str,
+) -> Result<Option<MeshData>, String> {
+    let capsule = Capsule::from_prim_unchecked(prim.clone());
+    // Same height contract as the cylinder, with the capsule's own default.
+    let height = capsule
+        .height_at(time_code)
+        .map_err(|e| context(path, e))?
+        .map(|height| height as f32)
+        .filter(|height| height.is_finite() && *height >= 0.0)
+        .unwrap_or(1.0)
+        .max(1e-4);
+    let radius = finite_positive(
+        capsule.radius_at(time_code).map_err(|e| context(path, e))?,
+        0.5,
+    );
+    // `axis` is uniform, so it takes no time code. `CapsuleSchema` hands back
+    // the token, not the enum, like `ConeSchema`.
+    let axis = capsule
+        .axis()
+        .map_err(|e| context(path, e))?
+        .and_then(|token| Axis::from_token(token.as_str()))
+        .unwrap_or(Axis::Z);
+    let half = height / 2.0;
+    // A capsule has no hard edge: every row meets the next tangentially, so no
+    // point is duplicated and the normals stay smooth across the hemisphere
+    // joins. Each cap is measured from its pole, where the angle is exactly 0
+    // and the row collapses to one on-axis vertex.
+    let mut profile: Vec<(f32, f32)> = Vec::with_capacity(2 * (CAP_ROWS + 1) + 1);
+    for row in 0..=CAP_ROWS {
+        let angle = std::f32::consts::FRAC_PI_2 * row as f32 / CAP_ROWS as f32;
+        let (sin, cos) = angle.sin_cos();
+        profile.push((radius * sin, -half - radius * cos));
+    }
+    profile.push((radius, half));
+    for row in (0..CAP_ROWS).rev() {
+        let angle = std::f32::consts::FRAC_PI_2 * row as f32 / CAP_ROWS as f32;
+        let (sin, cos) = angle.sin_cos();
+        profile.push((radius * sin, half + radius * cos));
+    }
     Ok(Some(revolved(prim, time_code, path, &profile, axis)?))
 }
 
