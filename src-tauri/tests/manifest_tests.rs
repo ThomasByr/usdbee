@@ -450,6 +450,28 @@ fn manifest_counts_curves_and_points_as_geometry() {
     }
 }
 
+#[test]
+fn manifest_reports_double_sided_from_the_authored_value_and_the_schema_fallback() {
+    let nodes = open_fixture_manifest("gprims.usda", None);
+
+    assert!(
+        !expect(&nodes, "/World/Box").double_sided,
+        "a Cube takes the Gprim fallback, false"
+    );
+    assert!(
+        expect(&nodes, "/World/Floor").double_sided,
+        "a Plane's own schema fallback is true"
+    );
+    assert!(
+        !expect(&nodes, "/World/Wall").double_sided,
+        "an authored false beats the Plane fallback"
+    );
+    assert!(
+        !expect(&nodes, "/World/Group").double_sided,
+        "a non-geometry Xform reports false"
+    );
+}
+
 // Task 2 cache pins: manifest calls routed through the stage owner exercise
 // the per-stage-open skeleton cache (warm on every call after the first).
 

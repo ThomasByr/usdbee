@@ -17,6 +17,10 @@ def Xform "World"
         double size = 0
     }
 
+    def Xform "Group"
+    {
+    }
+
     def Plane "Floor"
     {
         double width = 6
@@ -32,6 +36,7 @@ def Xform "World"
         double width = 6
         double length = 3
         uniform token axis = "X"
+        uniform bool doubleSided = false
     }
 
     def Plane "Ceiling"

@@ -17,7 +17,8 @@ use openusd::usd::{
     ReplayStage, SchemaBase, Stage, StageAuthoringError, TimeCode, UndoStage,
 };
 use openusd_schemas::geom::{
-    Imageable, ImageableExt, PointInstancer, PointInstancerSchema, Purpose, Visibility,
+    Gprim, GprimSchema, Imageable, ImageableExt, PointInstancer, PointInstancerSchema, Purpose,
+    Visibility,
 };
 use openusd_schemas::shade::nodes::{PreviewSurface, UVTexture};
 use openusd_schemas::shade::{Connectable, Material, MaterialBindingAPI};
@@ -3079,7 +3080,9 @@ fn stage_err(error: openusd::Error) -> String {
 /// or any imageable ancestor clears it, re-authoring `inherited` stops the
 /// walk); geometry nodes (Mesh/BasisCurves/NurbsCurves/Points/Sphere/Cube/
 /// Plane/Cylinder/Cylinder_1/Cone/Capsule/Capsule_1) carry
-/// their direct `material:binding` target path;
+/// their direct `material:binding` target path, and `double_sided` is the
+/// gprim's computed `doubleSided` (a `Plane` defaults to true) so the
+/// renderer can show both faces where USD says they exist;
 /// PointInstancer nodes carry one synthetic child per prototype with the
 /// per-prototype instance matrices (see `prototype_children`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3098,6 +3101,9 @@ pub struct RenderNode {
     /// load-time geometry, which never changes.
     pub geometry_animated: bool,
     pub material: Option<String>,
+    /// The gprim's `doubleSided` (schema fallback included); `false` for
+    /// prims that render no geometry.
+    pub double_sided: bool,
     pub instances: Vec<[f64; 16]>,
     pub transform: [f64; 16],
     pub visible: bool,
@@ -3150,6 +3156,9 @@ struct SkeletonFacts {
     /// Direct `material:binding` target, loaded for geometry prims exactly
     /// where the per-call walk used to look it up.
     material: Option<String>,
+    /// Computed `doubleSided`, read for geometry prims only (it is `uniform`,
+    /// so the build-time value holds for every queried time).
+    double_sided: bool,
     /// Composed children in walk order, abstract prims excluded (the
     /// per-call `children()` enumeration and `is_abstract` filter, once).
     children: Vec<String>,
@@ -3376,6 +3385,11 @@ fn build_facts(
             } else {
                 None
             },
+            double_sided: if renders {
+                gprim_double_sided(prim)
+            } else {
+                false
+            },
             children: children.clone(),
             kind,
         },
@@ -3405,6 +3419,16 @@ fn ancestry_samples_visibility(stage: &Stage, path: &sdf::Path) -> bool {
         }
     }
     false
+}
+
+/// The gprim's computed `doubleSided`: the schema registry answers the
+/// per-type fallback, so a `Plane` reports true with nothing authored. A read
+/// error answers `false`, the same fail-soft shape `direct_material` uses.
+fn gprim_double_sided(prim: &openusd::usd::Prim) -> bool {
+    Gprim::from_prim_unchecked(prim.clone())
+        .double_sided()
+        .unwrap_or(None)
+        .unwrap_or(false)
 }
 
 /// The direct `material:binding` target path, the same resolution
@@ -3816,6 +3840,7 @@ fn prototype_children(
             path: synthetic_path,
             name: format!("{}{}", PROTO_PREFIX, index),
             material: direct_material(prim.stage(), &prototype.prim),
+            double_sided: gprim_double_sided(&prototype.prim),
             instances,
             // The instance matrices are already in instancer-local
             // space; the prototype's own xform is folded into them.
@@ -4010,6 +4035,7 @@ fn render_children(
         let node_children = render_node_children(skeleton, facts, time, moves, ctx)?;
         let node = RenderNode {
             material: facts.material.clone(),
+            double_sided: facts.double_sided,
             path: child.clone(),
             name: facts.prim.path().name().unwrap_or_default().to_string(),
             has_geometry: facts.renders_geometry,
@@ -4105,6 +4131,7 @@ fn delta_children(
         )?;
         let node = RenderNode {
             material: facts.material.clone(),
+            double_sided: facts.double_sided,
             path: child.clone(),
             name: facts.prim.path().name().unwrap_or_default().to_string(),
             has_geometry: facts.renders_geometry,
@@ -6005,6 +6032,7 @@ mod pose_frame_tests {
             animated: true,
             geometry_animated: false,
             material: None,
+            double_sided: false,
             instances: Vec::new(),
             transform: identity(),
             visible: true,
