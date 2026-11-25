@@ -9,8 +9,9 @@
 //! constant widths; a NURBS curve is sampled with de Boor first so the tube
 //! follows its curvature, while a BasisCurve keeps its control polygon;
 //! `Points` prims tessellate to a point cloud (indices empty); `Sphere` prims
-//! tessellate analytically at a fixed 24×12 density, and `Cube` prims to six
-//! flat quads with per-face UVs.
+//! tessellate analytically at a fixed 24×12 density, `Cube` prims to six
+//! flat quads with per-face UVs, and `Plane` prims to a single quad on the
+//! axes their `axis` names.
 //! Authored `normals`, `primvars:st` and `primvars:displayColor` are read
 //! at the queried time code; for meshes unauthored normals are generated
 //! as per-vertex area-weighted face-normal averages.
@@ -19,8 +20,8 @@ use openusd::gf::{Vec2f, Vec3f};
 use openusd::sdf;
 use openusd::usd::{Prim, SchemaBase, TimeCode};
 use openusd_schemas::geom::{
-    AttributeMetadata, Cube, CubeSchema, Curves, CurvesSchema, Interpolation, Mesh, NurbsCurves,
-    NurbsCurvesSchema, Points, Primvar,
+    AttributeMetadata, Axis, Cube, CubeSchema, Curves, CurvesSchema, Interpolation, Mesh,
+    NurbsCurves, NurbsCurvesSchema, Plane, PlaneSchema, Points, Primvar,
 };
 use openusd_schemas::geom::{MeshSchema, PointBasedSchema};
 use openusd_schemas::SchemaError;
@@ -102,7 +103,8 @@ fn context(path: &str, error: impl std::fmt::Display) -> String {
 }
 
 /// Tessellate one composed prim. `Ok(None)` for anything that is not
-/// renderable geometry (Mesh, BasisCurves, NurbsCurves, Points, Sphere, Cube);
+/// renderable geometry (Mesh, BasisCurves, NurbsCurves, Points, Sphere, Cube,
+/// Plane);
 /// `Err` names the prim path when the geometry itself cannot be tessellated.
 /// `time: Some(t)`
 /// reads time-sampled attributes at `t`; `None` reads the default-time
@@ -124,6 +126,7 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
         Some("Points") => points_data(prim, time_code, &path),
         Some("Sphere") => sphere_data(prim, time_code, &path),
         Some("Cube") => cube_data(prim, time_code, &path),
+        Some("Plane") => plane_data(prim, time_code, &path),
         _ => Ok(None),
     }
 }
@@ -383,6 +386,56 @@ fn cube_data(
         uvs: Some(uvs),
         colors,
         indices,
+    }))
+}
+
+/// One quad of four vertices centred on the origin. The schema's `axis`
+/// names the normal, and `width` and `length` span the two axes left over;
+/// the winding and the length sign are picked so the normal points along
+/// the positive axis.
+fn plane_data(
+    prim: &Prim,
+    time_code: Option<TimeCode>,
+    path: &str,
+) -> Result<Option<MeshData>, String> {
+    let plane = Plane::from_prim_unchecked(prim.clone());
+    let half_width = finite_positive(
+        plane.width_at(time_code).map_err(|e| context(path, e))?,
+        2.0,
+    ) / 2.0;
+    let half_length = finite_positive(
+        plane.length_at(time_code).map_err(|e| context(path, e))?,
+        2.0,
+    ) / 2.0;
+    // `axis` is uniform, so it takes no time code.
+    let axis = plane
+        .axis()
+        .map_err(|e| context(path, e))?
+        .and_then(|token| Axis::from_token(token.as_str()))
+        .unwrap_or(Axis::Z);
+    let (width_axis, length_axis, normal_axis, length_sign) = match axis {
+        Axis::Z => (0, 1, 2, 1.0f32),
+        Axis::Y => (0, 2, 1, -1.0f32),
+        Axis::X => (2, 1, 0, -1.0f32),
+    };
+
+    let mut normal = [0.0f32; 3];
+    normal[normal_axis] = 1.0;
+    let mut positions = Vec::with_capacity(4);
+    for (du, dv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        let mut position = [0.0f32; 3];
+        position[width_axis] = half_width * du;
+        position[length_axis] = half_length * dv * length_sign;
+        positions.push(position);
+    }
+
+    let colors = display_colors(prim, time_code, path, positions.len())?;
+    Ok(Some(MeshData {
+        positions,
+        normals: Some(vec![normal; 4]),
+        uvs: Some(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
+        colors,
+        indices: vec![0, 1, 2, 0, 2, 3],
     }))
 }
 

@@ -1283,6 +1283,40 @@ fn cube_with_a_zero_size_falls_back_to_the_schema_default() {
     assert_eq!(widest, 1.0, "schema default size is 2.0");
 }
 
+#[test]
+fn plane_axis_maps_width_and_length_to_the_perpendicular_axes() {
+    let (stage, _info) = open_stage(&fixture("gprims.usda")).expect("gprims stage should open");
+
+    let extent = |mesh: &MeshData, axis: usize| {
+        let values: Vec<f32> = mesh.positions.iter().map(|p| p[axis]).collect();
+        (
+            values.iter().cloned().fold(f32::MAX, f32::min),
+            values.iter().cloned().fold(f32::MIN, f32::max),
+        )
+    };
+
+    // axis Y: width 6 on x, length 3 on z, flat in y.
+    let floor = tessellate(&stage, "/World/Floor").expect("Floor should tessellate");
+    assert_eq!(floor.positions.len(), 4);
+    assert_eq!(floor.indices.len(), 6);
+    assert_eq!(extent(&floor, 0), (-3.0, 3.0), "width on x");
+    assert_eq!(extent(&floor, 1), (0.0, 0.0), "flat in y");
+    assert_eq!(extent(&floor, 2), (-1.5, 1.5), "length on z");
+    assert_eq!(floor.normals, Some(vec![[0.0, 1.0, 0.0]; 4]));
+    assert_eq!(
+        floor.colors.as_ref().map(|c| c.len()),
+        Some(4),
+        "vertex colors pass through"
+    );
+
+    // axis X: the table swaps them, width 6 on z and length 3 on y.
+    let wall = tessellate(&stage, "/World/Wall").expect("Wall should tessellate");
+    assert_eq!(extent(&wall, 0), (0.0, 0.0), "flat in x");
+    assert_eq!(extent(&wall, 1), (-1.5, 1.5), "length on y");
+    assert_eq!(extent(&wall, 2), (-3.0, 3.0), "width on z");
+    assert_eq!(wall.normals, Some(vec![[1.0, 0.0, 0.0]; 4]));
+}
+
 fn count_geometry(nodes: &[RenderNode]) -> usize {
     nodes
         .iter()
