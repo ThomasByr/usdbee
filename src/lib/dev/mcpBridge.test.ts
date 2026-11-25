@@ -382,13 +382,28 @@ describe("inspect_scene", () => {
     expect(result.animated_count).toBe(1);
     // Default depth cap 3: every node of this 3-level tree is listed.
     expect(result.nodes).toEqual([
-      { path: "/World", type: "Xform", has_geometry: false, geometry_animated: false, children_count: 2 },
-      { path: "/World/Cube", type: "Mesh", has_geometry: true, geometry_animated: true, children_count: 0 },
+      {
+        path: "/World",
+        type: "Xform",
+        has_geometry: false,
+        geometry_animated: false,
+        double_sided: false,
+        children_count: 2,
+      },
+      {
+        path: "/World/Cube",
+        type: "Mesh",
+        has_geometry: true,
+        geometry_animated: true,
+        double_sided: false,
+        children_count: 0,
+      },
       {
         path: "/World/Group",
         type: "Xform",
         has_geometry: false,
         geometry_animated: false,
+        double_sided: false,
         children_count: 1,
       },
       {
@@ -396,6 +411,7 @@ describe("inspect_scene", () => {
         type: "Sphere",
         has_geometry: false,
         geometry_animated: false,
+        double_sided: false,
         children_count: 0,
       },
     ]);

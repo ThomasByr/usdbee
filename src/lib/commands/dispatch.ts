@@ -114,6 +114,7 @@ async function inspectScene(args: Record<string, unknown>) {
     type: string;
     has_geometry: boolean;
     geometry_animated: boolean;
+    double_sided: boolean;
     children_count: number;
   }[] = [];
   forEachNode(manifest, (node, depth) => {
@@ -123,6 +124,7 @@ async function inspectScene(args: Record<string, unknown>) {
       type: node.type_name,
       has_geometry: node.has_geometry,
       geometry_animated: node.geometry_animated,
+      double_sided: node.double_sided,
       children_count: node.children.length,
     });
   });
