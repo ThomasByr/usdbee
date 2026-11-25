@@ -3102,7 +3102,7 @@ pub struct RenderNode {
     pub geometry_animated: bool,
     pub material: Option<String>,
     /// The gprim's `doubleSided` (schema fallback included); `false` for
-    /// prims that render no geometry.
+    /// any prim whose type is not renderable geometry.
     pub double_sided: bool,
     pub instances: Vec<[f64; 16]>,
     pub transform: [f64; 16],
@@ -3423,12 +3423,16 @@ fn ancestry_samples_visibility(stage: &Stage, path: &sdf::Path) -> bool {
 
 /// The gprim's computed `doubleSided`: the schema registry answers the
 /// per-type fallback, so a `Plane` reports true with nothing authored. A read
-/// error answers `false`, the same fail-soft shape `direct_material` uses.
+/// error logs and answers `false`, the same fail-soft shape `direct_material`
+/// uses.
 fn gprim_double_sided(prim: &openusd::usd::Prim) -> bool {
-    Gprim::from_prim_unchecked(prim.clone())
-        .double_sided()
-        .unwrap_or(None)
-        .unwrap_or(false)
+    match Gprim::from_prim_unchecked(prim.clone()).double_sided() {
+        Ok(value) => value.unwrap_or(false),
+        Err(error) => {
+            eprintln!("usdbee: ignoring doubleSided at {}: {}", prim.path(), error);
+            false
+        }
+    }
 }
 
 /// The direct `material:binding` target path, the same resolution
@@ -3840,7 +3844,11 @@ fn prototype_children(
             path: synthetic_path,
             name: format!("{}{}", PROTO_PREFIX, index),
             material: direct_material(prim.stage(), &prototype.prim),
-            double_sided: gprim_double_sided(&prototype.prim),
+            double_sided: if proto_renders_geometry {
+                prototype.double_sided
+            } else {
+                false
+            },
             instances,
             // The instance matrices are already in instancer-local
             // space; the prototype's own xform is folded into them.

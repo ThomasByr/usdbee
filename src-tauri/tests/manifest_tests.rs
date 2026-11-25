@@ -351,6 +351,10 @@ fn manifest_expands_xform_prototype_renderable_subtree() {
     let prototype = expect(&nodes, "/World/GroupInstancer/__proto_0");
     assert_eq!(prototype.type_name, "Xform");
     assert!(!prototype.has_geometry);
+    assert!(
+        !prototype.double_sided,
+        "a non-geometry prototype root reports false without a schema read"
+    );
     assert_eq!(prototype.instances.len(), 1);
     let shape = expect(&nodes, "/World/GroupInstancer/__proto_0/Shape");
     assert_eq!(shape.type_name, "Mesh");
