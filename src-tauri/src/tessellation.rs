@@ -11,8 +11,8 @@
 //! `Points` prims tessellate to a point cloud (indices empty); `Sphere` prims
 //! tessellate analytically at a fixed 24×12 density, `Cube` prims to six
 //! flat quads with per-face UVs, `Plane` prims to a single quad on the
-//! axes their `axis` names, and `Cylinder` prims to a revolved surface with
-//! closed caps.
+//! axes their `axis` names, `Cylinder` prims to a revolved surface with
+//! closed caps, and `Cone` prims to a revolved cone on a closed base.
 //! Authored `normals`, `primvars:st` and `primvars:displayColor` are read
 //! at the queried time code; for meshes unauthored normals are generated
 //! as per-vertex area-weighted face-normal averages.
@@ -21,8 +21,9 @@ use openusd::gf::{Vec2f, Vec3f};
 use openusd::sdf;
 use openusd::usd::{Prim, SchemaBase, TimeCode};
 use openusd_schemas::geom::{
-    AttributeMetadata, Axis, Cube, CubeSchema, Curves, CurvesSchema, Cylinder, CylinderSchema,
-    Interpolation, Mesh, NurbsCurves, NurbsCurvesSchema, Plane, PlaneSchema, Points, Primvar,
+    AttributeMetadata, Axis, Cone, ConeSchema, Cube, CubeSchema, Curves, CurvesSchema, Cylinder,
+    CylinderSchema, Interpolation, Mesh, NurbsCurves, NurbsCurvesSchema, Plane, PlaneSchema,
+    Points, Primvar,
 };
 use openusd_schemas::geom::{MeshSchema, PointBasedSchema};
 use openusd_schemas::SchemaError;
@@ -129,6 +130,7 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
         Some("Cube") => cube_data(prim, time_code, &path),
         Some("Plane") => plane_data(prim, time_code, &path),
         Some("Cylinder") => cylinder_data(prim, time_code, &path),
+        Some("Cone") => cone_data(prim, time_code, &path),
         _ => Ok(None),
     }
 }
@@ -576,6 +578,42 @@ fn cylinder_data(
         (radius, half),
         (0.0, half),
     ];
+    Ok(Some(revolved(prim, time_code, path, &profile, axis)?))
+}
+
+/// A cone about the origin: `radius` at the bottom, an apex `height` up the
+/// prim's `axis`. Defaults are radius 1 and height 2.
+fn cone_data(
+    prim: &Prim,
+    time_code: Option<TimeCode>,
+    path: &str,
+) -> Result<Option<MeshData>, String> {
+    let cone = Cone::from_prim_unchecked(prim.clone());
+    // Same height contract as the cylinder: an authored zero is a legal flat
+    // disc and floors below, a negative or non-finite height falls back.
+    let height = cone
+        .height_at(time_code)
+        .map_err(|e| context(path, e))?
+        .map(|height| height as f32)
+        .filter(|height| height.is_finite() && *height >= 0.0)
+        .unwrap_or(2.0)
+        .max(1e-4);
+    let radius = finite_positive(
+        cone.radius_at(time_code).map_err(|e| context(path, e))?,
+        1.0,
+    );
+    // `axis` is uniform, so it takes no time code. `ConeSchema` hands back the
+    // token, not the enum, unlike `CylinderSchema`.
+    let axis = cone
+        .axis()
+        .map_err(|e| context(path, e))?
+        .and_then(|token| Axis::from_token(token.as_str()))
+        .unwrap_or(Axis::Z);
+    let half = height / 2.0;
+    // The base rim is duplicated for the cylinder's reason: it keeps the cap
+    // on the axial normal and the wall on the slant normal. The apex is one
+    // on-axis vertex, so it needs no duplicate.
+    let profile = [(0.0, -half), (radius, -half), (radius, -half), (0.0, half)];
     Ok(Some(revolved(prim, time_code, path, &profile, axis)?))
 }
 

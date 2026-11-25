@@ -52,4 +52,10 @@ def Xform "World"
         double height = 0
         double radius = 1
     }
+
+    def Cone "Spike"
+    {
+        double height = 3
+        double radius = 1
+    }
 }

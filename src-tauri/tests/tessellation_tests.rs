@@ -1404,6 +1404,65 @@ fn cylinder_with_zero_height_stays_finite() {
     assert!((widest - 1.0).abs() < 1e-5, "the authored radius survives");
 }
 
+#[test]
+fn cone_apex_points_along_positive_axis() {
+    let (stage, _info) = open_stage(&fixture("gprims.usda")).expect("gprims stage should open");
+
+    let cone = tessellate(&stage, "/World/Spike").expect("Spike should tessellate");
+
+    // Default axis is Z, so height 3 spans z.
+    let zs: Vec<f32> = cone.positions.iter().map(|p| p[2]).collect();
+    assert_eq!(
+        zs.iter().cloned().fold(f32::MIN, f32::max),
+        1.5,
+        "apex on +Z"
+    );
+    assert_eq!(
+        zs.iter().cloned().fold(f32::MAX, f32::min),
+        -1.5,
+        "base on -Z"
+    );
+    let apex: Vec<&[f32; 3]> = cone.positions.iter().filter(|p| p[2] == 1.5).collect();
+    assert_eq!(
+        apex.len(),
+        1,
+        "the profile collapses the apex to one vertex"
+    );
+    assert_eq!((apex[0][0], apex[0][1]), (0.0, 0.0));
+    let rim = cone
+        .positions
+        .iter()
+        .filter(|p| p[2] == -1.5)
+        .map(|p| (p[0] * p[0] + p[1] * p[1]).sqrt())
+        .fold(0.0_f32, f32::max);
+    assert!((rim - 1.0).abs() < 1e-5, "base radius at -height/2");
+
+    // The duplicated base rim keeps the cap and the wall apart: the cap rim
+    // carries the axial normal, the wall rim the cone's slant normal.
+    let normals = cone.normals.expect("revolved shapes carry normals");
+    let slant_axial = 1.0 / 10f32.sqrt();
+    let mut rows = (0, 0);
+    for (position, normal) in cone.positions.iter().zip(&normals) {
+        if position[2] != -1.5 {
+            continue;
+        }
+        let radial = position[0] * position[0] + position[1] * position[1];
+        if radial < 1e-12 {
+            assert_eq!(*normal, [0.0, 0.0, -1.0], "base centre points down");
+        } else if normal[2] < 0.0 {
+            assert_eq!(*normal, [0.0, 0.0, -1.0], "cap rim stays axial");
+            rows.0 += 1;
+        } else {
+            assert!(
+                (normal[2] - slant_axial).abs() < 1e-5,
+                "wall rim uses the cone slant normal, got {normal:?}"
+            );
+            rows.1 += 1;
+        }
+    }
+    assert_eq!(rows, (25, 25), "the base rim carries two normal rows");
+}
+
 fn count_geometry(nodes: &[RenderNode]) -> usize {
     nodes
         .iter()

@@ -3447,6 +3447,7 @@ fn renders_geometry(type_name: &str) -> bool {
             | "Cube"
             | "Plane"
             | "Cylinder"
+            | "Cone"
     )
 }
 
