@@ -369,6 +369,9 @@ async function buildNode(
         object.add(points);
       } else {
         const material = await fetchMaterial(node, fetchers, dependencies, prefetchedMaterials);
+        // Each node gets its own material (convertMaterial builds one per
+        // call), so the side is per-prim even on a shared binding.
+        material.side = node.double_sided ? THREE.DoubleSide : THREE.FrontSide;
         // displayColor primvars arrive as a per-vertex "color" attribute;
         // three.js reads them only when the material opts in. A bound
         // material wins over displayColor, which stays off there (a bound

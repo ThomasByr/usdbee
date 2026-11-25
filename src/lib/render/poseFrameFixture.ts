@@ -60,6 +60,7 @@ export function asRenderNodes(nodes: PoseFixtureNode[]): RenderNode[] {
       animated: node.animated ?? node.geometry_animated ?? false,
       geometry_animated: node.geometry_animated ?? false,
       material: node.material ?? null,
+      double_sided: false,
       instances: node.instances ?? [],
       transform: node.transform ?? identityMatrix(),
       visible: node.visible ?? true,

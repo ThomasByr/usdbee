@@ -45,6 +45,7 @@ function node(overrides: Partial<RenderNode>): RenderNode {
     animated: false,
     geometry_animated: false,
     material: null,
+    double_sided: false,
     instances: [],
     transform: IDENTITY,
     visible: true,

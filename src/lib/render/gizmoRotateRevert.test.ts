@@ -80,6 +80,7 @@ function manifestSnapshot(): RenderNode[] {
     animated: false,
     geometry_animated: false,
     material: null,
+    double_sided: false,
     instances: [],
     transform,
     visible: true,

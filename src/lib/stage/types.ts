@@ -89,6 +89,8 @@ export interface RenderNode {
   // only for these; `animated` additionally covers transform motion.
   geometry_animated: boolean;
   material: string | null;
+  // Authored Gprim.doubleSided; true by default only on Plane.
+  double_sided: boolean;
   instances: number[][];
   transform: number[];
   visible: boolean;

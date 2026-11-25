@@ -60,12 +60,21 @@ function node(overrides: Partial<RenderNode>): RenderNode {
     animated: false,
     geometry_animated: false,
     material: null,
+    double_sided: false,
     instances: [],
     transform: IDENTITY,
     visible: true,
     children: [],
     ...overrides,
   };
+}
+
+async function buildOne(manifestNode: RenderNode): Promise<THREE.Mesh<THREE.BufferGeometry, THREE.Material>> {
+  const group = await buildScene([manifestNode], fetchers());
+  return group.getObjectByName(manifestNode.path)!.children[0] as THREE.Mesh<
+    THREE.BufferGeometry,
+    THREE.Material
+  >;
 }
 
 function fetchers(overrides: Partial<Parameters<typeof buildScene>[1]> = {}) {
@@ -262,6 +271,43 @@ describe("buildScene", () => {
 
     const mesh = group.getObjectByName("/World/Floor")!.children[0] as THREE.Mesh;
     expect((mesh.material as THREE.MeshPhysicalMaterial).vertexColors).toBe(false);
+  });
+
+  it("maps double_sided onto the material side", async () => {
+    const twoSided = await buildOne(
+      node({ path: "/World/Floor", type_name: "Plane", has_geometry: true, double_sided: true }),
+    );
+    const oneSided = await buildOne(
+      node({ path: "/World/Box", type_name: "Cube", has_geometry: true, double_sided: false }),
+    );
+
+    expect(twoSided.material.side).toBe(THREE.DoubleSide);
+    expect(oneSided.material.side).toBe(THREE.FrontSide);
+  });
+
+  it("gives each prim its own side even when they share a material binding", async () => {
+    const shared = "/World/Looks/Red";
+    const twoSided = await buildOne(
+      node({
+        path: "/World/Floor",
+        type_name: "Plane",
+        has_geometry: true,
+        double_sided: true,
+        material: shared,
+      }),
+    );
+    const oneSided = await buildOne(
+      node({
+        path: "/World/Box",
+        type_name: "Cube",
+        has_geometry: true,
+        double_sided: false,
+        material: shared,
+      }),
+    );
+
+    expect(twoSided.material.side).toBe(THREE.DoubleSide);
+    expect(oneSided.material.side).toBe(THREE.FrontSide);
   });
 
   it("upgrades a built mesh's material in place when its texture lands later", async () => {

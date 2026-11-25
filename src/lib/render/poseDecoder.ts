@@ -295,6 +295,8 @@ function toRenderNode(entry: FlatNode, children: RenderNode[]): RenderNode {
     animated: entry.animated,
     geometry_animated: entry.geometry_animated,
     material: entry.material,
+    // The pose frame carries no doubleSided flag.
+    double_sided: false,
     instances: entry.instances,
     transform: entry.transform,
     visible: entry.visible,
