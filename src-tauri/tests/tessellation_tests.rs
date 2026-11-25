@@ -1240,6 +1240,49 @@ fn nurbs_with_more_spans_than_the_sample_cap_keeps_the_control_polygon() {
     );
 }
 
+#[test]
+fn cube_uses_size_and_spans_its_bounds() {
+    let (stage, _info) = open_stage(&fixture("gprims.usda")).expect("gprims stage should open");
+
+    let cube = tessellate(&stage, "/World/Box").expect("Box should tessellate");
+
+    assert_eq!(cube.positions.len(), 24, "six quads, four vertices each");
+    assert_eq!(cube.indices.len(), 36, "six quads, two triangles each");
+    let extent = |axis: usize| {
+        let values: Vec<f32> = cube.positions.iter().map(|p| p[axis]).collect();
+        (
+            values.iter().cloned().fold(f32::MAX, f32::min),
+            values.iter().cloned().fold(f32::MIN, f32::max),
+        )
+    };
+    assert_eq!(extent(0), (-2.0, 2.0), "size 4 spans +-2 on every axis");
+    assert_eq!(extent(1), (-2.0, 2.0));
+    assert_eq!(extent(2), (-2.0, 2.0));
+    assert_eq!(
+        cube.colors,
+        Some(vec![[1.0, 0.0, 0.0]; 24]),
+        "constant displayColor replicates"
+    );
+}
+
+#[test]
+fn cube_with_a_zero_size_falls_back_to_the_schema_default() {
+    let (stage, _info) = open_stage(&fixture("gprims.usda")).expect("gprims stage should open");
+
+    let cube = tessellate(&stage, "/World/ZeroBox").expect("ZeroBox should tessellate");
+
+    assert!(cube
+        .positions
+        .iter()
+        .all(|p| p.iter().all(|v| v.is_finite())));
+    let widest = cube
+        .positions
+        .iter()
+        .map(|p| p[0].abs())
+        .fold(0.0_f32, f32::max);
+    assert_eq!(widest, 1.0, "schema default size is 2.0");
+}
+
 fn count_geometry(nodes: &[RenderNode]) -> usize {
     nodes
         .iter()

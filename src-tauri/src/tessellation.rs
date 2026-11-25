@@ -9,7 +9,8 @@
 //! constant widths; a NURBS curve is sampled with de Boor first so the tube
 //! follows its curvature, while a BasisCurve keeps its control polygon;
 //! `Points` prims tessellate to a point cloud (indices empty); `Sphere` prims
-//! tessellate analytically at a fixed 24×12 density.
+//! tessellate analytically at a fixed 24×12 density, and `Cube` prims to six
+//! flat quads with per-face UVs.
 //! Authored `normals`, `primvars:st` and `primvars:displayColor` are read
 //! at the queried time code; for meshes unauthored normals are generated
 //! as per-vertex area-weighted face-normal averages.
@@ -18,8 +19,8 @@ use openusd::gf::{Vec2f, Vec3f};
 use openusd::sdf;
 use openusd::usd::{Prim, SchemaBase, TimeCode};
 use openusd_schemas::geom::{
-    AttributeMetadata, Curves, CurvesSchema, Interpolation, Mesh, NurbsCurves, NurbsCurvesSchema,
-    Points, Primvar,
+    AttributeMetadata, Cube, CubeSchema, Curves, CurvesSchema, Interpolation, Mesh, NurbsCurves,
+    NurbsCurvesSchema, Points, Primvar,
 };
 use openusd_schemas::geom::{MeshSchema, PointBasedSchema};
 use openusd_schemas::SchemaError;
@@ -101,8 +102,9 @@ fn context(path: &str, error: impl std::fmt::Display) -> String {
 }
 
 /// Tessellate one composed prim. `Ok(None)` for anything that is not
-/// renderable geometry (Mesh, BasisCurves, NurbsCurves, Points, Sphere); `Err` names the prim
-/// path when the geometry itself cannot be tessellated. `time: Some(t)`
+/// renderable geometry (Mesh, BasisCurves, NurbsCurves, Points, Sphere, Cube);
+/// `Err` names the prim path when the geometry itself cannot be tessellated.
+/// `time: Some(t)`
 /// reads time-sampled attributes at `t`; `None` reads the default-time
 /// values.
 pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData>, String> {
@@ -121,6 +123,7 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
         Some("NurbsCurves") => curves_data(prim, time_code, &path, true),
         Some("Points") => points_data(prim, time_code, &path),
         Some("Sphere") => sphere_data(prim, time_code, &path),
+        Some("Cube") => cube_data(prim, time_code, &path),
         _ => Ok(None),
     }
 }
@@ -327,20 +330,7 @@ fn sphere_data(
         }
     }
 
-    let colors = read_primvar::<Vec3f>(prim, "primvars:displayColor", time_code, path)?.and_then(
-        |(scope, values)| match scope {
-            Scope::Constant => values
-                .first()
-                .map(|color| vec![[color.x, color.y, color.z]; positions.len()]),
-            Scope::Vertex if values.len() == positions.len() => Some(
-                values
-                    .into_iter()
-                    .map(|color| [color.x, color.y, color.z])
-                    .collect(),
-            ),
-            _ => None,
-        },
-    );
+    let colors = display_colors(prim, time_code, path, positions.len())?;
     Ok(Some(MeshData {
         positions,
         normals: Some(normals),
@@ -348,6 +338,88 @@ fn sphere_data(
         colors,
         indices,
     }))
+}
+
+/// Six quads of four vertices each, centred on the origin: flat outward
+/// normals, per-face 0..1 UVs, counter-clockwise seen from outside.
+fn cube_data(
+    prim: &Prim,
+    time_code: Option<TimeCode>,
+    path: &str,
+) -> Result<Option<MeshData>, String> {
+    let cube = Cube::from_prim_unchecked(prim.clone());
+    let half = finite_positive(cube.size_at(time_code).map_err(|e| context(path, e))?, 2.0) / 2.0;
+
+    let mut positions = Vec::with_capacity(24);
+    let mut normals = Vec::with_capacity(24);
+    let mut uvs = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    // One quad per axis and sign; the tangent pair is wound so that
+    // `u x v` points along the face's own outward normal.
+    for axis in 0..3 {
+        let (u_axis, v_axis) = ((axis + 1) % 3, (axis + 2) % 3);
+        for sign in [1.0f32, -1.0] {
+            let mut normal = [0.0f32; 3];
+            normal[axis] = sign;
+            let offset = half * sign;
+            let base = positions.len() as u32;
+            for (du, dv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                let mut position = [0.0f32; 3];
+                position[axis] = offset;
+                position[u_axis] = half * du;
+                position[v_axis] = half * dv * sign;
+                positions.push(position);
+                normals.push(normal);
+            }
+            uvs.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+
+    let colors = display_colors(prim, time_code, path, positions.len())?;
+    Ok(Some(MeshData {
+        positions,
+        normals: Some(normals),
+        uvs: Some(uvs),
+        colors,
+        indices,
+    }))
+}
+
+/// An authored size that is non-finite or non-positive has no meaning, so it
+/// falls back like an unauthored one.
+fn finite_positive(value: Option<f64>, fallback: f32) -> f32 {
+    value
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(fallback)
+}
+
+/// `primvars:displayColor` as one color per output vertex: a constant value
+/// replicates, a vertex value passes through when it matches the vertex
+/// count, and any other scope yields nothing.
+fn display_colors(
+    prim: &Prim,
+    time_code: Option<TimeCode>,
+    path: &str,
+    vertex_count: usize,
+) -> Result<Option<Vec<[f32; 3]>>, String> {
+    Ok(
+        read_primvar::<Vec3f>(prim, "primvars:displayColor", time_code, path)?.and_then(
+            |(scope, values)| match scope {
+                Scope::Constant => values
+                    .first()
+                    .map(|color| vec![[color.x, color.y, color.z]; vertex_count]),
+                Scope::Vertex if values.len() == vertex_count => Some(
+                    values
+                        .into_iter()
+                        .map(|color| [color.x, color.y, color.z])
+                        .collect(),
+                ),
+                _ => None,
+            },
+        ),
+    )
 }
 
 /// 6-sided tube cross-section (controller resolution).

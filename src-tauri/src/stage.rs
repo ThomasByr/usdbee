@@ -3077,7 +3077,7 @@ fn stage_err(error: openusd::Error) -> String {
 /// via the schemas `ImageableExt` walk) is `proxy` or `guide` are excluded;
 /// `visible` is the computed visibility (an `invisible` opinion on the prim
 /// or any imageable ancestor clears it, re-authoring `inherited` stops the
-/// walk); geometry nodes (Mesh/BasisCurves/NurbsCurves/Points/Sphere) carry
+/// walk); geometry nodes (Mesh/BasisCurves/NurbsCurves/Points/Sphere/Cube) carry
 /// their direct `material:binding` target path;
 /// PointInstancer nodes carry one synthetic child per prototype with the
 /// per-prototype instance matrices (see `prototype_children`).
@@ -3439,7 +3439,7 @@ fn direct_material(stage: &Stage, prim: &openusd::usd::Prim) -> Option<String> {
 fn renders_geometry(type_name: &str) -> bool {
     matches!(
         type_name,
-        "Mesh" | "BasisCurves" | "NurbsCurves" | "Points" | "Sphere"
+        "Mesh" | "BasisCurves" | "NurbsCurves" | "Points" | "Sphere" | "Cube"
     )
 }
 
