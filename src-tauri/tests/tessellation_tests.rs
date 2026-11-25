@@ -1315,6 +1315,13 @@ fn plane_axis_maps_width_and_length_to_the_perpendicular_axes() {
     assert_eq!(extent(&wall, 1), (-1.5, 1.5), "length on y");
     assert_eq!(extent(&wall, 2), (-3.0, 3.0), "width on z");
     assert_eq!(wall.normals, Some(vec![[1.0, 0.0, 0.0]; 4]));
+
+    // no axis: the default is Z, width 4 on x and length 2 on y.
+    let ceiling = tessellate(&stage, "/World/Ceiling").expect("Ceiling should tessellate");
+    assert_eq!(extent(&ceiling, 0), (-2.0, 2.0), "width on x");
+    assert_eq!(extent(&ceiling, 1), (-1.0, 1.0), "length on y");
+    assert_eq!(extent(&ceiling, 2), (0.0, 0.0), "flat in z");
+    assert_eq!(ceiling.normals, Some(vec![[0.0, 0.0, 1.0]; 4]));
 }
 
 fn count_geometry(nodes: &[RenderNode]) -> usize {

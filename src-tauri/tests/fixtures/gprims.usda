@@ -33,4 +33,10 @@ def Xform "World"
         double length = 3
         uniform token axis = "X"
     }
+
+    def Plane "Ceiling"
+    {
+        double width = 4
+        double length = 2
+    }
 }

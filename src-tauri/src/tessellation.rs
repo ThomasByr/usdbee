@@ -414,6 +414,7 @@ fn plane_data(
         .and_then(|token| Axis::from_token(token.as_str()))
         .unwrap_or(Axis::Z);
     let (width_axis, length_axis, normal_axis, length_sign) = match axis {
+        // Z is the base case: its winding already runs counter-clockwise.
         Axis::Z => (0, 1, 2, 1.0f32),
         Axis::Y => (0, 2, 1, -1.0f32),
         Axis::X => (2, 1, 0, -1.0f32),
