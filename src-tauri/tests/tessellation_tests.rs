@@ -1347,6 +1347,38 @@ fn cylinder_revolves_on_its_axis_with_closed_caps() {
         normals.iter().all(|n| n.iter().all(|v| v.is_finite())),
         "no NaN normals at the caps"
     );
+
+    // Counter-clockwise from outside: every triangle's geometric normal agrees
+    // with its vertex normals. This pins the winding swap `revolved()` does for
+    // the X and Y axes, so removing that swap fails here.
+    let mut checked = 0;
+    for triangle in cylinder.indices.chunks_exact(3) {
+        let [a, b, c] = [0, 1, 2].map(|i| cylinder.positions[triangle[i] as usize]);
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let mut normal = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+        // The hard-rim duplicate rows sweep zero-area bands; they carry no
+        // facing information, so the winding check skips them.
+        if length < 1e-6 {
+            continue;
+        }
+        normal.iter_mut().for_each(|value| *value /= length);
+        for corner in [0, 1, 2].map(|i| triangle[i] as usize) {
+            let vertex = normals[corner];
+            let alignment = normal[0] * vertex[0] + normal[1] * vertex[1] + normal[2] * vertex[2];
+            assert!(
+                alignment > 0.0,
+                "triangle {triangle:?} faces away from its vertex normal"
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "the winding check saw triangles");
 }
 
 #[test]

@@ -546,11 +546,12 @@ fn cylinder_data(
     let cylinder = Cylinder::from_prim_unchecked(prim.clone());
     // A zero height is a legal flat disc, so it keeps its authored value and
     // floors below, instead of taking finite_positive's positive-only default.
+    // A negative height has no meaning and falls back like an unauthored one.
     let height = cylinder
         .height_at(time_code)
         .map_err(|e| context(path, e))?
         .map(|height| height as f32)
-        .filter(|height| height.is_finite())
+        .filter(|height| height.is_finite() && *height >= 0.0)
         .unwrap_or(2.0)
         .max(1e-4);
     let radius = finite_positive(
@@ -565,7 +566,16 @@ fn cylinder_data(
         .map_err(|e| context(path, e))?
         .unwrap_or(Axis::Z);
     let half = height / 2.0;
-    let profile = [(0.0, -half), (radius, -half), (radius, half), (0.0, half)];
+    // Each rim point is duplicated: the duplicate gives the cap edge and the
+    // side wall distinct normal rows, so the rim stays hard.
+    let profile = [
+        (0.0, -half),
+        (radius, -half),
+        (radius, -half),
+        (radius, half),
+        (radius, half),
+        (0.0, half),
+    ];
     Ok(Some(revolved(prim, time_code, path, &profile, axis)?))
 }
 
