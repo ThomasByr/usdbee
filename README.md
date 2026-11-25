@@ -23,21 +23,23 @@
 ### Pre-built binaries
 
 > [!NOTE]
-> You can download the latest release of USDBEE for your system from the [Releases](https://github.com/ThomasByr/usdbee/releases) page.
+> You can download the latest release of USDBEE for **your system** from
+> the [Releases](https://github.com/ThomasByr/usdbee/releases) page.
 
-Please download the appropriate installer for your operating system, run the installer, and follow the installation instructions.
+Quick notes:
 
-On MacOS, both Intel and Apple Silicon architectures are supported.
+- For Linux AppImage, make it executable and just run it (or install the `.deb` or `.rpm` package);
+- On MacOS, both Intel and Apple Silicon architectures are supported;
+- On Windows, a portable executable is also available alongside the `-setup.exe` and `.msi` installers.
 
 ### Updates (from v1.1.0 onwards)
 
 **About → Check for Updates...** downloads and installs the latest release in place.
 The download is verified against the public update key in `tauri.conf.json`.
 
-- Windows: an installed copy updates itself. The portable executable is not an installable target: download the
-  new one from the [Releases](https://github.com/ThomasByr/usdbee/releases) page.
-- MacOS: the build is not signed or notarized, so Gatekeeper may complain on the first launch.
-- Linux: only the AppImage can update itself. Using `.deb` or `.rpm`? Re-download the package.
+- Linux: only the AppImage can update itself. Using `.deb` or `.rpm`? Re-download the package;
+- MacOS: the build is not signed or notarized, so Gatekeeper may complain on the first launch;
+- Windows: an installed copy updates itself. The portable executable is not an installable target.
 
 ### Building from source
 
@@ -85,15 +87,19 @@ or run the plain `npm run tauri build` command to build and bundle in one step.
 
 ## Usage
 
-Run the application and use <kbd><kbd>Ctrl</kbd>+<kbd>O</kbd></kbd> to load a USD file.
-Press <kbd><kbd>Ctrl</kbd>+<kbd>E</kbd></kbd> to export a render view of the current scene.
+Run the application and click top-left "Open" button or use
+<kbd><kbd>Ctrl</kbd>+<kbd>O</kbd></kbd> to load a USD file.
+Click top-left "Export" button or press <kbd><kbd>Ctrl</kbd>+<kbd>E</kbd></kbd>
+to export a render view of the current scene.
 
 Navigate the 3D view with your keyboard and mouse. Check the "SETTINGS" tab to customize the controls.
 
-To get the file used in the demo, you can use the [Carbon Frame Bike](https://github.com/usd-wg/assets/tree/main/full_assets/CarbonFrameBike).
+To get the file used in the demo, you can use the
+[Carbon Frame Bike](https://github.com/usd-wg/assets/tree/main/full_assets/CarbonFrameBike).
 
 ```sh
-curl -L -o assets/CarbonFrameBike.usdz https://github.com/usd-wg/assets/raw/refs/heads/main/full_assets/CarbonFrameBike/CarbonFrameBike.usdz
+curl -L -o assets/CarbonFrameBike.usdz \
+  https://github.com/usd-wg/assets/raw/refs/heads/main/full_assets/CarbonFrameBike/CarbonFrameBike.usdz
 ```
 
 Then open the `assets/CarbonFrameBike.usdz` file in USDBEE.
@@ -104,13 +110,14 @@ Then open the `assets/CarbonFrameBike.usdz` file in USDBEE.
 usage: usdbee [-h] [-p x,y,z | --camera-position x,y,z] [-t x,y,z | --camera-target x,y,z] [-f fov | --camera-fov fov] [FILE...]
 ```
 
-Pass one or more USD files to open them as tabs on startup. The following options act on the free camera:
+Pass one or more USD files to open them as tabs on startup.
+The following options act on the free camera:
 
 - `-p` / `--camera-position` sets the camera location
 - `-t` / `--camera-target` sets the point it looks at, in world units
 - `-f` / `--camera-fov` sets the field of view, in degrees
 
-Both `-p` and `-t` take three numbers, written `1,2,3` or `1 2 3`.
+Both `-p` and `-t` take three numbers, comma or space separated.
 
 ```sh
 ./usdbee scene.usda
@@ -119,7 +126,7 @@ Both `-p` and `-t` take three numbers, written `1,2,3` or `1 2 3`.
 ```
 
 > [!Warning]
-> On Windows release builds, the binary uses the GUI subsystem.
+> On Windows release builds, the binary uses the GUI subsystem.<br>
 > Nothing attaches a console: `-h` / `--help` prints nothing and a flag error exits with status 1 silently.
 
 ### Command palette
