@@ -69,12 +69,20 @@ function node(overrides: Partial<RenderNode>): RenderNode {
   };
 }
 
-async function buildOne(manifestNode: RenderNode): Promise<THREE.Mesh<THREE.BufferGeometry, THREE.Material>> {
-  const group = await buildScene([manifestNode], fetchers());
-  return group.getObjectByName(manifestNode.path)!.children[0] as THREE.Mesh<
-    THREE.BufferGeometry,
-    THREE.Material
-  >;
+// All prims in ONE build: separate builds would each get their own prefetched
+// material map, so they could never share a binding.
+async function buildMeshes(
+  manifestNodes: RenderNode[],
+  overrides: Partial<Parameters<typeof buildScene>[1]> = {},
+): Promise<THREE.Mesh<THREE.BufferGeometry, THREE.Material>[]> {
+  const group = await buildScene(manifestNodes, fetchers(overrides));
+  return manifestNodes.map(
+    (manifestNode) =>
+      group.getObjectByName(manifestNode.path)!.children[0] as THREE.Mesh<
+        THREE.BufferGeometry,
+        THREE.Material
+      >,
+  );
 }
 
 function fetchers(overrides: Partial<Parameters<typeof buildScene>[1]> = {}) {
@@ -274,38 +282,44 @@ describe("buildScene", () => {
   });
 
   it("maps double_sided onto the material side", async () => {
-    const twoSided = await buildOne(
+    const [twoSided, oneSided] = await buildMeshes([
       node({ path: "/World/Floor", type_name: "Plane", has_geometry: true, double_sided: true }),
-    );
-    const oneSided = await buildOne(
       node({ path: "/World/Box", type_name: "Cube", has_geometry: true, double_sided: false }),
-    );
+    ]);
 
     expect(twoSided.material.side).toBe(THREE.DoubleSide);
+    // Guards against applying DoubleSide to every prim, not against the
+    // FrontSide default.
     expect(oneSided.material.side).toBe(THREE.FrontSide);
   });
 
   it("gives each prim its own side even when they share a material binding", async () => {
     const shared = "/World/Looks/Red";
-    const twoSided = await buildOne(
-      node({
-        path: "/World/Floor",
-        type_name: "Plane",
-        has_geometry: true,
-        double_sided: true,
-        material: shared,
-      }),
+    const getMaterialBatch = vi.fn(async (slice: string[]) =>
+      slice.map(() => ({ name: "Red", surface: null })),
     );
-    const oneSided = await buildOne(
-      node({
-        path: "/World/Box",
-        type_name: "Cube",
-        has_geometry: true,
-        double_sided: false,
-        material: shared,
-      }),
+    const [twoSided, oneSided] = await buildMeshes(
+      [
+        node({
+          path: "/World/Floor",
+          type_name: "Plane",
+          has_geometry: true,
+          double_sided: true,
+          material: shared,
+        }),
+        node({
+          path: "/World/Box",
+          type_name: "Cube",
+          has_geometry: true,
+          double_sided: false,
+          material: shared,
+        }),
+      ],
+      { getMaterialBatch },
     );
 
+    // Both prims read the same prefilled MaterialInfo; the side still differs.
+    expect(getMaterialBatch).toHaveBeenCalledWith([shared]);
     expect(twoSided.material.side).toBe(THREE.DoubleSide);
     expect(oneSided.material.side).toBe(THREE.FrontSide);
   });

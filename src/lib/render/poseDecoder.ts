@@ -12,7 +12,7 @@
 //   [16 x f32 matrix]
 //   [u32 instance count][instance count x 16 f32]   // only when flags bit2
 // flags: bit0 has_geometry, bit1 geometry_animated, bit2 has_instances,
-// bit3 is_points, bit4 animated.
+// bit3 is_points, bit4 animated, bit5 double_sided.
 //
 // Prefixes carry the true byte lengths and the padding is implicit, so decode
 // with a cursor rather than typed-array views. The geometry tail's slot order
@@ -38,6 +38,7 @@ const POSE_FLAG_GEOMETRY_ANIMATED = 1 << 1;
 const POSE_FLAG_INSTANCES = 1 << 2;
 const POSE_FLAG_IS_POINTS = 1 << 3;
 const POSE_FLAG_ANIMATED = 1 << 4;
+const POSE_FLAG_DOUBLE_SIDED = 1 << 5;
 
 /** The path/material string tables one stage's frames share (byte-identical across a stage's frames, so they are decoded once per generation and reused). */
 export interface PoseStringTables {
@@ -127,6 +128,7 @@ interface FlatNode {
   geometry_animated: boolean;
   animated: boolean;
   is_points: boolean;
+  double_sided: boolean;
   visible: boolean;
   material: string | null;
   transform: number[];
@@ -219,6 +221,7 @@ function readAnimatedPose(
       geometry_animated: (flags & POSE_FLAG_GEOMETRY_ANIMATED) !== 0,
       animated: (flags & POSE_FLAG_ANIMATED) !== 0,
       is_points: (flags & POSE_FLAG_IS_POINTS) !== 0,
+      double_sided: (flags & POSE_FLAG_DOUBLE_SIDED) !== 0,
       visible: visible === 1,
       material,
       transform,
@@ -295,8 +298,8 @@ function toRenderNode(entry: FlatNode, children: RenderNode[]): RenderNode {
     animated: entry.animated,
     geometry_animated: entry.geometry_animated,
     material: entry.material,
-    // The pose frame carries no doubleSided flag.
-    double_sided: false,
+    // Bare bytes: true when and only when the frame sets the bit.
+    double_sided: entry.double_sided,
     instances: entry.instances,
     transform: entry.transform,
     visible: entry.visible,

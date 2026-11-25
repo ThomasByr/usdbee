@@ -14,7 +14,7 @@
 //   [16 x f32 matrix]
 //   [u32 instance count][instance count x 16 f32]   // only when flags bit2
 // flags: bit0 has_geometry, bit1 geometry_animated, bit2 has_instances,
-// bit3 is_points, bit4 animated.
+// bit3 is_points, bit4 animated, bit5 double_sided.
 import type { RenderNode } from "../stage/types";
 
 const POSE_LEAF = 0xffffffff;
@@ -24,6 +24,7 @@ const POSE_FLAG_GEOMETRY_ANIMATED = 1 << 1;
 const POSE_FLAG_INSTANCES = 1 << 2;
 const POSE_FLAG_IS_POINTS = 1 << 3;
 const POSE_FLAG_ANIMATED = 1 << 4;
+const POSE_FLAG_DOUBLE_SIDED = 1 << 5;
 
 export interface PoseFixtureNode {
   path: string;
@@ -35,6 +36,7 @@ export interface PoseFixtureNode {
   animated?: boolean;
   type_name?: string;
   material?: string | null;
+  double_sided?: boolean;
   instances?: number[][];
 }
 
@@ -60,7 +62,7 @@ export function asRenderNodes(nodes: PoseFixtureNode[]): RenderNode[] {
       animated: node.animated ?? node.geometry_animated ?? false,
       geometry_animated: node.geometry_animated ?? false,
       material: node.material ?? null,
-      double_sided: false,
+      double_sided: node.double_sided ?? false,
       instances: node.instances ?? [],
       transform: node.transform ?? identityMatrix(),
       visible: node.visible ?? true,
@@ -116,6 +118,7 @@ export function encodePoseFrame(nodes: PoseFixtureNode[], batch = emptyPoseBatch
     if ((node.instances ?? []).length > 0) flags |= POSE_FLAG_INSTANCES;
     if (node.type_name === "Points") flags |= POSE_FLAG_IS_POINTS;
     if (node.animated ?? node.geometry_animated) flags |= POSE_FLAG_ANIMATED;
+    if (node.double_sided) flags |= POSE_FLAG_DOUBLE_SIDED;
     out.u32(pathIds.get(node.path)!);
     out.u32(children === 0 ? POSE_LEAF : index + 1);
     out.u16(children);

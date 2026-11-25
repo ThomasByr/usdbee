@@ -128,6 +128,12 @@ describe("decodeAnimatedPose", () => {
     expect(swarm.children[0]?.instances).toEqual([]);
   });
 
+  it("carries the double_sided flag through", () => {
+    const pose = decodeAnimatedPose(encodePoseFrame([{ path: "/A", double_sided: true }, { path: "/B" }]));
+
+    expect(pose.manifest.map((node) => node.double_sided)).toEqual([true, false]);
+  });
+
   it("keys the geometry slots by the deforming paths, in pre-order", () => {
     const pose = decodeAnimatedPose(treeFrame());
 

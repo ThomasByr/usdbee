@@ -866,8 +866,8 @@ fn undo_and_redo_of_a_sampled_xform_edit_reach_the_manifest() {
 // and node =
 //   [u32 path id][u32 first child id (0xFFFF_FFFF for a leaf)][u16 child
 //   count][u8 flags (bit0 has_geometry, bit1 geometry_animated, bit2 has
-//   instances, bit3 is_points, bit4 animated)][u8 visible][u32 material id
-//   (0xFFFF_FFFF for none)][16 x f32 LE matrix]
+//   instances, bit3 is_points, bit4 animated, bit5 double_sided)][u8 visible]
+//   [u32 material id (0xFFFF_FFFF for none)][16 x f32 LE matrix]
 //   [u32 instance count][instance count x 16 f32 LE]   // only when bit2
 // The decoder below is the spec the frontend one has to match: it rebuilds the
 // exact tree from first_child_id + child_count.

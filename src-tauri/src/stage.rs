@@ -4882,6 +4882,9 @@ const POSE_FLAG_IS_POINTS: u8 = 1 << 3;
 /// `geometry_animated`: the pose path gates its whole drawable update — the
 /// instance count and matrices included — on it.
 const POSE_FLAG_ANIMATED: u8 = 1 << 4;
+/// The gprim's computed `doubleSided`, from the same cached facts the JSON
+/// manifest reads, so a pose-built node cannot disagree with a manifest one.
+const POSE_FLAG_DOUBLE_SIDED: u8 = 1 << 5;
 
 /// Pre-order flatten of the delta tree: a node's children sit directly after
 /// it, so `first_child_id` is always `index + 1` when it has any.
@@ -4920,6 +4923,9 @@ fn write_pose_node(
     }
     if node.animated {
         flags |= POSE_FLAG_ANIMATED;
+    }
+    if node.double_sided {
+        flags |= POSE_FLAG_DOUBLE_SIDED;
     }
     let first_child = if node.children.is_empty() {
         POSE_LEAF
@@ -6074,7 +6080,9 @@ mod pose_frame_tests {
     // The node record, field by field, at its documented offsets.
     #[test]
     fn frame_pose_pins_the_node_record_bytes() {
-        let mut root = node("/A", vec![node("/A/B", Vec::new())]);
+        let mut leaf_node = node("/A/B", Vec::new());
+        leaf_node.double_sided = true;
+        let mut root = node("/A", vec![leaf_node]);
         root.transform[0] = 0.1; // not exactly representable in f32
         root.visible = false;
         root.geometry_animated = true;
@@ -6140,8 +6148,8 @@ mod pose_frame_tests {
         );
         assert_eq!(
             frame[leaf + 10],
-            POSE_FLAG_HAS_GEOMETRY | POSE_FLAG_ANIMATED,
-            "leaf flags"
+            POSE_FLAG_HAS_GEOMETRY | POSE_FLAG_ANIMATED | POSE_FLAG_DOUBLE_SIDED,
+            "leaf flags: the only double-sided node here"
         );
         assert_eq!(frame[leaf + 11], 1, "visible leaf");
         assert_eq!(u32_at(&frame, leaf + 12), POSE_NO_MATERIAL, "no binding");
