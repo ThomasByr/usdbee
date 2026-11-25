@@ -1324,6 +1324,54 @@ fn plane_axis_maps_width_and_length_to_the_perpendicular_axes() {
     assert_eq!(ceiling.normals, Some(vec![[0.0, 0.0, 1.0]; 4]));
 }
 
+#[test]
+fn cylinder_revolves_on_its_axis_with_closed_caps() {
+    let (stage, _info) = open_stage(&fixture("gprims.usda")).expect("gprims stage should open");
+
+    let cylinder = tessellate(&stage, "/World/Post").expect("Post should tessellate");
+
+    let extent = |mesh: &MeshData, axis: usize| {
+        let values: Vec<f32> = mesh.positions.iter().map(|p| p[axis]).collect();
+        (
+            values.iter().cloned().fold(f32::MAX, f32::min),
+            values.iter().cloned().fold(f32::MIN, f32::max),
+        )
+    };
+    assert_eq!(extent(&cylinder, 0), (-2.0, 2.0), "height 4 along x");
+    assert_eq!(extent(&cylinder, 1), (-0.5, 0.5), "radius spans y");
+    assert_eq!(extent(&cylinder, 2), (-0.5, 0.5), "radius spans z");
+
+    let normals = cylinder.normals.expect("revolved shapes carry normals");
+    assert_eq!(normals.len(), cylinder.positions.len());
+    assert!(
+        normals.iter().all(|n| n.iter().all(|v| v.is_finite())),
+        "no NaN normals at the caps"
+    );
+}
+
+#[test]
+fn cylinder_with_zero_height_stays_finite() {
+    let (stage, _info) = open_stage(&fixture("gprims.usda")).expect("gprims stage should open");
+
+    let pancake = tessellate(&stage, "/World/Pancake").expect("Pancake should tessellate");
+
+    assert!(pancake
+        .positions
+        .iter()
+        .all(|p| p.iter().all(|v| v.is_finite())));
+    assert!(pancake
+        .normals
+        .expect("Pancake carries normals")
+        .iter()
+        .all(|n| n.iter().all(|v| v.is_finite())));
+    let widest = pancake
+        .positions
+        .iter()
+        .map(|p| (p[0] * p[0] + p[2] * p[2]).sqrt())
+        .fold(0.0_f32, f32::max);
+    assert!((widest - 1.0).abs() < 1e-5, "the authored radius survives");
+}
+
 fn count_geometry(nodes: &[RenderNode]) -> usize {
     nodes
         .iter()

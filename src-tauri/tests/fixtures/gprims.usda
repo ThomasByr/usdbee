@@ -39,4 +39,17 @@ def Xform "World"
         double width = 4
         double length = 2
     }
+
+    def Cylinder "Post"
+    {
+        double height = 4
+        double radius = 0.5
+        uniform token axis = "X"
+    }
+
+    def Cylinder "Pancake"
+    {
+        double height = 0
+        double radius = 1
+    }
 }

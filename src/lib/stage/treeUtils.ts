@@ -28,7 +28,16 @@ export function collectPaths(nodes: PrimNode[]): string[] {
 // Exact type names the render manifest treats as renderable geometry —
 // the frontend mirror of stage.rs `renders_geometry`, not a second
 // classification.
-const GPRIM_TYPES = new Set(["Mesh", "BasisCurves", "NurbsCurves", "Points", "Sphere", "Cube", "Plane"]);
+const GPRIM_TYPES = new Set([
+  "Mesh",
+  "BasisCurves",
+  "NurbsCurves",
+  "Points",
+  "Sphere",
+  "Cube",
+  "Plane",
+  "Cylinder",
+]);
 
 export function isGprim(node: PrimNode): boolean {
   return GPRIM_TYPES.has(node.type_name);

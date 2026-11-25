@@ -3439,7 +3439,14 @@ fn direct_material(stage: &Stage, prim: &openusd::usd::Prim) -> Option<String> {
 fn renders_geometry(type_name: &str) -> bool {
     matches!(
         type_name,
-        "Mesh" | "BasisCurves" | "NurbsCurves" | "Points" | "Sphere" | "Cube" | "Plane"
+        "Mesh"
+            | "BasisCurves"
+            | "NurbsCurves"
+            | "Points"
+            | "Sphere"
+            | "Cube"
+            | "Plane"
+            | "Cylinder"
     )
 }
 

@@ -10,8 +10,9 @@
 //! follows its curvature, while a BasisCurve keeps its control polygon;
 //! `Points` prims tessellate to a point cloud (indices empty); `Sphere` prims
 //! tessellate analytically at a fixed 24×12 density, `Cube` prims to six
-//! flat quads with per-face UVs, and `Plane` prims to a single quad on the
-//! axes their `axis` names.
+//! flat quads with per-face UVs, `Plane` prims to a single quad on the
+//! axes their `axis` names, and `Cylinder` prims to a revolved surface with
+//! closed caps.
 //! Authored `normals`, `primvars:st` and `primvars:displayColor` are read
 //! at the queried time code; for meshes unauthored normals are generated
 //! as per-vertex area-weighted face-normal averages.
@@ -20,8 +21,8 @@ use openusd::gf::{Vec2f, Vec3f};
 use openusd::sdf;
 use openusd::usd::{Prim, SchemaBase, TimeCode};
 use openusd_schemas::geom::{
-    AttributeMetadata, Axis, Cube, CubeSchema, Curves, CurvesSchema, Interpolation, Mesh,
-    NurbsCurves, NurbsCurvesSchema, Plane, PlaneSchema, Points, Primvar,
+    AttributeMetadata, Axis, Cube, CubeSchema, Curves, CurvesSchema, Cylinder, CylinderSchema,
+    Interpolation, Mesh, NurbsCurves, NurbsCurvesSchema, Plane, PlaneSchema, Points, Primvar,
 };
 use openusd_schemas::geom::{MeshSchema, PointBasedSchema};
 use openusd_schemas::SchemaError;
@@ -104,7 +105,7 @@ fn context(path: &str, error: impl std::fmt::Display) -> String {
 
 /// Tessellate one composed prim. `Ok(None)` for anything that is not
 /// renderable geometry (Mesh, BasisCurves, NurbsCurves, Points, Sphere, Cube,
-/// Plane);
+/// Plane, Cylinder);
 /// `Err` names the prim path when the geometry itself cannot be tessellated.
 /// `time: Some(t)`
 /// reads time-sampled attributes at `t`; `None` reads the default-time
@@ -127,6 +128,7 @@ pub fn tessellate_prim(prim: &Prim, time: Option<f64>) -> Result<Option<MeshData
         Some("Sphere") => sphere_data(prim, time_code, &path),
         Some("Cube") => cube_data(prim, time_code, &path),
         Some("Plane") => plane_data(prim, time_code, &path),
+        Some("Cylinder") => cylinder_data(prim, time_code, &path),
         _ => Ok(None),
     }
 }
@@ -438,6 +440,133 @@ fn plane_data(
         colors,
         indices: vec![0, 1, 2, 0, 2, 3],
     }))
+}
+
+/// Ring vertices per profile point of a revolved surface; the extra vertex
+/// closes the UV seam.
+const SEGMENTS: usize = 24;
+
+/// Map the canonical +Z build axis onto the axis the prim names.
+fn axis_swap(axis: Axis, value: [f32; 3]) -> [f32; 3] {
+    match axis {
+        Axis::Z => value,
+        Axis::X => [value[2], value[1], value[0]],
+        Axis::Y => [value[0], value[2], value[1]],
+    }
+}
+
+/// A surface of revolution around +Z, then swapped onto `axis`. `profile` is
+/// `(off_axis_radius, on_axis)`, bottom to top; a zero radius is an on-axis
+/// point and emits one vertex instead of a ring.
+fn revolved(
+    prim: &Prim,
+    time_code: Option<TimeCode>,
+    path: &str,
+    profile: &[(f32, f32)],
+    axis: Axis,
+) -> Result<MeshData, String> {
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(profile.len() * (SEGMENTS + 1));
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(positions.capacity());
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(positions.capacity());
+    // First vertex index of each profile row and how many vertices it holds.
+    let mut rows: Vec<(usize, usize)> = Vec::with_capacity(profile.len());
+    for (index, &(radius, on_axis)) in profile.iter().enumerate() {
+        // Central difference inside the profile, one-sided at the ends: a
+        // duplicated point keeps two distinct normal rows, so its rim stays
+        // hard instead of averaged.
+        let previous = profile[index.saturating_sub(1)];
+        let next = profile[(index + 1).min(profile.len() - 1)];
+        let tangent = normalize3([next.0 - previous.0, next.1 - previous.1, 0.0]);
+        let (normal_off, normal_on) = (tangent[1], -tangent[0]);
+        let v = index as f32 / (profile.len() - 1).max(1) as f32;
+        let start = positions.len();
+        if radius == 0.0 {
+            positions.push(axis_swap(axis, [0.0, 0.0, on_axis]));
+            normals.push(axis_swap(axis, [0.0, 0.0, normal_on]));
+            uvs.push([0.5, v]);
+        } else {
+            for u in 0..=SEGMENTS {
+                let theta = std::f32::consts::TAU * u as f32 / SEGMENTS as f32;
+                let (sin, cos) = theta.sin_cos();
+                positions.push(axis_swap(axis, [radius * cos, radius * sin, on_axis]));
+                normals.push(axis_swap(
+                    axis,
+                    [normal_off * cos, normal_off * sin, normal_on],
+                ));
+                uvs.push([u as f32 / SEGMENTS as f32, v]);
+            }
+        }
+        rows.push((start, positions.len() - start));
+    }
+
+    // Consecutive rows sweep one band; a one-vertex row (on-axis point) turns
+    // its band into a triangle fan. Wound counter-clockwise seen from outside.
+    let mut indices: Vec<u32> = Vec::new();
+    for pair in rows.windows(2) {
+        let (a, a_count) = pair[0];
+        let (b, b_count) = pair[1];
+        for u in 0..SEGMENTS {
+            let (a_u, b_u) = ((a + u) as u32, (b + u) as u32);
+            match (a_count, b_count) {
+                (1, 1) => break,
+                (1, _) => indices.extend_from_slice(&[a as u32, b_u + 1, b_u]),
+                (_, 1) => indices.extend_from_slice(&[a_u, a_u + 1, b as u32]),
+                _ => indices.extend_from_slice(&[a_u, a_u + 1, b_u, a_u + 1, b_u + 1, b_u]),
+            }
+        }
+    }
+
+    // `axis_swap` mirrors for X and Y, which reverses the winding those
+    // triangles inherit from the canonical build: swap two corners to keep
+    // them counter-clockwise seen from outside.
+    if !matches!(axis, Axis::Z) {
+        for triangle in indices.chunks_exact_mut(3) {
+            triangle.swap(1, 2);
+        }
+    }
+
+    let colors = display_colors(prim, time_code, path, positions.len())?;
+    Ok(MeshData {
+        positions,
+        normals: Some(normals),
+        uvs: Some(uvs),
+        colors,
+        indices,
+    })
+}
+
+/// A cylinder about the origin: radius 1 and height 2 by default, its `axis`
+/// naming the height's direction. The profile's on-axis endpoints are the cap
+/// centres, so both caps come out as fans with the axis normal.
+fn cylinder_data(
+    prim: &Prim,
+    time_code: Option<TimeCode>,
+    path: &str,
+) -> Result<Option<MeshData>, String> {
+    let cylinder = Cylinder::from_prim_unchecked(prim.clone());
+    // A zero height is a legal flat disc, so it keeps its authored value and
+    // floors below, instead of taking finite_positive's positive-only default.
+    let height = cylinder
+        .height_at(time_code)
+        .map_err(|e| context(path, e))?
+        .map(|height| height as f32)
+        .filter(|height| height.is_finite())
+        .unwrap_or(2.0)
+        .max(1e-4);
+    let radius = finite_positive(
+        cylinder
+            .radius_at(time_code)
+            .map_err(|e| context(path, e))?,
+        1.0,
+    );
+    // `axis` is uniform, so it takes no time code.
+    let axis = cylinder
+        .axis()
+        .map_err(|e| context(path, e))?
+        .unwrap_or(Axis::Z);
+    let half = height / 2.0;
+    let profile = [(0.0, -half), (radius, -half), (radius, half), (0.0, half)];
+    Ok(Some(revolved(prim, time_code, path, &profile, axis)?))
 }
 
 /// An authored size that is non-finite or non-positive has no meaning, so it
