@@ -1405,6 +1405,37 @@ fn cylinder_with_zero_height_stays_finite() {
 }
 
 #[test]
+fn cylinder_with_zero_radius_collapses_onto_its_axis() {
+    let (stage, _info) = open_stage(&fixture("gprims.usda")).expect("gprims stage should open");
+
+    let pinpoint = tessellate(&stage, "/World/Pinpoint").expect("Pinpoint should tessellate");
+
+    assert!(pinpoint
+        .positions
+        .iter()
+        .all(|p| p.iter().all(|v| v.is_finite())));
+    // No authored axis, so the height runs along Z and the radial plane is
+    // (x, y). A plain `Cylinder` reads its radius through the same
+    // non-negative guard as the `_1` variants, so an authored 0 collapses.
+    for position in &pinpoint.positions {
+        assert_eq!(
+            (position[0] * position[0] + position[1] * position[1]).sqrt(),
+            0.0,
+            "a zero radius leaves only on-axis vertices, got {position:?}"
+        );
+    }
+    let zs: Vec<f32> = pinpoint.positions.iter().map(|p| p[2]).collect();
+    assert_eq!(
+        (
+            zs.iter().cloned().fold(f32::MAX, f32::min),
+            zs.iter().cloned().fold(f32::MIN, f32::max)
+        ),
+        (-1.0, 1.0),
+        "the authored height still spans +-height/2"
+    );
+}
+
+#[test]
 fn cone_apex_points_along_positive_axis() {
     let (stage, _info) = open_stage(&fixture("gprims.usda")).expect("gprims stage should open");
 
@@ -1497,13 +1528,13 @@ fn cylinder_1_tapers_between_its_radii() {
 
     let frustum = tessellate(&stage, "/World/Frustum").expect("Frustum should tessellate");
 
-    // The default axis is Z, so the radial plane is (x, y).
-    let widest = |z: f32| {
+    // The Frustum authors axis X, so the radial plane is (y, z).
+    let widest = |x: f32| {
         frustum
             .positions
             .iter()
-            .filter(|p| p[2] == z)
-            .map(|p| (p[0] * p[0] + p[1] * p[1]).sqrt())
+            .filter(|p| p[0] == x)
+            .map(|p| (p[1] * p[1] + p[2] * p[2]).sqrt())
             .fold(0.0_f32, f32::max)
     };
     assert!(
