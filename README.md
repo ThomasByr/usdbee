@@ -28,9 +28,9 @@
 
 Quick notes:
 
-- For Linux AppImage, make it executable and just run it (or install the `.deb` or `.rpm` package);
-- On MacOS, both Intel and Apple Silicon architectures are supported;
-- On Windows, a portable executable is also available alongside the `-setup.exe` and `.msi` installers.
+- Linux AppImage: make it executable and run it (or install the `.deb` or `.rpm` package);
+- MacOS: both Intel and Apple Silicon architectures are supported;
+- Windows: a portable executable is also available alongside the `-setup.exe` and `.msi` installers.
 
 ### Updates (from v1.1.0 onwards)
 
@@ -52,7 +52,7 @@ Then, clone the repository and run the following commands in the project directo
 
 ```sh
 npm install
-npm run tauri build -- --no-bundle
+npm run tauri:nobundle
 ```
 
 This will create the application binary in the `src-tauri/target/release` directory.

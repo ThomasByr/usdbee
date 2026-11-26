@@ -12,6 +12,7 @@
     "test": "vitest run",
     "mcp": "node mcp/server.mjs",
     "tauri": "tauri",
+    "tauri:nobundle": "tauri build --no-bundle",
     "release": "release-it",
     "format": "npm run format:frontend && npm run format:backend",
     "format:frontend": "prettier --write src",
