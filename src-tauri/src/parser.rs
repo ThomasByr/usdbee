@@ -228,7 +228,7 @@ fn relative_key(identifier: &str, root_dir: &Path) -> String {
 }
 
 /// Strips Windows UNC prefixes and normalizes separators to `/`.
-fn clean(path: &str) -> String {
+pub(crate) fn clean(path: &str) -> String {
     path.replace("\\\\?\\", "")
         .replace("//?/", "")
         .replace('\\', "/")
@@ -284,6 +284,11 @@ mod tests {
 
     fn scan(dir: &Path, name: &str) -> DependencyScan {
         scan_dependencies(&dir.join(name)).unwrap()
+    }
+
+    #[test]
+    fn clean_strips_the_windows_unc_prefix_and_normalizes_separators() {
+        assert_eq!(clean(r"\\?\C:\tex\a.png"), "C:/tex/a.png");
     }
 
     #[test]

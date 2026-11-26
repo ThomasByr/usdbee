@@ -218,7 +218,7 @@ describe("init event subscriptions", () => {
 
     handlerFor["usd-load-start"]({ payload: "/scene/bike.usda" });
     handlerFor["usd-scene-loaded"]({
-      payload: { root_file: "/scene/bike.usda", dependencies: deps },
+      payload: { root_file: "/scene/bike.usda", dependencies: deps, stage_id: stageInfo.stage_id },
     });
 
     expect(loadScene).not.toHaveBeenCalled();
@@ -260,7 +260,11 @@ describe("init event subscriptions", () => {
     // The first open's stream still adopts with its own requested path.
     mockedInvoke.mockResolvedValue([]);
     handlerFor["usd-scene-loaded"]({
-      payload: { root_file: "/tmp/usdbee/extracted/root.usda", dependencies: deps },
+      payload: {
+        root_file: "/tmp/usdbee/extracted/root.usda",
+        dependencies: deps,
+        stage_id: stageInfo.stage_id,
+      },
     });
     handlerFor["usd-stage-opened"]({
       payload: { ...stageInfo, root_layer: "/tmp/usdbee/extracted/root.usda" },
@@ -281,7 +285,9 @@ describe("init event subscriptions", () => {
     expect(loadOrchestrator.modalError).toContain("already opening");
 
     // The first open completes and frees the slot.
-    handlerFor["usd-scene-loaded"]({ payload: { root_file: "/scene/a.usda", dependencies: deps } });
+    handlerFor["usd-scene-loaded"]({
+      payload: { root_file: "/scene/a.usda", dependencies: deps, stage_id: stageInfo.stage_id },
+    });
     handlerFor["usd-stage-opened"]({ payload: { ...stageInfo, root_layer: "/scene/a.usda" } });
     loadOrchestrator.finishOpen();
 
@@ -291,6 +297,7 @@ describe("init event subscriptions", () => {
       payload: {
         root_file: "/scene/b.usda",
         dependencies: { "/b.dep": { path: "/b.dep", resolved: true, size_bytes: 1 } },
+        stage_id: 9,
       },
     });
     handlerFor["usd-stage-opened"]({ payload: { ...stageInfo, stage_id: 9, root_layer: "/scene/b.usda" } });
@@ -328,7 +335,9 @@ describe("init event subscriptions", () => {
 
     // The refused second stream adopts nothing once the restore finished.
     mockedInvoke.mockResolvedValue(undefined);
-    handlerFor["usd-scene-loaded"]({ payload: { root_file: "/scene/other.usda", dependencies: {} } });
+    handlerFor["usd-scene-loaded"]({
+      payload: { root_file: "/scene/other.usda", dependencies: {}, stage_id: 8 },
+    });
     handlerFor["usd-stage-opened"]({
       payload: { ...stageInfo, stage_id: 8, root_layer: "/scene/other.usda" },
     });
@@ -337,5 +346,42 @@ describe("init event subscriptions", () => {
     expect(mockedInvoke).toHaveBeenCalledWith("close_stage", { stageId: 8 });
     expect(loadOrchestrator.dependencies).toEqual(deps);
     expect(loadOrchestrator.rootFile).toBe("/scene/current.usda");
+  });
+
+  // openusd canonicalizes the root layer identifier, so on Windows the
+  // stage-opened reports \\?\C:\... while root_file stays C:\... . Both name
+  // the same stage: attribution is by stage id, never by path spelling.
+  it("accepts a stage-opened whose root layer spelling differs but whose id matches", async () => {
+    await loadOrchestrator.init(noHooks);
+
+    handlerFor["usd-load-start"]({ payload: "C:\\Users\\me\\a.usda" });
+    handlerFor["usd-scene-loaded"]({
+      payload: { root_file: "C:\\Users\\me\\a.usda", dependencies: deps, stage_id: 7 },
+    });
+    handlerFor["usd-stage-opened"]({
+      payload: { ...stageInfo, stage_id: 7, root_layer: "\\\\?\\C:\\Users\\me\\a.usda" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mockedInvoke).not.toHaveBeenCalledWith("close_stage", expect.anything());
+    expect(loadOrchestrator.modalError).toBeNull();
+  });
+
+  it("drops and closes a stage-opened carrying another stage's id", async () => {
+    await loadOrchestrator.init(noHooks);
+    mockedInvoke.mockResolvedValue(undefined);
+
+    handlerFor["usd-load-start"]({ payload: "/scene/a.usda" });
+    handlerFor["usd-scene-loaded"]({
+      payload: { root_file: "/scene/a.usda", dependencies: deps, stage_id: 7 },
+    });
+    // Same root layer spelling, different stage: the id wins over the path.
+    handlerFor["usd-stage-opened"]({
+      payload: { ...stageInfo, stage_id: 8, root_layer: "/scene/a.usda" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mockedInvoke).toHaveBeenCalledWith("close_stage", { stageId: 8 });
+    expect(loadOrchestrator.modalError).toBeNull();
   });
 });

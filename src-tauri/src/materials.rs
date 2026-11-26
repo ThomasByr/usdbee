@@ -516,7 +516,7 @@ fn udim_tiles(input: &Input, file_path: &str) -> Option<Vec<UdimTile>> {
             let file_path = std::fs::canonicalize(&path).unwrap_or(path);
             Some(UdimTile {
                 tile,
-                file_path: file_path.to_string_lossy().into_owned(),
+                file_path: crate::parser::clean(&file_path.to_string_lossy()),
             })
         })
         .collect();

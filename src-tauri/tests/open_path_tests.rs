@@ -128,11 +128,14 @@ fn relative_open_reports_the_same_absolute_path_everywhere() {
         *sink.lock().unwrap() = payload.as_str().map(str::to_string);
     });
     let scene_root: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let scene_stage_id: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
     let sink = scene_root.clone();
+    let id_sink = scene_stage_id.clone();
     app.listen("usd-scene-loaded", move |event| {
         let payload: serde_json::Value =
             serde_json::from_str(event.payload()).expect("the payload must be the scene JSON");
         *sink.lock().unwrap() = payload["root_file"].as_str().map(str::to_string);
+        *id_sink.lock().unwrap() = payload["stage_id"].as_u64();
     });
 
     let info = tauri::async_runtime::block_on(open_usd_file_path(
@@ -155,6 +158,14 @@ fn relative_open_reports_the_same_absolute_path_everywhere() {
         scene_root.lock().unwrap().as_deref(),
         Some(expected.as_str()),
         "the scene's root_file must be the same absolute path"
+    );
+    // The frontend attributes usd-stage-opened by this id: the root layer
+    // identifier is canonicalized (\\?\ on Windows) while root_file is not,
+    // so the spellings differ even though both name the same stage.
+    assert_eq!(
+        *scene_stage_id.lock().unwrap(),
+        Some(info.stage_id),
+        "the scene must carry the id of the stage it was loaded for"
     );
 }
 

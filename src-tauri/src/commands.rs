@@ -424,6 +424,7 @@ async fn process_usd_file_inner<R: tauri::Runtime>(
 
     let scene = UsdSceneData {
         root_file: path,
+        stage_id: stage_info.stage_id,
         dependencies,
     };
 

@@ -12,6 +12,9 @@ pub struct UsdDependencyNode {
 #[derive(serde::Serialize, Clone)]
 pub struct UsdSceneData {
     pub root_file: String,
+    // The frontend attributes usd-stage-opened by this id: the root layer
+    // identifier is canonicalized (\\?\ on Windows) while root_file is not.
+    pub stage_id: u64,
     pub dependencies: HashMap<String, UsdDependencyNode>,
 }
 

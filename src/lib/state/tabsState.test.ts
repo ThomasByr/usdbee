@@ -64,7 +64,7 @@ function commands(cmd: string, args?: Record<string, unknown>): unknown {
       };
       fire("usd-load-start", path);
       fire("usd-load-progress", { stage: "Opening File", percent: 10 });
-      fire("usd-scene-loaded", { root_file: path, dependencies: {} });
+      fire("usd-scene-loaded", { root_file: path, dependencies: {}, stage_id: info.stage_id });
       fire("usd-stage-opened", info);
       return info;
     }
@@ -202,7 +202,11 @@ describe("openTab", () => {
 
     const info = stageInfoFor(1, "/scene/slow.usda");
     fireEvent("usd-load-start", "/scene/slow.usda");
-    fireEvent("usd-scene-loaded", { root_file: "/scene/slow.usda", dependencies: {} });
+    fireEvent("usd-scene-loaded", {
+      root_file: "/scene/slow.usda",
+      dependencies: {},
+      stage_id: info.stage_id,
+    });
     fireEvent("usd-stage-opened", info);
     pending.resolve(info);
     await first;
@@ -219,6 +223,7 @@ describe("openTab", () => {
     fireEvent("usd-scene-loaded", {
       root_file: "/tmp/usdbee/extracted/root.usda",
       dependencies: {},
+      stage_id: info.stage_id,
     });
     fireEvent("usd-stage-opened", info);
 
@@ -249,6 +254,7 @@ describe("openTab", () => {
     fireEvent("usd-scene-loaded", {
       root_file: "/scene/dialog.usda",
       dependencies: { "/dialog.dep": { path: "/dialog.dep", resolved: true, size_bytes: 1 } },
+      stage_id: 9,
     });
     expect(loadOrchestrator.dependencies).toBeNull();
     fireEvent("usd-stage-opened", stageInfoFor(9, "/scene/dialog.usda"));
@@ -262,7 +268,11 @@ describe("openTab", () => {
 
     // The first open completes with its own root, deps and recent entry.
     const info = stageInfoFor(1, "/scene/slow.usda");
-    fireEvent("usd-scene-loaded", { root_file: "/scene/slow.usda", dependencies: {} });
+    fireEvent("usd-scene-loaded", {
+      root_file: "/scene/slow.usda",
+      dependencies: {},
+      stage_id: info.stage_id,
+    });
     fireEvent("usd-stage-opened", info);
     pending.resolve(info);
     await first;
@@ -284,7 +294,11 @@ describe("openTab", () => {
 
     // The first open completes and frees the slot.
     const info = stageInfoFor(1, "/scene/slow.usda");
-    fireEvent("usd-scene-loaded", { root_file: "/scene/slow.usda", dependencies: {} });
+    fireEvent("usd-scene-loaded", {
+      root_file: "/scene/slow.usda",
+      dependencies: {},
+      stage_id: info.stage_id,
+    });
     fireEvent("usd-stage-opened", info);
     pending.resolve(info);
     await first;
@@ -296,6 +310,7 @@ describe("openTab", () => {
     fireEvent("usd-scene-loaded", {
       root_file: "/scene/dialog.usda",
       dependencies: { "/dialog.dep": { path: "/dialog.dep", resolved: true, size_bytes: 1 } },
+      stage_id: 9,
     });
     fireEvent("usd-stage-opened", stageInfoFor(9, "/scene/dialog.usda"));
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -343,7 +358,11 @@ describe("openTab", () => {
     expect(loadOrchestrator.rootFile).toBe("/scene/b.usda");
 
     const info = stageInfoFor(3, "/scene/a.usda");
-    fireEvent("usd-scene-loaded", { root_file: "/scene/a.usda", dependencies: {} });
+    fireEvent("usd-scene-loaded", {
+      root_file: "/scene/a.usda",
+      dependencies: {},
+      stage_id: info.stage_id,
+    });
     fireEvent("usd-stage-opened", info);
     pending.resolve(info);
     await opening;
