@@ -272,11 +272,9 @@ pub fn init() -> CompatReport {
         Some(dir) => init_with(&facts, &dir.join(PREFS_FILE)),
         None => store(report_from(&facts, CompatMode::Auto)),
     };
-    println!(
-        "usdbee: hardware compositing {} ({})",
-        if report.applied { "off" } else { "on" },
-        report.reason
-    );
+    // The reason already reads as a sentence ("Hardware compositing is off: …"),
+    // so the log prints it rather than wrapping it in a second prefix.
+    println!("usdbee: {}", report.reason);
     report
 }
 
