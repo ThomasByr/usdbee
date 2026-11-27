@@ -23,6 +23,8 @@
     top: 62px;
     transform: translateX(-50%);
     z-index: 20;
+    /* Kept to one line so it cannot wrap into the compat notice below it. */
+    max-width: min(60ch, 90%);
     pointer-events: none;
     padding: 6px 14px;
     border-radius: 6px;

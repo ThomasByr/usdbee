@@ -46,6 +46,36 @@ describe("CompatNotice", () => {
     expect(host.querySelector(".compat-notice")).toBeNull();
   });
 
+  it("renders nothing without a report", () => {
+    compatState.report = null;
+    render();
+    expect(host.querySelector(".compat-notice")).toBeNull();
+  });
+
+  it("renders nothing when the mode is forced", () => {
+    compatState.report = { ...report, mode: "on", applied: false, forced: true };
+    render();
+    expect(host.querySelector(".compat-notice")).toBeNull();
+  });
+
+  it("keeps the live region free of controls", () => {
+    compatState.report = report;
+    render();
+
+    const status = host.querySelector('[role="status"]')!;
+    expect(status).not.toBeNull();
+    expect(status.querySelector("button")).toBeNull();
+    expect(host.querySelector(".compat-notice")!.getAttribute("role")).toBeNull();
+  });
+
+  it("still reads as a sentence when the reason is empty", () => {
+    compatState.report = { ...report, reason: "" };
+    render();
+
+    const reason = host.querySelector(".compat-reason")!;
+    expect(reason.textContent!.trim()).toBe("Hardware compositing is off.");
+  });
+
   it("renders the reason line when auto decided to disable", () => {
     compatState.report = report;
     render();

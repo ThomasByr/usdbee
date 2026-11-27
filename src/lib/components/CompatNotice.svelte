@@ -2,14 +2,20 @@
   import { compatNoticeVisible, compatState, dismissCompatNotice } from "$lib/state/compatState.svelte";
 
   let { onOpenSettings }: { onOpenSettings?: () => void } = $props();
+
+  const reasonText = $derived(
+    compatState.report?.reason
+      ? `Hardware compositing is off: ${compatState.report.reason}`
+      : "Hardware compositing is off.",
+  );
 </script>
 
 <!-- No timer: the camera notice is transient, this one is sticky, and the
      dismissal lives in the session-scoped compatState. -->
 {#if compatNoticeVisible(compatState.report, compatState.dismissed)}
-  <div class="compat-notice" role="status">
-    <div class="compat-text">
-      <p class="compat-reason">Hardware compositing is off: {compatState.report?.reason}</p>
+  <div class="compat-notice">
+    <div class="compat-text" role="status" aria-live="polite">
+      <p class="compat-reason">{reasonText}</p>
       <p class="compat-hint">Change this in Settings. The new mode applies after a restart.</p>
     </div>
     <button class="compat-btn" onclick={() => onOpenSettings?.()}>Settings</button>
