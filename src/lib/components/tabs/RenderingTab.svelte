@@ -282,7 +282,7 @@
     </label>
   </div>
 
-  <div class="settings-group">
+  <div class="settings-group" id="compat-group">
     <h3>Compatibility</h3>
     <label style="display:flex; flex-direction:column; align-items:flex-start; gap:4px; width:100%;">
       Hardware compositing

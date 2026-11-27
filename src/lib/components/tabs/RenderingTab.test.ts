@@ -185,6 +185,15 @@ function compatRestartChip(): HTMLElement | null {
 }
 
 describe("RenderingTab compatibility group", () => {
+  it("carries the anchor the compat notice scrolls to", async () => {
+    await renderCompat({ cameras: CAMERAS });
+
+    const group = document.getElementById("compat-group")!;
+    expect(group).not.toBeNull();
+    expect(group.querySelector("h3")!.textContent!.trim()).toBe("Compatibility");
+    expect(group.contains(compatSelect())).toBe(true);
+  });
+
   it("shows the three modes and the running one", async () => {
     const select = await renderCompat({ cameras: CAMERAS });
 

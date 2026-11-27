@@ -51,12 +51,14 @@
     lightElevation,
     gizmoMode = $bindable(),
     onOpenSettings,
+    onOpenRenderingSettings,
   }: {
     viewer: RendererKit;
     lightAzimuth: number;
     lightElevation: number;
     gizmoMode: GizmoMode;
     onOpenSettings?: () => void;
+    onOpenRenderingSettings?: () => void;
   } = $props();
 
   let canvas: HTMLCanvasElement;
@@ -298,7 +300,7 @@
 
   <CameraNotice />
 
-  <CompatNotice {onOpenSettings} />
+  <CompatNotice {onOpenRenderingSettings} />
 
   <canvas bind:this={canvas} class="webgl-canvas" class:visible={!!loadOrchestrator.rootFile}></canvas>
 

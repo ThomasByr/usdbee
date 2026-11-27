@@ -70,6 +70,14 @@
     document.getElementById("recent-files")?.scrollIntoView({ block: "start" });
   }
 
+  // The compat notice warns about the Rendering tab's Compatibility group,
+  // so it opens there instead of Settings.
+  async function openRenderingCompatSettings(): Promise<void> {
+    activeTab = "rendering";
+    await tick();
+    document.getElementById("compat-group")?.scrollIntoView({ block: "nearest" });
+  }
+
   // The rendering tab's camera picker runs the palette's own two commands.
   function pickRenderingCamera(path: string | null) {
     return dispatchCommand(
@@ -701,6 +709,7 @@
       {lightAzimuth}
       {lightElevation}
       onOpenSettings={() => void openSettingsAtRecent()}
+      onOpenRenderingSettings={() => void openRenderingCompatSettings()}
     />
   </main>
 </div>

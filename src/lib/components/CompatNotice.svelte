@@ -6,7 +6,9 @@
     setBannerEnabled,
   } from "$lib/state/compatState.svelte";
 
-  let { onOpenSettings }: { onOpenSettings?: () => void } = $props();
+  // The warning is about the Rendering tab's Compatibility group, so it gets
+  // its own path: the Viewport's camera list still owns onOpenSettings.
+  let { onOpenRenderingSettings }: { onOpenRenderingSettings?: () => void } = $props();
 
   // The persistent half of the dismissal: the bar stays away across restarts.
   function hideForGood() {
@@ -25,10 +27,14 @@
   <div class="compat-notice">
     <div class="compat-text" role="status" aria-live="polite">
       <p class="compat-reason">{reasonText}</p>
-      <p class="compat-hint">Change this in Settings. Applies after a restart.</p>
+      <p class="compat-hint">Change this in Rendering settings.</p>
     </div>
-    <button class="compat-btn" onclick={() => onOpenSettings?.()}>Settings</button>
-    <button class="compat-btn" onclick={hideForGood}>Do not show again</button>
+    <div class="compat-actions">
+      <button class="compat-btn" onclick={() => onOpenRenderingSettings?.()}>Rendering settings</button>
+      <button class="compat-btn" onclick={hideForGood}>Do not show again</button>
+    </div>
+    <!-- The close sits in the corner, out of the text flow: the two buttons
+         read as the answer, the dismiss as the way out. -->
     <button class="compat-btn dismiss" aria-label="Dismiss" title="Dismiss" onclick={dismissCompatNotice}>
       &#215;
     </button>
@@ -45,23 +51,19 @@
     transform: translateX(-50%);
     z-index: 20;
     display: flex;
-    align-items: center;
-    gap: 10px;
-    /* A fixed frame, not max-width: the flex row would otherwise shrink the
-       reason column to its longest word and wrap it over five lines. */
+    flex-direction: column;
+    gap: 8px;
+    /* A fixed frame, not max-width: the card keeps one width whether the
+       reason wraps over two lines or four. */
     width: min(760px, calc(100% - 24px));
-    padding: 8px 12px;
+    /* Right padding clears the absolutely placed close button. */
+    padding: 8px 36px 8px 12px;
     border-radius: 6px;
     border: 1px solid var(--border);
     background: var(--panel);
     color: var(--text-bright);
     font-size: 13px;
     box-shadow: 0 2px 8px var(--shadow);
-  }
-
-  .compat-text {
-    flex: 1 1 auto;
-    min-width: 0;
   }
 
   .compat-reason {
@@ -72,6 +74,11 @@
     margin: 2px 0 0;
     font-size: 11px;
     color: var(--text);
+  }
+
+  .compat-actions {
+    display: flex;
+    gap: 8px;
   }
 
   .compat-btn {
@@ -91,6 +98,9 @@
   }
 
   .dismiss {
+    position: absolute;
+    top: 6px;
+    right: 8px;
     padding: 3px 7px;
     line-height: 1;
   }

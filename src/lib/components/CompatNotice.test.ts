@@ -22,7 +22,7 @@ const report: CompatReport = {
 let host: HTMLElement;
 let component: ReturnType<typeof mount>;
 
-function render(props: { onOpenSettings?: () => void } = {}) {
+function render(props: { onOpenRenderingSettings?: () => void } = {}) {
   component = mount(CompatNotice, { target: host, props });
   flushSync();
 }
@@ -67,6 +67,8 @@ describe("CompatNotice", () => {
     expect(status).not.toBeNull();
     expect(status.querySelector("button")).toBeNull();
     expect(host.querySelector(".compat-notice")!.getAttribute("role")).toBeNull();
+    // The actions row is a sibling: the announcement never reads out buttons.
+    expect(status.contains(host.querySelector(".compat-actions"))).toBe(false);
   });
 
   it("still reads as a sentence when the reason is empty", () => {
@@ -145,16 +147,16 @@ describe("CompatNotice", () => {
     expect(host.querySelector(".compat-notice")).toBeNull();
   });
 
-  it("calls onOpenSettings from the settings button", () => {
+  it("calls onOpenRenderingSettings from the rendering settings button", () => {
     compatState.report = report;
-    const onOpenSettings = vi.fn();
-    render({ onOpenSettings });
+    const onOpenRenderingSettings = vi.fn();
+    render({ onOpenRenderingSettings });
 
     const settings = [...host.querySelectorAll<HTMLButtonElement>(".compat-notice button")].find(
-      (b) => b.textContent!.trim() === "Settings",
+      (b) => b.textContent!.trim() === "Rendering settings",
     )!;
     settings.click();
 
-    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(onOpenRenderingSettings).toHaveBeenCalledTimes(1);
   });
 });
