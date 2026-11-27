@@ -1,4 +1,12 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import {
+    compatState,
+    loadCompatReport,
+    setCompatMode,
+    type CompatMode,
+  } from "$lib/state/compatState.svelte";
+
   let {
     maxFps = $bindable(),
     renderScale = $bindable(),
@@ -30,6 +38,39 @@
   // The scale spans five decades, so the slider works in log10: a linear track
   // put the default 1.0 at 0.1% of its width.
   let logLightScale = $derived(Math.log10(sceneLightScale));
+
+  // App-level state, not a viewer setting: load it here too, so the row is
+  // right when Settings is the first thing the user opens.
+  onMount(() => {
+    void loadCompatReport();
+  });
+
+  let compatError = $state<string | null>(null);
+  // Empty while there is no report: the select then shows the neutral option.
+  let compatMode = $derived<CompatMode | "">(compatState.report?.mode ?? "");
+
+  let compatContext = $derived(
+    compatState.report === null
+      ? ""
+      : [
+          `WebKitGTK ${compatState.report.webkit_version}`,
+          compatState.report.nvidia_version && `NVIDIA ${compatState.report.nvidia_version}`,
+          compatState.report.x11 ? "X11" : "Wayland",
+        ]
+          .filter((part) => part)
+          .join(" · "),
+  );
+
+  async function onCompatChange(event: Event) {
+    const select = event.currentTarget as HTMLSelectElement;
+    compatError = null;
+    const error = await setCompatMode(select.value as CompatMode);
+    // A rejected write stored nothing: put the running mode back.
+    if (error !== null) {
+      compatError = error;
+      select.value = compatMode;
+    }
+  }
 
   async function onCameraChange(event: Event) {
     const select = event.currentTarget as HTMLSelectElement;
@@ -218,5 +259,36 @@
         onchange={saveGraphicsPreferences}
       />
     </label>
+  </div>
+
+  <div class="settings-group">
+    <h3>Compatibility</h3>
+    <label style="display:flex; flex-direction:column; align-items:flex-start; gap:4px; width:100%;">
+      Hardware compositing
+      <select
+        class="dropdown"
+        value={compatMode}
+        disabled={compatState.report === null}
+        onchange={onCompatChange}
+      >
+        {#if compatState.report === null}
+          <option value="">Not detected yet</option>
+        {:else}
+          <option value="auto">Auto (detect)</option>
+          <option value="on">Force on</option>
+          <option value="off">Force off</option>
+        {/if}
+      </select>
+    </label>
+    {#if compatState.report}
+      <p style="margin:0; font-size:11px; color:var(--text-muted);">{compatState.report.reason}</p>
+      <p style="margin:0; font-size:11px; color:var(--text-muted);">{compatContext}</p>
+    {/if}
+    {#if compatError}
+      <p style="margin:0; font-size:11px; color:var(--danger);">{compatError}</p>
+    {/if}
+    {#if compatState.pendingRestart}
+      <p style="margin:0; font-size:11px; color:var(--text-muted);">Restart usdbee to apply</p>
+    {/if}
   </div>
 </div>

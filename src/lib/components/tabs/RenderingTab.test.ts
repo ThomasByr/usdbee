@@ -1,7 +1,12 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, tick, unmount } from "svelte";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+
+import { invoke } from "@tauri-apps/api/core";
 import type { CameraInfo } from "$lib/stage/types";
+import { compatState, type CompatReport } from "$lib/state/compatState.svelte";
 import RenderingTab from "./RenderingTab.svelte";
 
 const CAMERAS: CameraInfo[] = [
@@ -27,6 +32,19 @@ const CAMERAS: CameraInfo[] = [
   },
 ];
 
+const REPORT: CompatReport = {
+  mode: "auto",
+  applied: true,
+  forced: false,
+  reason: "WebKitGTK 2.52 leaks GPU fences with the Debian patch",
+  distro_label: "Debian 13",
+  nvidia_version: "550.54.14",
+  webkit_version: "2.52.0",
+  x11: true,
+  debian_family: true,
+};
+
+const mockedInvoke = vi.mocked(invoke);
 let instance: ReturnType<typeof mount> | null = null;
 
 // The rendering groups this test does not exercise still read their props.
@@ -61,6 +79,18 @@ async function choose(select: HTMLSelectElement, value: string) {
   await tick();
   await tick();
 }
+
+// The compat group is app-level state: reset it so a previous test cannot
+// leave a report or a pending-restart hint behind.
+beforeEach(() => {
+  mockedInvoke.mockReset();
+  mockedInvoke.mockImplementation(async (command: string) =>
+    command === "compat_status" ? REPORT : undefined,
+  );
+  compatState.report = null;
+  compatState.dismissed = false;
+  compatState.pendingRestart = false;
+});
 
 afterEach(() => {
   if (instance !== null) unmount(instance);
@@ -119,5 +149,86 @@ describe("RenderingTab camera picker", () => {
 
     expect([...select.options].map((option) => option.value)).toEqual(["free"]);
     expect(document.body.textContent).toContain("This stage has no cameras.");
+  });
+});
+
+// The compositing select is the only one that offers "Force on".
+function compatSelect() {
+  const selects = [...document.querySelectorAll("select")] as HTMLSelectElement[];
+  const found = selects.find((select) =>
+    [...select.options].some((option) => option.textContent === "Force on"),
+  );
+  if (found === undefined) throw new Error("no compatibility select rendered");
+  return found;
+}
+
+// The report arrives from the IPC mock one microtask after mount.
+async function renderCompat(props: Record<string, unknown>) {
+  render(props);
+  await tick();
+  await tick();
+  return compatSelect();
+}
+
+describe("RenderingTab compatibility group", () => {
+  it("shows the three modes and the running one", async () => {
+    const select = await renderCompat({ cameras: CAMERAS });
+
+    expect([...select.options].map((option) => option.value)).toEqual(["auto", "on", "off"]);
+    expect([...select.options].map((option) => option.textContent)).toEqual([
+      "Auto (detect)",
+      "Force on",
+      "Force off",
+    ]);
+    expect(select.value).toBe("auto");
+  });
+
+  it("shows the reason string", async () => {
+    await renderCompat({ cameras: CAMERAS });
+
+    expect(document.body.textContent).toContain(REPORT.reason);
+  });
+
+  it("shows restart-to-apply only when pending", async () => {
+    await renderCompat({ cameras: CAMERAS });
+    expect(document.body.textContent).not.toContain("Restart usdbee to apply");
+    unmount(instance!);
+
+    compatState.pendingRestart = true;
+    await renderCompat({ cameras: CAMERAS });
+    expect(document.body.textContent).toContain("Restart usdbee to apply");
+  });
+
+  it("selecting a mode forwards it to the backend", async () => {
+    const select = await renderCompat({ cameras: CAMERAS });
+
+    await choose(select, "off");
+
+    expect(mockedInvoke).toHaveBeenCalledWith("set_compat_pref", { mode: "off" });
+  });
+
+  it("shows a rejected mode and keeps the running one selected", async () => {
+    mockedInvoke.mockImplementation(async (command: string) => {
+      if (command === "compat_status") return REPORT;
+      throw "cannot resolve the config directory";
+    });
+    const select = await renderCompat({ cameras: CAMERAS });
+
+    await choose(select, "off");
+
+    expect(document.body.textContent).toContain("cannot resolve the config directory");
+    expect(select.value).toBe("auto");
+  });
+
+  it("says so when no report is available yet", async () => {
+    mockedInvoke.mockRejectedValue("ipc unavailable");
+    render({ cameras: CAMERAS });
+    await tick();
+    await tick();
+
+    expect(document.body.textContent).toContain("Not detected yet");
+    // No report means no mode: the select has nothing to show.
+    const select = document.querySelector("select[disabled]") as HTMLSelectElement;
+    expect(select.value).toBe("");
   });
 });
