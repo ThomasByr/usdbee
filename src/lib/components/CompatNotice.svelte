@@ -47,7 +47,9 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    max-width: min(760px, calc(100% - 24px));
+    /* A fixed frame, not max-width: the flex row would otherwise shrink the
+       reason column to its longest word and wrap it over five lines. */
+    width: min(760px, calc(100% - 24px));
     padding: 8px 12px;
     border-radius: 6px;
     border: 1px solid var(--border);
@@ -58,6 +60,7 @@
   }
 
   .compat-text {
+    flex: 1 1 auto;
     min-width: 0;
   }
 
