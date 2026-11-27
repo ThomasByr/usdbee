@@ -158,3 +158,23 @@ Lighting source when set to Auto or Scene.
 Extraction stays under `std::env::temp_dir()/usdbee/cache`, so it needs nothing extra.
 
 </details>
+
+<details open>
+<summary>NVIDIA + WebKitGTK fence leak (Linux)</summary>
+
+> [!Caution]
+> On Linux with a proprietary NVIDIA driver, WebKitGTK 2.52 leaks GPU fence descriptors while a list scrolls.<br>
+> Ubuntu 24.04 and Linux Mint 22 ship that version.
+
+`usdbee v1.2.2+` detects this combination at startup, on X11 only, and turns hardware compositing off for the webview.
+Geometry, materials and playback do not change.
+
+`Rendering > Hardware compositing` has three values:
+`Auto (detect)` applies that decision,
+`Force on` keeps hardware compositing, and
+`Force off` always turns it off.
+The change applies after a restart.
+
+The Ubuntu bug is LP #2175515; the WebKit workaround is PR #81392 and is not in 2.52.
+
+</details>
