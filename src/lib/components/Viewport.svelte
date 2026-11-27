@@ -40,6 +40,7 @@
   import * as THREE from "three";
   import Toolbar from "./Toolbar.svelte";
   import CameraNotice from "./CameraNotice.svelte";
+  import CompatNotice from "./CompatNotice.svelte";
 
   // The page owns the RendererKit instance and the sidebar-facing bindings
   // (SettingsTab / RenderingTab / ExportModal read it); the viewport wires
@@ -296,6 +297,8 @@
   />
 
   <CameraNotice />
+
+  <CompatNotice {onOpenSettings} />
 
   <canvas bind:this={canvas} class="webgl-canvas" class:visible={!!loadOrchestrator.rootFile}></canvas>
 
