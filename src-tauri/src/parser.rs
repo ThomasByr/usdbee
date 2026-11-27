@@ -234,9 +234,7 @@ fn relative_key(identifier: &str, root_dir: &Path) -> String {
 
 /// Strips Windows UNC prefixes and normalizes separators to `/`.
 pub(crate) fn clean(path: &str) -> String {
-    path.replace("\\\\?\\", "")
-        .replace("//?/", "")
-        .replace('\\', "/")
+    display_path(path).replace('\\', "/")
 }
 
 /// `path` without the verbatim prefix `canonicalize` adds on Windows, which no
@@ -249,7 +247,24 @@ fn without_verbatim(path: &Path) -> PathBuf {
 /// carry the verbatim prefix `canonicalize` adds on Windows, and the frontend
 /// compares them with the path it asked for.
 pub(crate) fn display_path(path: &str) -> String {
-    path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
+    // `\\?\UNC\server\share` is the verbatim spelling of `\\server\share`:
+    // dropping only the verbatim prefix would name a `UNC` directory.
+    for (verbatim, plain) in [
+        (r"\\?\UNC\", r"\\"),
+        (r"\\?\unc\", r"\\"),
+        ("//?/UNC/", "//"),
+        ("//?/unc/", "//"),
+    ] {
+        if let Some(rest) = path.strip_prefix(verbatim) {
+            return format!("{plain}{rest}");
+        }
+    }
+    for verbatim in [r"\\?\", "//?/"] {
+        if let Some(rest) = path.strip_prefix(verbatim) {
+            return rest.to_string();
+        }
+    }
+    path.to_string()
 }
 
 #[cfg(test)]
@@ -307,6 +322,23 @@ mod tests {
     #[test]
     fn clean_strips_the_windows_unc_prefix_and_normalizes_separators() {
         assert_eq!(clean(r"\\?\C:\tex\a.png"), "C:/tex/a.png");
+    }
+
+    #[test]
+    fn verbatim_unc_paths_keep_their_share() {
+        // Dropping only the verbatim prefix would leave `UNC\srv\...`, which
+        // names a directory called `UNC` instead of the share.
+        assert_eq!(
+            display_path(r"\\?\UNC\srv\share\a.png"),
+            r"\\srv\share\a.png"
+        );
+        assert_eq!(clean(r"\\?\UNC\srv\share\a.png"), "//srv/share/a.png");
+    }
+
+    #[test]
+    fn display_path_strips_a_plain_verbatim_prefix() {
+        assert_eq!(display_path(r"\\?\C:\tex\a.png"), r"C:\tex\a.png");
+        assert_eq!(display_path(r"C:\tex\a.png"), r"C:\tex\a.png");
     }
 
     #[test]
