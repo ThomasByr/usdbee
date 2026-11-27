@@ -18,6 +18,18 @@ export interface CompatReport {
   debian_family: boolean;
 }
 
+const BANNER_KEY = "usdbee_compat_banner";
+
+// Private mode and disabled storage throw on access: the banner then stays on.
+function readBannerEnabled(): boolean {
+  try {
+    return localStorage.getItem(BANNER_KEY) !== "0";
+  } catch (e) {
+    console.warn("Failed to read the compat banner preference", e);
+    return true;
+  }
+}
+
 export const compatState = $state({
   report: null as CompatReport | null,
   // What the config file holds: the mode the next launch applies. Equal to the
@@ -25,6 +37,8 @@ export const compatState = $state({
   storedMode: null as CompatMode | null,
   dismissed: false,
   pendingRestart: false,
+  // The persistent half of the notice: hiding it this way survives a restart.
+  bannerEnabled: readBannerEnabled(),
 });
 
 // A rejected status must not disturb the UI: everything degrades to "no
@@ -59,7 +73,20 @@ export function dismissCompatNotice(): void {
   compatState.dismissed = true;
 }
 
+export function setBannerEnabled(enabled: boolean): void {
+  compatState.bannerEnabled = enabled;
+  try {
+    localStorage.setItem(BANNER_KEY, enabled ? "1" : "0");
+  } catch (e) {
+    console.warn("Failed to persist the compat banner preference", e);
+  }
+}
+
 // Pure so the components and the tests can call it with any report.
-export function compatNoticeVisible(report: CompatReport | null, dismissed: boolean): boolean {
-  return report !== null && report.applied && report.mode === "auto" && !dismissed;
+export function compatNoticeVisible(
+  report: CompatReport | null,
+  dismissed: boolean,
+  bannerEnabled: boolean,
+): boolean {
+  return report !== null && report.applied && report.mode === "auto" && !dismissed && bannerEnabled;
 }

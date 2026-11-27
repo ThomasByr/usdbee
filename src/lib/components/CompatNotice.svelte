@@ -8,8 +8,9 @@
 </script>
 
 <!-- No timer: the camera notice is transient, this one is sticky, and the
-     dismissal lives in the session-scoped compatState. -->
-{#if compatNoticeVisible(compatState.report, compatState.dismissed)}
+     dismissal lives in the session-scoped compatState, and the persisted
+     bannerEnabled preference hides it across restarts. -->
+{#if compatNoticeVisible(compatState.report, compatState.dismissed, compatState.bannerEnabled)}
   <div class="compat-notice">
     <div class="compat-text" role="status" aria-live="polite">
       <p class="compat-reason">{reasonText}</p>

@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+// @vitest-environment happy-dom
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockedInvoke = vi.hoisted(() => vi.fn());
 
@@ -30,9 +31,14 @@ function report(overrides: Partial<CompatReport> = {}): CompatReport {
 
 beforeEach(async () => {
   mockedInvoke.mockReset();
+  localStorage.clear();
   vi.resetModules();
   mod = await import("./compatState.svelte");
   compatState = mod.compatState;
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("compatState", () => {
@@ -58,23 +64,75 @@ describe("compatState", () => {
 
   it("notice is visible only when auto applied and not dismissed", () => {
     const base = report();
-    expect(mod.compatNoticeVisible(base, false)).toBe(true);
-    expect(mod.compatNoticeVisible(base, true)).toBe(false);
-    expect(mod.compatNoticeVisible({ ...base, applied: false }, false)).toBe(false);
-    expect(mod.compatNoticeVisible({ ...base, mode: "off" }, false)).toBe(false);
-    expect(mod.compatNoticeVisible({ ...base, mode: "on" }, false)).toBe(false);
-    expect(mod.compatNoticeVisible(null, false)).toBe(false);
+    expect(mod.compatNoticeVisible(base, false, true)).toBe(true);
+    expect(mod.compatNoticeVisible(base, true, true)).toBe(false);
+    expect(mod.compatNoticeVisible({ ...base, applied: false }, false, true)).toBe(false);
+    expect(mod.compatNoticeVisible({ ...base, mode: "off" }, false, true)).toBe(false);
+    expect(mod.compatNoticeVisible({ ...base, mode: "on" }, false, true)).toBe(false);
+    expect(mod.compatNoticeVisible(null, false, true)).toBe(false);
+  });
+
+  it("notice stays hidden when the stored preference disables it", () => {
+    expect(mod.compatNoticeVisible(report(), false, false)).toBe(false);
+    expect(mod.compatNoticeVisible(report(), false, true)).toBe(true);
+  });
+
+  it("shows the banner when nothing is stored", () => {
+    expect(compatState.bannerEnabled).toBe(true);
+  });
+
+  it("reads a disabled banner from storage", async () => {
+    localStorage.setItem("usdbee_compat_banner", "0");
+    vi.resetModules();
+    const fresh = await import("./compatState.svelte");
+
+    expect(fresh.compatState.bannerEnabled).toBe(false);
+  });
+
+  it("reads an enabled banner from storage", async () => {
+    localStorage.setItem("usdbee_compat_banner", "1");
+    vi.resetModules();
+    const fresh = await import("./compatState.svelte");
+
+    expect(fresh.compatState.bannerEnabled).toBe(true);
+  });
+
+  it("persists the banner preference", () => {
+    mod.setBannerEnabled(false);
+    expect(compatState.bannerEnabled).toBe(false);
+    expect(localStorage.getItem("usdbee_compat_banner")).toBe("0");
+
+    mod.setBannerEnabled(true);
+    expect(compatState.bannerEnabled).toBe(true);
+    expect(localStorage.getItem("usdbee_compat_banner")).toBe("1");
+  });
+
+  it("falls back to enabled when storage throws", async () => {
+    vi.stubGlobal("localStorage", {
+      getItem: () => {
+        throw new Error("storage disabled");
+      },
+      setItem: () => {
+        throw new Error("storage disabled");
+      },
+    });
+    vi.resetModules();
+    const fresh = await import("./compatState.svelte");
+
+    expect(fresh.compatState.bannerEnabled).toBe(true);
+    expect(() => fresh.setBannerEnabled(false)).not.toThrow();
+    expect(fresh.compatState.bannerEnabled).toBe(false);
   });
 
   it("dismiss hides the notice", async () => {
     mockedInvoke.mockResolvedValueOnce(report());
     await mod.loadCompatReport();
-    expect(mod.compatNoticeVisible(compatState.report, compatState.dismissed)).toBe(true);
+    expect(mod.compatNoticeVisible(compatState.report, compatState.dismissed, true)).toBe(true);
 
     mod.dismissCompatNotice();
 
     expect(compatState.dismissed).toBe(true);
-    expect(mod.compatNoticeVisible(compatState.report, compatState.dismissed)).toBe(false);
+    expect(mod.compatNoticeVisible(compatState.report, compatState.dismissed, true)).toBe(false);
   });
 
   it("setting a different mode marks a restart pending and forwards the mode", async () => {
