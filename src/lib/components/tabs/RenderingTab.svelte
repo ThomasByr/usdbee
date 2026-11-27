@@ -59,8 +59,10 @@
     COMPAT_MODES.find((entry) => entry.value === compatState.storedMode)?.label ?? "",
   );
 
-  // Non-Linux builds report WebKitGTK 0.0.0 and cannot be X11: no context line
-  // is better than a wrong one.
+  // Non-Linux builds report WebKitGTK 0.0.0: the guard has nothing to act on.
+  let compatApplies = $derived(compatState.report !== null && compatState.report.webkit_version !== "0.0.0");
+
+  // The context line only decorates the guard: hidden when the guard cannot apply.
   let compatContext = $derived(
     compatState.report === null || compatState.report.webkit_version === "0.0.0"
       ? ""
@@ -280,7 +282,7 @@
       <select
         class="dropdown"
         value={compatMode}
-        disabled={compatState.report === null}
+        disabled={compatState.report === null || !compatApplies}
         onchange={onCompatChange}
       >
         {#if compatState.report === null}
@@ -292,6 +294,12 @@
         {/if}
       </select>
     </label>
+    {#if compatState.report !== null && !compatApplies}
+      <p style="margin:0; font-size:11px; color:var(--text-muted);">
+        Not applicable on this platform: this guard covers a WebKitGTK defect on Linux. Windows and macOS use
+        the operating system's webview, where no equivalent fence leak is known.
+      </p>
+    {/if}
     {#if compatState.report}
       <p class="compat-reason" style="margin:0; font-size:11px; color:var(--text-muted);">
         {compatState.report.reason}

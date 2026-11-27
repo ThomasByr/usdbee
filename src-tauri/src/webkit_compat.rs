@@ -103,11 +103,21 @@ fn auto_off_reason(facts: &EnvFacts) -> String {
     )
 }
 
+// Each webview on Windows and macOS comes from the OS, not from WebKitGTK,
+// so a forced mode cannot reach anything there. Non-Linux builds report 0.0.0.
+fn webkitgtk_build(facts: &EnvFacts) -> bool {
+    (facts.webkit_major, facts.webkit_minor) != (0, 0)
+}
+
 pub fn decide(facts: &EnvFacts, mode: CompatMode) -> (bool, String) {
     match mode {
         CompatMode::On => (
             false,
             "Hardware compositing is on: forced by your setting.".to_string(),
+        ),
+        CompatMode::Off if !webkitgtk_build(facts) => (
+            false,
+            "Hardware compositing is on: this guard does not apply on this platform.".to_string(),
         ),
         CompatMode::Off => (
             true,
@@ -489,6 +499,24 @@ mod tests {
         let report = report_from(&facts_ubuntu_x11_nvidia_252(), CompatMode::On);
         assert!(report.forced);
         assert!(!report.applied);
+    }
+
+    #[test]
+    fn forced_off_is_inert_without_webkitgtk() {
+        let mut facts = facts_ubuntu_x11_nvidia_252();
+        facts.webkit_major = 0;
+        facts.webkit_minor = 0;
+        facts.webkit_micro = 0;
+        let (disable, reason) = decide(&facts, CompatMode::Off);
+        assert!(!disable, "reason: {reason}");
+        assert!(reason.contains("platform"), "reason: {reason}");
+    }
+
+    #[test]
+    fn forced_off_still_works_on_webkitgtk() {
+        let (disable, reason) = decide(&facts_ubuntu_x11_nvidia_252(), CompatMode::Off);
+        assert!(disable, "reason: {reason}");
+        assert!(reason.contains("setting"), "reason: {reason}");
     }
 
     #[test]

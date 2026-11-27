@@ -239,6 +239,26 @@ describe("RenderingTab compatibility group", () => {
     expect(select.value).toBe("auto");
   });
 
+  it("disables the select and says the guard does not apply off Linux", async () => {
+    mockedInvoke.mockImplementation(async (command: string) =>
+      command === "compat_status" ? { ...REPORT, webkit_version: "0.0.0" } : undefined,
+    );
+    const select = await renderCompat({ cameras: CAMERAS });
+
+    expect(select.disabled).toBe(true);
+    expect(document.body.textContent).toContain("Not applicable on this platform");
+  });
+
+  it("keeps the select usable and the note absent on WebKitGTK", async () => {
+    mockedInvoke.mockImplementation(async (command: string) =>
+      command === "compat_status" ? { ...REPORT, webkit_version: "2.52.6" } : undefined,
+    );
+    const select = await renderCompat({ cameras: CAMERAS });
+
+    expect(select.disabled).toBe(false);
+    expect(document.body.textContent).not.toContain("Not applicable on this platform");
+  });
+
   it("says so when no report is available yet", async () => {
     mockedInvoke.mockRejectedValue("ipc unavailable");
     render({ cameras: CAMERAS });
