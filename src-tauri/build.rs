@@ -87,5 +87,19 @@ fn main() {
         .unwrap_or_default();
     println!("cargo:rustc-env=APP_DEPS_OPT_LEVEL={deps}");
 
+    // tauri-build embeds its Common-Controls v6 manifest into binaries only, so
+    // a test binary that links tauri imports `TaskDialogIndirect` from the
+    // System32 comctl32 5.82 and dies at load with STATUS_ENTRYPOINT_NOT_FOUND
+    // (tauri#13419). Ask the linker for the same dependency here, which covers
+    // every target including the lib unit-test binary. Drop this once
+    // tauri-build links the manifest into all targets (tauri#16320).
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!(
+            "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+        );
+    }
+
     tauri_build::build()
 }

@@ -527,7 +527,7 @@ fn revolved(
     // triangles inherit from the canonical build: swap two corners to keep
     // them counter-clockwise seen from outside.
     if !matches!(axis, Axis::Z) {
-        for triangle in indices.chunks_exact_mut(3) {
+        for triangle in indices.as_chunks_mut::<3>().0 {
             triangle.swap(1, 2);
         }
     }
@@ -1674,7 +1674,7 @@ fn generated_normals(
     orig_copies: &[Vec<u32>],
 ) -> Vec<[f32; 3]> {
     let mut accumulators = vec![[0.0f32; 3]; positions.len()];
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         let [a, b, c] = [
             triangle[0] as usize,
             triangle[1] as usize,
