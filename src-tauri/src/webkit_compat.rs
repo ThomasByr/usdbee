@@ -2,7 +2,9 @@
 // web process starts. The decision is pure so it can be tested without a GPU,
 // a display, or a WebKit process.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +23,7 @@ pub struct EnvFacts {
     pub debian_family: bool,
     pub distro_label: Option<String>,
     pub x11: bool,
+    pub nvidia_present: bool,
     pub nvidia_version: Option<String>,
     pub webkit_major: u32,
     pub webkit_minor: u32,
@@ -59,6 +62,10 @@ const PREFS_FILE: &str = "webkit_compat.json";
 // the web process at spawn time, so a later change cannot reach it.
 static REPORT: OnceLock<CompatReport> = OnceLock::new();
 
+// True while the variable holds a value this process set. A value inherited
+// from the user's shell is theirs, so `apply(false)` must not remove it.
+static APPLIED: AtomicBool = AtomicBool::new(false);
+
 // The first unmet condition is the one the UI shows, so the order is stable.
 fn first_unmet(facts: &EnvFacts) -> Option<String> {
     if !facts.debian_family {
@@ -67,7 +74,7 @@ fn first_unmet(facts: &EnvFacts) -> Option<String> {
     if !facts.x11 {
         return Some("Wayland session".to_string());
     }
-    if facts.nvidia_version.is_none() {
+    if !facts.nvidia_present {
         return Some("no proprietary NVIDIA driver".to_string());
     }
     if (facts.webkit_major, facts.webkit_minor) != AFFECTED_WEBKIT {
@@ -84,11 +91,15 @@ fn auto_off_reason(facts: &EnvFacts) -> String {
         Some(label) => format!(" ({label})"),
         None => String::new(),
     };
+    // The version token only decorates the reason; the gate itself needs the
+    // driver node to be readable, nothing more.
+    let nvidia = match &facts.nvidia_version {
+        Some(version) => format!("NVIDIA {version}"),
+        None => "NVIDIA".to_string(),
+    };
     format!(
-        "Hardware compositing is off: WebKitGTK {}.{} on NVIDIA {}{distro} leaks GPU fences while scrolling.",
-        facts.webkit_major,
-        facts.webkit_minor,
-        facts.nvidia_version.as_deref().unwrap_or("unknown"),
+        "Hardware compositing is off: WebKitGTK {}.{} on {nvidia}{distro} leaks GPU fences while scrolling.",
+        facts.webkit_major, facts.webkit_minor,
     )
 }
 
@@ -144,6 +155,15 @@ pub fn write_prefs(path: &Path, prefs: &CompatPrefs) -> Result<(), String> {
     std::fs::write(path, json).map_err(|e| format!("Failed to write {}: {e}", path.display()))
 }
 
+// The gate is "the driver node is readable". An unexpected first line leaves
+// the version unknown but must not stop the fix from applying.
+fn nvidia_driver(read: Option<&str>) -> (bool, Option<String>) {
+    match read {
+        Some(raw) => (true, raw.lines().next().and_then(nvidia_version_from)),
+        None => (false, None),
+    }
+}
+
 fn nvidia_version_from(line: &str) -> Option<String> {
     line.split_whitespace()
         .find(|token| token.starts_with(|c: char| c.is_ascii_digit()) && token.contains('.'))
@@ -153,7 +173,7 @@ fn nvidia_version_from(line: &str) -> Option<String> {
 fn pretty_name_from(os_release: &str) -> Option<String> {
     for line in os_release.lines() {
         if let Some(value) = line.strip_prefix("PRETTY_NAME=") {
-            let value = value.trim().trim_matches('"');
+            let value = value.trim().trim_matches(['"', '\'']);
             if !value.is_empty() {
                 return Some(value.to_string());
             }
@@ -162,15 +182,42 @@ fn pretty_name_from(os_release: &str) -> Option<String> {
     None
 }
 
-fn x11_session(session_type: Option<&str>, wayland_display: Option<&str>) -> bool {
+fn x11_session(session_type: Option<&str>, wayland_display: Option<&OsStr>) -> bool {
     let not_wayland = !session_type
         .map(|value| value.trim().eq_ignore_ascii_case("wayland"))
         .unwrap_or(false);
-    let no_wayland_display = wayland_display.map(str::is_empty).unwrap_or(true);
+    // Any value, not just a UTF-8 one, means the session is Wayland.
+    let no_wayland_display = wayland_display.map(OsStr::is_empty).unwrap_or(true);
     not_wayland && no_wayland_display
 }
 
+// Only Linux links webkit2gtk. Elsewhere the reported 0.0.0 cannot match
+// AFFECTED_WEBKIT, so the gate stays inert.
+#[cfg(target_os = "linux")]
+fn webkit_version() -> (u32, u32, u32) {
+    // The getters only read a constant built into the library, so no GTK or
+    // WebKit initialisation is needed before the app starts.
+    unsafe {
+        (
+            webkit2gtk::ffi::webkit_get_major_version(),
+            webkit2gtk::ffi::webkit_get_minor_version(),
+            webkit2gtk::ffi::webkit_get_micro_version(),
+        )
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn webkit_version() -> (u32, u32, u32) {
+    (0, 0, 0)
+}
+
 pub fn probe() -> EnvFacts {
+    let (nvidia_present, nvidia_version) = nvidia_driver(
+        std::fs::read_to_string("/proc/driver/nvidia/version")
+            .ok()
+            .as_deref(),
+    );
+    let (webkit_major, webkit_minor, webkit_micro) = webkit_version();
     EnvFacts {
         debian_family: Path::new("/etc/debian_version").exists(),
         distro_label: std::fs::read_to_string("/etc/os-release")
@@ -178,23 +225,21 @@ pub fn probe() -> EnvFacts {
             .and_then(|raw| pretty_name_from(&raw)),
         x11: x11_session(
             std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
-            std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+            std::env::var_os("WAYLAND_DISPLAY").as_deref(),
         ),
-        nvidia_version: std::fs::read_to_string("/proc/driver/nvidia/version")
-            .ok()
-            .and_then(|raw| raw.lines().next().and_then(nvidia_version_from)),
-        // Version getters only read a constant built into the library, so no
-        // GTK or WebKit initialisation is needed before the app starts.
-        webkit_major: unsafe { webkit2gtk::ffi::webkit_get_major_version() },
-        webkit_minor: unsafe { webkit2gtk::ffi::webkit_get_minor_version() },
-        webkit_micro: unsafe { webkit2gtk::ffi::webkit_get_micro_version() },
+        nvidia_present,
+        nvidia_version,
+        webkit_major,
+        webkit_minor,
+        webkit_micro,
     }
 }
 
 pub fn apply(disable: bool) {
     if disable {
         std::env::set_var(ENV_VAR, "1");
-    } else {
+        APPLIED.store(true, Ordering::SeqCst);
+    } else if APPLIED.swap(false, Ordering::SeqCst) {
         std::env::remove_var(ENV_VAR);
     }
 }
@@ -262,12 +307,50 @@ pub fn set_compat_pref(mode: CompatMode) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    // The probe, the applied variable and `set_compat_pref` all read or write
-    // process-wide state, so every test touching them takes this lock.
+    // Every test that reads or writes a process-wide variable takes this lock.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    // Holds the lock for the test's lifetime and restores every variable it
+    // touched on drop, so a panicking test cannot leak state.
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            Self {
+                saved: Vec::new(),
+                _lock: ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()),
+            }
+        }
+
+        fn save(&mut self, key: &'static str) {
+            if !self.saved.iter().any(|(saved, _)| *saved == key) {
+                self.saved.push((key, std::env::var_os(key)));
+            }
+        }
+
+        fn set(&mut self, key: &'static str, value: &str) {
+            self.save(key);
+            std::env::set_var(key, value);
+        }
+
+        fn unset(&mut self, key: &'static str) {
+            self.save(key);
+            std::env::remove_var(key);
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 
     fn facts_ubuntu_x11_nvidia_252() -> EnvFacts {
@@ -275,6 +358,7 @@ mod tests {
             debian_family: true,
             distro_label: Some("Ubuntu 24.04".into()),
             x11: true,
+            nvidia_present: true,
             nvidia_version: Some("580.178.04".into()),
             webkit_major: 2,
             webkit_minor: 52,
@@ -287,6 +371,7 @@ mod tests {
             debian_family: true,
             distro_label: Some("Fedora 41".into()),
             x11: false,
+            nvidia_present: false,
             nvidia_version: None,
             webkit_major: 2,
             webkit_minor: 54,
@@ -314,10 +399,49 @@ mod tests {
     #[test]
     fn auto_keeps_without_nvidia() {
         let mut facts = facts_ubuntu_x11_nvidia_252();
+        facts.nvidia_present = false;
         facts.nvidia_version = None;
         let (disable, reason) = decide(&facts, CompatMode::Auto);
         assert!(!disable);
         assert!(reason.contains("NVIDIA"), "reason: {reason}");
+    }
+
+    #[test]
+    fn auto_disables_on_a_readable_driver_without_a_version() {
+        let mut facts = facts_ubuntu_x11_nvidia_252();
+        facts.nvidia_version = None;
+        let (disable, reason) = decide(&facts, CompatMode::Auto);
+        assert!(disable, "reason: {reason}");
+        assert!(reason.contains("NVIDIA"), "reason: {reason}");
+        assert!(reason.contains("on NVIDIA ("), "reason: {reason}");
+        assert!(!reason.contains("unknown"), "reason: {reason}");
+    }
+
+    #[test]
+    fn driver_gate_follows_the_read_not_the_token() {
+        assert_eq!(nvidia_driver(None), (false, None));
+        assert_eq!(
+            nvidia_driver(Some("NVRM version: something unexpected\n")),
+            (true, None)
+        );
+    }
+
+    #[test]
+    fn gate_cannot_fire_for_a_zero_webkit_version() {
+        // What a non-Linux build reports: 0.0.0 never matches 2.52.
+        let mut facts = facts_ubuntu_x11_nvidia_252();
+        facts.webkit_major = 0;
+        facts.webkit_minor = 0;
+        facts.webkit_micro = 0;
+        let (disable, reason) = decide(&facts, CompatMode::Auto);
+        assert!(!disable, "reason: {reason}");
+        assert!(reason.contains("WebKitGTK 0.0"), "reason: {reason}");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn non_linux_reports_no_webkit_version() {
+        assert_eq!(webkit_version(), (0, 0, 0));
     }
 
     #[test]
@@ -512,29 +636,42 @@ mod tests {
             pretty_name_from(os_release).as_deref(),
             Some("Ubuntu 24.04.3 LTS")
         );
+        assert_eq!(
+            pretty_name_from("PRETTY_NAME='Debian GNU/Linux 13 (trixie)'\n").as_deref(),
+            Some("Debian GNU/Linux 13 (trixie)")
+        );
         assert!(pretty_name_from("NAME=\"Ubuntu\"\n").is_none());
     }
 
     #[test]
+    fn wayland_display_only_counts_when_non_empty() {
+        assert!(x11_session(Some("x11"), Some(OsStr::new(""))));
+        assert!(!x11_session(Some("x11"), Some(OsStr::new("wayland-0"))));
+        assert!(!x11_session(Some("wayland"), None));
+        assert!(x11_session(None, None));
+    }
+
+    #[test]
     fn init_applies_the_variable_when_the_gate_fires() {
-        let _guard = env_guard();
+        let mut env = EnvGuard::new();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var(ENV_VAR, "0");
+        APPLIED.store(false, Ordering::SeqCst);
+        env.unset(ENV_VAR);
 
         let report = init_with(&facts_ubuntu_x11_nvidia_252(), &dir.path().join(PREFS_FILE));
 
         assert!(report.applied);
         assert_eq!(std::env::var(ENV_VAR).as_deref(), Ok("1"));
-        std::env::remove_var(ENV_VAR);
     }
 
     #[test]
-    fn init_leaves_the_variable_unset_when_forced_on() {
-        let _guard = env_guard();
+    fn init_removes_the_variable_it_set_itself() {
+        let mut env = EnvGuard::new();
         let dir = tempfile::tempdir().unwrap();
+        env.unset(ENV_VAR);
+        apply(true);
         let path = dir.path().join(PREFS_FILE);
         std::fs::write(&path, r#"{"mode":"on"}"#).unwrap();
-        std::env::set_var(ENV_VAR, "1");
 
         let report = init_with(&facts_ubuntu_x11_nvidia_252(), &path);
 
@@ -544,14 +681,25 @@ mod tests {
     }
 
     #[test]
+    fn apply_keeps_a_variable_the_user_set() {
+        let mut env = EnvGuard::new();
+        APPLIED.store(false, Ordering::SeqCst);
+        env.set(ENV_VAR, "1");
+
+        apply(false);
+
+        assert_eq!(std::env::var(ENV_VAR).as_deref(), Ok("1"));
+    }
+
+    #[test]
     fn init_writes_through_set_compat_pref() {
-        let _guard = env_guard();
+        let mut env = EnvGuard::new();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        env.set("XDG_CONFIG_HOME", dir.path().to_str().unwrap());
 
         let written = set_compat_pref(CompatMode::Off);
 
-        std::env::remove_var("XDG_CONFIG_HOME");
+        drop(env);
         written.unwrap();
         let raw = std::fs::read_to_string(dir.path().join(CONFIG_DIR).join(PREFS_FILE)).unwrap();
         assert!(raw.contains("\"mode\": \"off\""), "raw: {raw}");
