@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use openusd::ar::DefaultResolver;
 use openusd::gf;
 use openusd::sdf::{self, ValueTypeName};
 use openusd::usd::{
@@ -28,7 +27,8 @@ use crate::cameras::{stage_cameras, CameraInfo};
 use crate::fetcher::get_usdbee_cache_dir;
 use crate::lights::{stage_lights, LightInfo};
 use crate::materials::{material_info, MaterialInfo};
-use crate::parser::{dependency_scan_from_stage, DependencyScan};
+use crate::parser::{dependency_scan_from_stage, display_path, DependencyScan};
+use crate::resolver::CacheResolver;
 use crate::skinning::{skel_joint_transforms_vary, SkelAnimMemo};
 use crate::tessellation::{pack_geometry, tessellate_prim};
 use crate::values::{
@@ -1350,6 +1350,7 @@ fn spawn_stage_owner_for(
                     // no caches clear and usd-stage-changed is NOT emitted.
                     let response = match current_stage {
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
+                            let requests = canonical_layer_requests(stage, requests);
                             save_requested_layers(stage, stage_is_usdz, &requests)?;
                             for request in &requests {
                                 dirty_ledger.record_saved(&request.identifier);
@@ -1631,7 +1632,7 @@ fn spawn_stage_owner_for(
                         Some(ref stage) => catch_unwind(AssertUnwindSafe(|| {
                             Ok(StageSummary {
                                 stage_id,
-                                root_identifier: stage.root_layer().identifier().to_owned(),
+                                root_identifier: display_path(stage.root_layer().identifier()),
                                 dirty_count: dirty_ledger.dirty().len() as u32,
                             })
                         }))
@@ -1785,9 +1786,7 @@ pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
     let path_str = path
         .to_str()
         .ok_or_else(|| format!("USD stage path is not valid UTF-8: {}", path.display()))?;
-    let cache_dir = get_usdbee_cache_dir();
-    let resolver =
-        DefaultResolver::with_search_paths([cache_dir.clone(), cache_dir.join("extracted")]);
+    let resolver = CacheResolver::new(get_usdbee_cache_dir());
     let mut builder = Stage::builder()
         // Registers every enabled openusd-schemas family so `is_a`/
         // `from_prim` detection and schema-declared fallbacks resolve
@@ -1834,7 +1833,7 @@ pub fn open_stage(path: &Path) -> Result<(Stage, StageInfo), String> {
     );
     let info = StageInfo {
         stage_id: 0,
-        root_layer: stage.root_layer().identifier().to_owned(),
+        root_layer: display_path(stage.root_layer().identifier()),
         time_codes_per_second: stage.time_codes_per_second(),
         start_time_code: stage.start_time_code(),
         end_time_code: stage.end_time_code(),
@@ -2596,11 +2595,40 @@ fn session_identifier(stage: &Stage) -> Option<String> {
         .map(|layer| layer.identifier().to_string())
 }
 
+/// The stage's own spelling of a layer identifier. Registry ids carry the
+/// verbatim prefix `canonicalize` adds on Windows and the paths a command
+/// derives do not, so the two are compared as paths with that prefix ignored
+/// (separator spellings fold, name bytes do not).
+fn canonical_layer_id(stage: &Stage, identifier: &str) -> Option<String> {
+    let wanted = display_path(identifier);
+    stage.layer_identifiers().into_iter().find(|id| {
+        let id = display_path(id);
+        Path::new(&id) == Path::new(&wanted)
+    })
+}
+
+/// The same save requests, each identifier in the stage's own spelling, so
+/// both the write and the dirty ledger see one id per layer.
+fn canonical_layer_requests(
+    stage: &Stage,
+    requests: Vec<LayerSaveRequest>,
+) -> Vec<LayerSaveRequest> {
+    requests
+        .into_iter()
+        .map(|mut request| {
+            if let Some(canonical) = canonical_layer_id(stage, &request.identifier) {
+                request.identifier = canonical;
+            }
+            request
+        })
+        .collect()
+}
+
 fn edit_target_info(stage: &Stage, is_usdz_stage: bool) -> Result<EditTargetInfo, String> {
     let layer_identifier = stage.edit_target().layer_identifier().to_string();
     Ok(EditTargetInfo {
         is_session: session_identifier(stage).as_deref() == Some(layer_identifier.as_str()),
-        layer_identifier,
+        layer_identifier: display_path(&layer_identifier),
         is_usdz_stage,
     })
 }
@@ -2611,7 +2639,9 @@ fn edit_target_info(stage: &Stage, is_usdz_stage: bool) -> Result<EditTargetInfo
 /// layers are refused here, not at some later authoring call).
 fn switch_edit_target(stage: &Stage, identifier: Option<&str>) -> Result<(), String> {
     let target = match identifier {
-        Some(id) => EditTarget::for_layer(id.to_string()),
+        Some(id) => {
+            EditTarget::for_layer(canonical_layer_id(stage, id).unwrap_or_else(|| id.to_string()))
+        }
         None => stage
             .edit_target_session()
             .ok_or_else(|| "no session layer available as an edit target".to_string())?,
@@ -2645,8 +2675,8 @@ fn dirty_layers_info(stage: &Stage, dirty: &[String]) -> Result<Vec<LayerInfo>, 
                 eprintln!("usdbee: dirty layer {} is no longer in the stage", id);
             }
             layer.map(|layer| LayerInfo {
-                identifier: id.clone(),
-                original_path: layer.resolved_path().map(str::to_string),
+                identifier: display_path(id),
+                original_path: layer.resolved_path().map(display_path),
                 is_session: Some(id.as_str()) == session.as_deref(),
             })
         })
@@ -2669,8 +2699,8 @@ fn stage_layers_info(stage: &Stage) -> Result<Vec<LayerInfo>, String> {
             is_session: Some(identifier.as_str()) == session.as_deref(),
             original_path: stage
                 .layer(&identifier)
-                .and_then(|layer| layer.resolved_path().map(str::to_string)),
-            identifier,
+                .and_then(|layer| layer.resolved_path().map(display_path)),
+            identifier: display_path(&identifier),
         })
         .collect())
 }
@@ -2680,7 +2710,7 @@ fn stage_layers_info(stage: &Stage) -> Result<Vec<LayerInfo>, String> {
 /// file.
 fn export_layer_text_impl(stage: &Stage, identifier: &str) -> Result<String, String> {
     let layer = stage
-        .layer(identifier)
+        .layer(&canonical_layer_id(stage, identifier).unwrap_or_else(|| identifier.to_string()))
         .ok_or_else(|| format!("layer not found in the stage: {}", identifier))?;
     layer
         .export_to_string()
@@ -2698,7 +2728,7 @@ fn export_layer_text_impl(stage: &Stage, identifier: &str) -> Result<String, Str
 /// dirty bookkeeping is what marks the layer unsaved.
 fn import_layer_text_impl(stage: &Stage, identifier: &str, text: &str) -> Result<String, String> {
     let canonical = stage
-        .layer(identifier)
+        .layer(&canonical_layer_id(stage, identifier).unwrap_or_else(|| identifier.to_string()))
         .map(|layer| layer.identifier().to_string())
         .ok_or_else(|| format!("layer not found in the stage: {}", identifier))?;
     let parsed = sdf::Layer::from_bytes("usdbee-import", text.as_bytes().to_vec())
@@ -2970,9 +3000,7 @@ fn export_stage_as_usdz(
             .export(&package_root_path)
             .map_err(|e| format!("failed to prepare the stage for '{}': {}", path, e))?;
 
-        let cache_dir = get_usdbee_cache_dir();
-        let resolver =
-            DefaultResolver::with_search_paths([cache_dir.clone(), cache_dir.join("extracted")]);
+        let resolver = CacheResolver::new(get_usdbee_cache_dir());
         let package_stage = Stage::builder()
             .schema_registry(openusd_schemas::schema_registry())
             .resolver(resolver)

@@ -832,7 +832,10 @@ mod tests {
 
         let root = extract_archive(&mut archive, tmp.path()).unwrap();
 
-        assert_eq!(root, tmp.path().join("assets/model.usda").to_string_lossy());
+        assert_eq!(
+            Path::new(&root),
+            tmp.path().join("assets").join("model.usda")
+        );
         assert!(tmp.path().join("assets/model.usda").exists());
         assert!(tmp.path().join("assets/texture.png").exists());
     }

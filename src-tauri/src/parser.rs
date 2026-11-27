@@ -51,6 +51,7 @@ pub fn scan_dependencies(root: &Path) -> Result<DependencyScan, String> {
 /// the stage's root layer identifier (the resolver's canonical path), whose
 /// directory the entry keys are relative to.
 pub fn dependency_scan_from_stage(stage: &Stage, root: &Path) -> Result<DependencyScan, String> {
+    let root = without_verbatim(root);
     let root_str = clean(&root.to_string_lossy());
     let deps = match compute_all_dependencies(stage, &root_str) {
         Ok(deps) => deps,
@@ -60,7 +61,7 @@ pub fn dependency_scan_from_stage(stage: &Stage, root: &Path) -> Result<Dependen
         Err(
             openusd::Error::UnsupportedFormat(_)
             | openusd::Error::Dependency(openusd::usd_utils::DependencyError::Unsupported { .. }),
-        ) => return Ok(layer_stack_scan(stage, root)),
+        ) => return Ok(layer_stack_scan(stage, &root)),
         Err(e) => {
             return Err(format!(
                 "Failed to compute dependencies of {}: {}",
@@ -137,11 +138,12 @@ fn layer_stack_scan(stage: &Stage, root: &Path) -> DependencyScan {
 }
 
 fn resolved_entry(identifier: &str, root_dir: &Path) -> DependencyEntry {
-    let size = fs::metadata(identifier).map(|m| m.len()).ok();
+    let identifier = clean(identifier);
+    let size = fs::metadata(&identifier).map(|m| m.len()).ok();
     DependencyEntry {
-        key: relative_key(identifier, root_dir),
+        key: relative_key(&identifier, root_dir),
         node: UsdDependencyNode {
-            path: clean(identifier),
+            path: identifier,
             resolved: true,
             size_bytes: size,
             fallback_color: None,
@@ -193,7 +195,7 @@ pub fn resolve_remote_dependencies(
 /// The `http(s)`/omniverse URL an unresolved identifier names, if any.
 /// openusd's resolver reads `http://a/b` as the relative path `http:/a/b`,
 /// so both spellings restore to the URL as authored.
-fn remote_url(identifier: &str) -> Option<String> {
+pub(crate) fn remote_url(identifier: &str) -> Option<String> {
     for (single, double) in [
         ("http:/", "http://"),
         ("https:/", "https://"),
@@ -218,7 +220,10 @@ fn is_remote(identifier: &str) -> bool {
 /// `identifier` spelled relative to the root layer's directory, the key the
 /// frontend's dependency map and URLModifier expect.
 fn relative_key(identifier: &str, root_dir: &Path) -> String {
-    let path = Path::new(identifier);
+    // Cleaned before the diff: an identifier carries the Windows verbatim
+    // prefix while the root does not, and `pathdiff` needs one spelling.
+    let identifier = clean(identifier);
+    let path = Path::new(&identifier);
     let relative = if path.is_absolute() {
         pathdiff::diff_paths(path, root_dir).unwrap_or_else(|| path.to_path_buf())
     } else {
@@ -232,6 +237,19 @@ pub(crate) fn clean(path: &str) -> String {
     path.replace("\\\\?\\", "")
         .replace("//?/", "")
         .replace('\\', "/")
+}
+
+/// `path` without the verbatim prefix `canonicalize` adds on Windows, which no
+/// other path in a scan carries: `pathdiff` needs one spelling for both sides.
+fn without_verbatim(path: &Path) -> PathBuf {
+    PathBuf::from(display_path(&path.to_string_lossy()))
+}
+
+/// `path` as the UI spells it: openusd layer identifiers and resolved paths
+/// carry the verbatim prefix `canonicalize` adds on Windows, and the frontend
+/// compares them with the path it asked for.
+pub(crate) fn display_path(path: &str) -> String {
+    path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
 }
 
 #[cfg(test)]

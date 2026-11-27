@@ -32,7 +32,8 @@ fn open_fixture_manifest(name: &str, time: Option<f64>) -> Vec<RenderNode> {
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
+        .join("tests")
+        .join("fixtures")
         .join(name)
 }
 

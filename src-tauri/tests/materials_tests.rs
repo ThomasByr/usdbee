@@ -10,7 +10,8 @@ use usdbee_lib::stage::{open_stage, request_material_batch, request_material_dat
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
+        .join("tests")
+        .join("fixtures")
         .join(name)
 }
 
@@ -100,7 +101,7 @@ fn textured_surface_resolves_file_paths_and_primvar() {
         );
     }
 
-    let checker = std::fs::canonicalize(fixture("checker.png")).expect("fixture texture");
+    let checker = resolved_fixture("checker.png");
     let albedo = surface
         .textures
         .iter()
@@ -548,7 +549,7 @@ fn nodegraph_wrapped_texture_feeds_roughness() {
         .iter()
         .find(|texture| texture.input == "roughness")
         .expect("the texture inside the NodeGraph feeds roughness");
-    let checker = std::fs::canonicalize(fixture("checker.png")).expect("fixture texture");
+    let checker = resolved_fixture("checker.png");
     assert_eq!(Path::new(&roughness.file_path), checker);
     assert_eq!(
         roughness.st_primvar, "uv",
@@ -669,7 +670,7 @@ fn wide_channels_serialize() {
         "occlusion is textured, so it serializes no constant"
     );
 
-    let checker = std::fs::canonicalize(fixture("checker.png")).expect("fixture texture");
+    let checker = resolved_fixture("checker.png");
     let occlusion = surface
         .textures
         .iter()
@@ -869,8 +870,16 @@ fn only_texture(state: &common::TestOwner, path: &str) -> TextureInput {
     textures.remove(0)
 }
 
-fn tile_path(name: &str) -> PathBuf {
-    std::fs::canonicalize(fixture(name)).expect("fixture tile")
+fn resolved_fixture(name: &str) -> PathBuf {
+    let canonical = std::fs::canonicalize(fixture(name)).expect("fixture file");
+    // Windows `canonicalize` spells the path with a verbatim prefix the
+    // serialized paths never carry.
+    PathBuf::from(
+        canonical
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .to_string(),
+    )
 }
 
 #[test]
@@ -895,8 +904,8 @@ fn udim_token_pattern_serializes_every_sibling_tile() {
     assert_eq!(
         seen,
         vec![
-            (1001, tile_path("tex.1001.png").as_path()),
-            (1002, tile_path("tex.1002.png").as_path())
+            (1001, resolved_fixture("tex.1001.png").as_path()),
+            (1002, resolved_fixture("tex.1002.png").as_path())
         ],
         "both tiles, sorted, resolved to the sibling files"
     );

@@ -17,6 +17,7 @@ use openusd_schemas::shade::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::parser::display_path;
 use crate::values::{serialize_payload, ValuePayload};
 
 /// One serialized material: the material prim's name and its
@@ -447,7 +448,7 @@ fn texture_input(input: &Input, texture: &UVTexture) -> Result<Option<TextureInp
 fn texture_file(input: &Input) -> Result<Option<String>, String> {
     Ok(match authored(input)? {
         Some(Value::AssetPath(asset)) => Some(match asset.resolved_path() {
-            Some(resolved) => resolved.to_string(),
+            Some(resolved) => display_path(resolved),
             None => asset.authored_path,
         }),
         Some(Value::String(path)) => Some(path),

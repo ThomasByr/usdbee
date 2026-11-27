@@ -12,6 +12,7 @@
 //! `shaping` (present only where ShapingAPI is applied) and `enabled` (the
 //! prim's computed visibility) carry no fallback.
 
+use crate::parser::display_path;
 use crate::values;
 use openusd::gf;
 use openusd::sdf::{self, AssetPath};
@@ -261,7 +262,7 @@ fn texture_file(value: Option<AssetPath>) -> Option<String> {
         return None;
     }
     Some(match asset.resolved_path() {
-        Some(resolved) => resolved.to_string(),
+        Some(resolved) => display_path(resolved),
         None => asset.authored_path.clone(),
     })
 }

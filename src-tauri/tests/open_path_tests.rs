@@ -12,7 +12,8 @@ use usdbee_lib::{open_usd_file_path, AppState, LoadGate, OPEN_IN_FLIGHT_MESSAGE}
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
+        .join("tests")
+        .join("fixtures")
         .join(name)
 }
 

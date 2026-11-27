@@ -11,6 +11,7 @@ mod models;
 mod omniverse;
 pub use omniverse::AppState;
 pub mod parser;
+mod resolver;
 pub mod skinning;
 pub mod stage;
 pub mod tessellation;
