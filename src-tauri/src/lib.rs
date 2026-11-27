@@ -16,6 +16,7 @@ pub mod stage;
 pub mod tessellation;
 mod updater_prefs;
 pub mod values;
+pub mod webkit_compat;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
