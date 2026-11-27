@@ -59,8 +59,10 @@
     COMPAT_MODES.find((entry) => entry.value === compatState.storedMode)?.label ?? "",
   );
 
+  // Non-Linux builds report WebKitGTK 0.0.0 and cannot be X11: no context line
+  // is better than a wrong one.
   let compatContext = $derived(
-    compatState.report === null
+    compatState.report === null || compatState.report.webkit_version === "0.0.0"
       ? ""
       : [
           `WebKitGTK ${compatState.report.webkit_version}`,

@@ -270,7 +270,13 @@ pub fn init() -> CompatReport {
         std::env::var("HOME").ok().as_deref(),
     ) {
         Some(dir) => init_with(&facts, &dir.join(PREFS_FILE)),
-        None => store(report_from(&facts, CompatMode::Auto)),
+        // No config dir to read a preference from: still apply the auto decision,
+        // or the report would claim compositing is off while the leak persists.
+        None => {
+            let report = report_from(&facts, CompatMode::Auto);
+            apply(report.applied);
+            store(report)
+        }
     };
     // The reason already reads as a sentence ("Hardware compositing is off: …"),
     // so the log prints it rather than wrapping it in a second prefix.
