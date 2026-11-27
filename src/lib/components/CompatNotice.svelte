@@ -1,7 +1,18 @@
 <script lang="ts">
-  import { compatNoticeVisible, compatState, dismissCompatNotice } from "$lib/state/compatState.svelte";
+  import {
+    compatNoticeVisible,
+    compatState,
+    dismissCompatNotice,
+    setBannerEnabled,
+  } from "$lib/state/compatState.svelte";
 
   let { onOpenSettings }: { onOpenSettings?: () => void } = $props();
+
+  // The persistent half of the dismissal: the bar stays away across restarts.
+  function hideForGood() {
+    dismissCompatNotice();
+    setBannerEnabled(false);
+  }
 
   // The backend reason already starts with "Hardware compositing is off:".
   const reasonText = $derived(compatState.report?.reason || "Hardware compositing is off.");
@@ -14,9 +25,10 @@
   <div class="compat-notice">
     <div class="compat-text" role="status" aria-live="polite">
       <p class="compat-reason">{reasonText}</p>
-      <p class="compat-hint">Change this in Settings. The new mode applies after a restart.</p>
+      <p class="compat-hint">Change this in Settings. Applies after a restart.</p>
     </div>
     <button class="compat-btn" onclick={() => onOpenSettings?.()}>Settings</button>
+    <button class="compat-btn" onclick={hideForGood}>Do not show again</button>
     <button class="compat-btn dismiss" aria-label="Dismiss" title="Dismiss" onclick={dismissCompatNotice}>
       &#215;
     </button>
@@ -35,7 +47,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    max-width: min(640px, calc(100% - 24px));
+    max-width: min(760px, calc(100% - 24px));
     padding: 8px 12px;
     border-radius: 6px;
     border: 1px solid var(--border);
@@ -61,6 +73,7 @@
 
   .compat-btn {
     flex: none;
+    white-space: nowrap;
     padding: 3px 10px;
     border-radius: 4px;
     border: 1px solid var(--border);

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
 import CompatNotice from "./CompatNotice.svelte";
-import { compatState, type CompatReport } from "$lib/state/compatState.svelte";
+import { compatState, setBannerEnabled, type CompatReport } from "$lib/state/compatState.svelte";
 
 const report: CompatReport = {
   mode: "auto",
@@ -30,6 +30,7 @@ function render(props: { onOpenSettings?: () => void } = {}) {
 beforeEach(() => {
   compatState.report = null;
   compatState.dismissed = false;
+  setBannerEnabled(true);
   host = document.createElement("div");
   document.body.appendChild(host);
 });
@@ -103,6 +104,44 @@ describe("CompatNotice", () => {
     flushSync();
 
     expect(compatState.dismissed).toBe(true);
+    expect(host.querySelector(".compat-notice")).toBeNull();
+  });
+
+  it("hides for good from the do-not-show-again button", () => {
+    compatState.report = report;
+    render();
+
+    const buttons = [...host.querySelectorAll<HTMLButtonElement>(".compat-notice button")];
+    const hide = buttons.find((b) => b.textContent!.trim() === "Do not show again")!;
+    expect(hide).toBeDefined();
+    expect(hide.getAttribute("aria-label")).toBeNull();
+    // Between the settings button and the close button.
+    expect(buttons.indexOf(hide)).toBe(1);
+
+    hide.click();
+    flushSync();
+
+    expect(compatState.bannerEnabled).toBe(false);
+    expect(host.querySelector(".compat-notice")).toBeNull();
+  });
+
+  it("keeps the preference from the close button, which only lasts the session", () => {
+    compatState.report = report;
+    render();
+
+    host.querySelector<HTMLButtonElement>(".compat-notice button.dismiss")!.click();
+    flushSync();
+
+    expect(compatState.dismissed).toBe(true);
+    expect(compatState.bannerEnabled).toBe(true);
+    expect(host.querySelector(".compat-notice")).toBeNull();
+  });
+
+  it("renders nothing when the banner is turned off", () => {
+    compatState.report = report;
+    setBannerEnabled(false);
+    render();
+
     expect(host.querySelector(".compat-notice")).toBeNull();
   });
 

@@ -6,7 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 import { invoke } from "@tauri-apps/api/core";
 import type { CameraInfo } from "$lib/stage/types";
-import { compatState, type CompatReport } from "$lib/state/compatState.svelte";
+import { compatState, setBannerEnabled, type CompatReport } from "$lib/state/compatState.svelte";
 import RenderingTab from "./RenderingTab.svelte";
 
 const CAMERAS: CameraInfo[] = [
@@ -91,6 +91,7 @@ beforeEach(() => {
   compatState.storedMode = null;
   compatState.dismissed = false;
   compatState.pendingRestart = false;
+  setBannerEnabled(true);
 });
 
 afterEach(() => {
@@ -169,6 +170,18 @@ async function renderCompat(props: Record<string, unknown>) {
   await tick();
   await tick();
   return compatSelect();
+}
+
+// The banner preference sits under the compatibility select.
+function compatCheckbox(): HTMLInputElement {
+  const labels = [...document.querySelectorAll("label")];
+  const found = labels.find((label) => label.textContent?.includes("Show the compatibility warning"));
+  if (found === undefined) throw new Error("no banner checkbox rendered");
+  return found.querySelector("input")!;
+}
+
+function compatRestartChip(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(".compat-restart");
 }
 
 describe("RenderingTab compatibility group", () => {
@@ -269,5 +282,53 @@ describe("RenderingTab compatibility group", () => {
     // No report means no mode: the select has nothing to show.
     const select = document.querySelector("select[disabled]") as HTMLSelectElement;
     expect(select.value).toBe("");
+  });
+
+  it("offers the banner checkbox, checked while the preference is on", async () => {
+    await renderCompat({ cameras: CAMERAS });
+
+    const checkbox = compatCheckbox();
+    expect(checkbox.type).toBe("checkbox");
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(false);
+  });
+
+  it("hides the banner at once when the checkbox is cleared", async () => {
+    await renderCompat({ cameras: CAMERAS });
+
+    compatCheckbox().click();
+    await tick();
+
+    expect(compatState.bannerEnabled).toBe(false);
+    expect(compatCheckbox().checked).toBe(false);
+  });
+
+  it("shows the checkbox as cleared when the preference is off", async () => {
+    setBannerEnabled(false);
+    await renderCompat({ cameras: CAMERAS });
+
+    expect(compatCheckbox().checked).toBe(false);
+  });
+
+  it("disables the banner checkbox where the guard does not apply", async () => {
+    mockedInvoke.mockImplementation(async (command: string) =>
+      command === "compat_status" ? { ...REPORT, webkit_version: "0.0.0" } : undefined,
+    );
+    await renderCompat({ cameras: CAMERAS });
+
+    expect(compatCheckbox().disabled).toBe(true);
+  });
+
+  it("renders the restart hint as a warning chip only while pending", async () => {
+    await renderCompat({ cameras: CAMERAS });
+    expect(compatRestartChip()).toBeNull();
+    unmount(instance!);
+
+    compatState.pendingRestart = true;
+    await renderCompat({ cameras: CAMERAS });
+
+    const chip = compatRestartChip()!;
+    expect(chip.textContent!.trim()).toBe("Restart usdbee to apply: Auto (detect)");
+    expect(chip.tagName).toBe("P");
   });
 });

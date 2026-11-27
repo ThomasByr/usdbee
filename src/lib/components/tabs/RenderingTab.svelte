@@ -3,6 +3,7 @@
   import {
     compatState,
     loadCompatReport,
+    setBannerEnabled,
     setCompatMode,
     type CompatMode,
   } from "$lib/state/compatState.svelte";
@@ -97,6 +98,12 @@
     }
     // A failed pick leaves the viewer on its camera: put the select back.
     select.value = cameraSelection;
+  }
+
+  // The preference hides the banner for good, with no restart: the bar reads
+  // the same state.
+  function onBannerToggle(event: Event) {
+    setBannerEnabled((event.currentTarget as HTMLInputElement).checked);
   }
 </script>
 
@@ -294,6 +301,15 @@
         {/if}
       </select>
     </label>
+    <label class="compat-banner-toggle">
+      <input
+        type="checkbox"
+        checked={compatState.bannerEnabled}
+        disabled={compatState.report === null || !compatApplies}
+        onchange={onBannerToggle}
+      />
+      Show the compatibility warning
+    </label>
     {#if compatState.report !== null && !compatApplies}
       <p style="margin:0; font-size:11px; color:var(--text-muted);">
         Not applicable on this platform: this guard covers a WebKitGTK defect on Linux. Windows and macOS use
@@ -310,9 +326,27 @@
       <p role="alert" style="margin:0; font-size:11px; color:var(--danger);">{compatError}</p>
     {/if}
     {#if compatState.pendingRestart}
-      <p style="margin:0; font-size:11px; color:var(--text-muted);">
-        Restart usdbee to apply: {storedModeLabel}
-      </p>
+      <p class="compat-restart">Restart usdbee to apply: {storedModeLabel}</p>
     {/if}
   </div>
 </div>
+
+<style>
+  .compat-banner-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+  }
+
+  .compat-restart {
+    align-self: flex-start;
+    margin: 0;
+    padding: 4px 8px;
+    border: 1px solid var(--warning);
+    border-radius: 4px;
+    color: var(--warning);
+    font-size: 12px;
+    font-weight: 500;
+  }
+</style>
