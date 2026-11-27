@@ -44,6 +44,7 @@ describe("compatState", () => {
 
     expect(mockedInvoke).toHaveBeenCalledWith("compat_status");
     expect(compatState.report).toEqual(stored);
+    expect(compatState.storedMode).toBe("auto");
   });
 
   it("keeps the UI quiet when compat_status rejects", async () => {
@@ -100,6 +101,42 @@ describe("compatState", () => {
 
     expect(await mod.setCompatMode("on")).toBeNull();
     expect(compatState.pendingRestart).toBe(false);
+  });
+
+  it("a save moves the stored mode away from the running one", async () => {
+    mockedInvoke.mockResolvedValueOnce(report({ mode: "auto" }));
+    await mod.loadCompatReport();
+    expect(compatState.storedMode).toBe("auto");
+    mockedInvoke.mockResolvedValueOnce(undefined);
+
+    await mod.setCompatMode("off");
+
+    expect(compatState.storedMode).toBe("off");
+    expect(compatState.report?.mode).toBe("auto");
+  });
+
+  it("a rejected save leaves the stored mode alone", async () => {
+    mockedInvoke.mockResolvedValueOnce(report({ mode: "auto" }));
+    await mod.loadCompatReport();
+    mockedInvoke.mockRejectedValueOnce("disk full");
+
+    expect(await mod.setCompatMode("off")).toBe("disk full");
+
+    expect(compatState.storedMode).toBe("auto");
+  });
+
+  it("a reload after a save keeps the stored mode", async () => {
+    mockedInvoke.mockResolvedValueOnce(report({ mode: "auto" }));
+    await mod.loadCompatReport();
+    mockedInvoke.mockResolvedValueOnce(undefined);
+    await mod.setCompatMode("off");
+
+    mockedInvoke.mockResolvedValueOnce(report({ mode: "auto" }));
+    await mod.loadCompatReport();
+
+    // The remount must not replace the file's mode with the started one.
+    expect(compatState.storedMode).toBe("off");
+    expect(compatState.pendingRestart).toBe(true);
   });
 
   it("surfaces the backend error string and keeps no hint without an accepted save", async () => {

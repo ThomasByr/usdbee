@@ -34,6 +34,7 @@
   import { loadOrchestrator } from "$lib/state/loadOrchestrator.svelte";
   import { initTheme } from "$lib/state/themeState.svelte";
   import { loadPlaybackState } from "$lib/state/playbackState.svelte";
+  import { loadCompatReport } from "$lib/state/compatState.svelte";
   import { windowCloseConfirmNeeded } from "$lib/state/closeGuard";
   import type { StageSummary } from "$lib/stage/types";
   import { layerTextState } from "$lib/state/layerTextState.svelte";
@@ -383,6 +384,9 @@
     loadControlPreferences();
     loadGraphicsPreferences();
     loadPlaybackState();
+    // The startup compat decision drives the banner, so it cannot wait for the
+    // Settings tab to be opened.
+    void loadCompatReport();
     const stopThemeListener = initTheme();
     const savedWidth = localStorage.getItem("sidebarWidth");
     if (savedWidth) {

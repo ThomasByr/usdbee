@@ -46,8 +46,18 @@
   });
 
   let compatError = $state<string | null>(null);
-  // Empty while there is no report: the select then shows the neutral option.
-  let compatMode = $derived<CompatMode | "">(compatState.report?.mode ?? "");
+  // The select follows the file, not the running process: the stored mode is
+  // what the next launch applies. Empty while there is no mode to show.
+  let compatMode = $derived<CompatMode | "">(compatState.storedMode ?? "");
+  const COMPAT_MODES: { value: CompatMode; label: string }[] = [
+    { value: "auto", label: "Auto (detect)" },
+    { value: "on", label: "Force on" },
+    { value: "off", label: "Force off" },
+  ];
+  // One label list, so the restart hint can never disagree with the options.
+  let storedModeLabel = $derived(
+    COMPAT_MODES.find((entry) => entry.value === compatState.storedMode)?.label ?? "",
+  );
 
   let compatContext = $derived(
     compatState.report === null
@@ -65,7 +75,7 @@
     const select = event.currentTarget as HTMLSelectElement;
     compatError = null;
     const error = await setCompatMode(select.value as CompatMode);
-    // A rejected write stored nothing: put the running mode back.
+    // A rejected write stored nothing: put the stored mode back.
     if (error !== null) {
       compatError = error;
       select.value = compatMode;
@@ -272,23 +282,27 @@
         onchange={onCompatChange}
       >
         {#if compatState.report === null}
-          <option value="">Not detected yet</option>
+          <option value="">Compatibility status unavailable</option>
         {:else}
-          <option value="auto">Auto (detect)</option>
-          <option value="on">Force on</option>
-          <option value="off">Force off</option>
+          {#each COMPAT_MODES as mode (mode.value)}
+            <option value={mode.value}>{mode.label}</option>
+          {/each}
         {/if}
       </select>
     </label>
     {#if compatState.report}
-      <p style="margin:0; font-size:11px; color:var(--text-muted);">{compatState.report.reason}</p>
+      <p class="compat-reason" style="margin:0; font-size:11px; color:var(--text-muted);">
+        {compatState.report.reason}
+      </p>
       <p style="margin:0; font-size:11px; color:var(--text-muted);">{compatContext}</p>
     {/if}
     {#if compatError}
-      <p style="margin:0; font-size:11px; color:var(--danger);">{compatError}</p>
+      <p role="alert" style="margin:0; font-size:11px; color:var(--danger);">{compatError}</p>
     {/if}
     {#if compatState.pendingRestart}
-      <p style="margin:0; font-size:11px; color:var(--text-muted);">Restart usdbee to apply</p>
+      <p style="margin:0; font-size:11px; color:var(--text-muted);">
+        Restart usdbee to apply: {storedModeLabel}
+      </p>
     {/if}
   </div>
 </div>

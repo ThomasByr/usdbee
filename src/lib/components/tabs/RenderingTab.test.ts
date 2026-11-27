@@ -88,6 +88,7 @@ beforeEach(() => {
     command === "compat_status" ? REPORT : undefined,
   );
   compatState.report = null;
+  compatState.storedMode = null;
   compatState.dismissed = false;
   compatState.pendingRestart = false;
 });
@@ -183,20 +184,38 @@ describe("RenderingTab compatibility group", () => {
     expect(select.value).toBe("auto");
   });
 
-  it("shows the reason string", async () => {
+  it("shows the reason string verbatim", async () => {
     await renderCompat({ cameras: CAMERAS });
 
-    expect(document.body.textContent).toContain(REPORT.reason);
+    expect(document.querySelector(".compat-reason")?.textContent).toBe(REPORT.reason);
   });
 
-  it("shows restart-to-apply only when pending", async () => {
+  it("selects the stored mode, not only the first option", async () => {
+    mockedInvoke.mockImplementation(async (command: string) =>
+      command === "compat_status" ? { ...REPORT, mode: "off" } : undefined,
+    );
+    const select = await renderCompat({ cameras: CAMERAS });
+
+    expect(select.value).toBe("off");
+  });
+
+  it("shows restart-to-apply only when pending, naming the stored mode", async () => {
     await renderCompat({ cameras: CAMERAS });
     expect(document.body.textContent).not.toContain("Restart usdbee to apply");
     unmount(instance!);
 
     compatState.pendingRestart = true;
     await renderCompat({ cameras: CAMERAS });
-    expect(document.body.textContent).toContain("Restart usdbee to apply");
+    expect(document.body.textContent).toContain("Restart usdbee to apply: Auto (detect)");
+  });
+
+  it("names the mode a save stored in the restart hint", async () => {
+    const select = await renderCompat({ cameras: CAMERAS });
+
+    await choose(select, "off");
+
+    expect(select.value).toBe("off");
+    expect(document.body.textContent).toContain("Restart usdbee to apply: Force off");
   });
 
   it("selecting a mode forwards it to the backend", async () => {
@@ -207,7 +226,7 @@ describe("RenderingTab compatibility group", () => {
     expect(mockedInvoke).toHaveBeenCalledWith("set_compat_pref", { mode: "off" });
   });
 
-  it("shows a rejected mode and keeps the running one selected", async () => {
+  it("announces a rejected mode and keeps the stored one selected", async () => {
     mockedInvoke.mockImplementation(async (command: string) => {
       if (command === "compat_status") return REPORT;
       throw "cannot resolve the config directory";
@@ -216,7 +235,7 @@ describe("RenderingTab compatibility group", () => {
 
     await choose(select, "off");
 
-    expect(document.body.textContent).toContain("cannot resolve the config directory");
+    expect(document.querySelector("[role='alert']")?.textContent).toBe("cannot resolve the config directory");
     expect(select.value).toBe("auto");
   });
 
@@ -226,7 +245,7 @@ describe("RenderingTab compatibility group", () => {
     await tick();
     await tick();
 
-    expect(document.body.textContent).toContain("Not detected yet");
+    expect(document.body.textContent).toContain("Compatibility status unavailable");
     // No report means no mode: the select has nothing to show.
     const select = document.querySelector("select[disabled]") as HTMLSelectElement;
     expect(select.value).toBe("");

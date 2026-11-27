@@ -20,6 +20,9 @@ export interface CompatReport {
 
 export const compatState = $state({
   report: null as CompatReport | null,
+  // What the config file holds: the mode the next launch applies. Equal to the
+  // report right after a load, and different from it after a save.
+  storedMode: null as CompatMode | null,
   dismissed: false,
   pendingRestart: false,
 });
@@ -29,24 +32,23 @@ export const compatState = $state({
 export async function loadCompatReport(): Promise<void> {
   try {
     compatState.report = await invoke<CompatReport>("compat_status");
+    // Only seed an unknown mode: a remount after a save must not replace what
+    // the file now holds with the mode the running process started with.
+    compatState.storedMode ??= compatState.report.mode;
   } catch {
     compatState.report = null;
   }
 }
 
-// The last mode the backend accepted, or null while nothing is stored yet.
-let lastAcceptedMode: CompatMode | null = null;
-
 export async function setCompatMode(mode: CompatMode): Promise<string | null> {
   try {
     await invoke("set_compat_pref", { mode });
   } catch (error) {
-    // The file never received this mode, so the hint must describe the last
-    // mode it did receive. No accepted save means no hint at all.
-    compatState.pendingRestart = lastAcceptedMode !== null && lastAcceptedMode !== compatState.report?.mode;
+    // The file never received this mode, so the stored mode and the hint stay
+    // as they were.
     return String(error);
   }
-  lastAcceptedMode = mode;
+  compatState.storedMode = mode;
   // The hint follows the stored mode, not the report: the process keeps what
   // it started with until the next launch.
   compatState.pendingRestart = mode !== compatState.report?.mode;
