@@ -34,12 +34,19 @@ export async function loadCompatReport(): Promise<void> {
   }
 }
 
+// The last mode the backend accepted, or null while nothing is stored yet.
+let lastAcceptedMode: CompatMode | null = null;
+
 export async function setCompatMode(mode: CompatMode): Promise<string | null> {
   try {
     await invoke("set_compat_pref", { mode });
   } catch (error) {
+    // The file never received this mode, so the hint must describe the last
+    // mode it did receive. No accepted save means no hint at all.
+    compatState.pendingRestart = lastAcceptedMode !== null && lastAcceptedMode !== compatState.report?.mode;
     return String(error);
   }
+  lastAcceptedMode = mode;
   // The hint follows the stored mode, not the report: the process keeps what
   // it started with until the next launch.
   compatState.pendingRestart = mode !== compatState.report?.mode;
