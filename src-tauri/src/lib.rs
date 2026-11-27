@@ -119,6 +119,8 @@ fn build_system_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Must run before Tauri starts: the web process reads the variable at spawn.
+    webkit_compat::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if cli::wants_help(&args) {
         println!("{}", cli::USAGE);
@@ -265,7 +267,9 @@ pub fn run() {
             frontend_ready,
             app_info::app_build_info,
             updater_prefs::get_update_auto_check,
-            updater_prefs::set_update_auto_check
+            updater_prefs::set_update_auto_check,
+            webkit_compat::compat_status,
+            webkit_compat::set_compat_pref
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
