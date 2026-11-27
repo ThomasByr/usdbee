@@ -84,6 +84,15 @@ describe("CompatNotice", () => {
     expect(bar.textContent).toContain(report.reason);
   });
 
+  it("does not repeat a prefix the backend reason already carries", () => {
+    compatState.report = { ...report, reason: "Hardware compositing is off: leaks GPU fences." };
+    render();
+
+    const reason = host.querySelector(".compat-reason")!;
+    expect(reason.textContent!.trim()).toBe("Hardware compositing is off: leaks GPU fences.");
+    expect(reason.textContent!.match(/Hardware compositing is off:/g)!.length).toBe(1);
+  });
+
   it("dismisses on the close button", () => {
     compatState.report = report;
     render();

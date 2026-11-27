@@ -3,11 +3,8 @@
 
   let { onOpenSettings }: { onOpenSettings?: () => void } = $props();
 
-  const reasonText = $derived(
-    compatState.report?.reason
-      ? `Hardware compositing is off: ${compatState.report.reason}`
-      : "Hardware compositing is off.",
-  );
+  // The backend reason already starts with "Hardware compositing is off:".
+  const reasonText = $derived(compatState.report?.reason || "Hardware compositing is off.");
 </script>
 
 <!-- No timer: the camera notice is transient, this one is sticky, and the

@@ -23,8 +23,12 @@
     top: 62px;
     transform: translateX(-50%);
     z-index: 20;
-    /* Kept to one line so it cannot wrap into the compat notice below it. */
+    /* Kept to one line so it cannot wrap into the compat notice below it: the
+       compat bar's 104px top assumes this card is one line tall. */
     max-width: min(60ch, 90%);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     pointer-events: none;
     padding: 6px 14px;
     border-radius: 6px;
